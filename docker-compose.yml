@@ -1,0 +1,21 @@
+services:
+  panrouter-go:
+    build: .
+    container_name: panrouter-go
+    ports:
+      - "20130:20130"
+    volumes:
+      - panrouter-data:/data
+    environment:
+      - PORT=20130
+      - DATA_DIR=/data
+      # Token saver toggles (all default off except RTK):
+      # - RTK_ENABLED=true
+      # - CAVEMAN_ENABLED=false
+      # - PONYTAIL_ENABLED=false
+      # Or use DB_PATH for custom SQLite location:
+      # - DB_PATH=/data/custom/data.sqlite
+    restart: unless-stopped
+
+volumes:
+  panrouter-data:
