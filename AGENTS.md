@@ -1,51 +1,166 @@
-# panrouter-go — Team Engineering & AI Collaboration Guidelines
+# PanRouter-Go — Team Engineering & AI Collaboration Guidelines
 
-This repository (`panrouter-go`) is the high-performance, native Golang implementation and companion of [**decolua/panrouter**](https://github.com/decolua/9router).
+This repository (`PanRouter-Go`) is the high-performance, native Go implementation
+of [**PanRouter**](https://github.com/jhopan/PanRouter). It started life as a
+cleaned fork of [9router-go](https://github.com/luqman-v1/9router-go) by
+Luqmanul Hakim, which is itself a Go port of
+[9router](https://github.com/decolua/9router) by decolua and contributors. Both
+are MIT and both keep their copyright notice in `LICENSE`.
+
+---
+
+## 0. Lineage, Credit & The One Rule
+
+### Lineage
+
+This repository is a cleaned fork of two MIT projects. **Both copyright notices
+stay in `LICENSE` — never remove them.** They are the entire attribution.
+
+| Project | Author | What we took |
+|---|---|---|
+| **[9router](https://github.com/decolua/9router)** | decolua and contributors | The original router: provider registry, translators, executor design, dashboard, the whole idea |
+| **[9router-go](https://github.com/luqman-v1/9router-go)** | Luqmanul Hakim | The Go port this repository started from — the proxy engine, the embedded Svelte dashboard, the benchmarks |
+
+The git history of 9router-go was intentionally dropped when this repo was
+created. The code is carried forward; the history is not. Attribution lives in
+`LICENSE`, `README.md` and here.
+
+### The One Rule
+
+> **PanRouter (Node) is the behaviour reference. This repo reproduces it.**
+
+```
+PanRouter (JS, Node)        <- source of truth: behaviour, headers, error handling
+      |
+      |  port the change, by hand
+      v
+PanRouter-Go (Go, binary)   <- reproduction: same behaviour, ~6x less RAM
+```
+
+- **A bug fixed in PanRouter is not fixed here** until it is ported. The two code
+  bases drift silently; assume nothing.
+- **A provider that changed its wire format** is updated in PanRouter first —
+  that is where the MITM capture and the live test live — then mirrored here.
+- **Never invent behaviour here.** If PanRouter does X and this repo does Y, that
+  is a bug in this repo, even if Y looks better. Fix PanRouter first, then port.
+- **When porting, port the comment too.** PanRouter's comments explain *why* a
+  header exists, why an error is classified a certain way, why a lock lasts a
+  certain time. That reasoning is the valuable part; the code is the easy half.
 
 ---
 
 ## 1. Upstream Source of Truth & Local Reference
 
-Whenever you implement features, fix bugs, add providers, update routing logic, or verify API parity, **always treat the upstream project as the behavioral specification**.
+When implementing features, fixing bugs, adding providers, updating routing
+logic, or verifying API parity, treat **PanRouter** as the behavioural
+specification — 9router remains the architectural ancestor.
 
-- **Upstream Repository**: `https://github.com/decolua/9router`
-- **Local Clone Path**: `/Users/luqmannul.hakim/htdocs/panrouter`
+| Role | Repository | Local path |
+|---|---|---|
+| **Behaviour reference (primary)** | `https://github.com/jhopan/PanRouter` | `C:/Users/ACER/Documents/Project/Panrouter` |
+| Architectural ancestor | `https://github.com/decolua/9router` | — (upstream of both) |
+| Origin of this Go port | `https://github.com/luqman-v1/9router-go` | — (history dropped here) |
 
 ### Parity Protocol
-1. **Always Inspect Local Upstream First**:
-   - Before writing or modifying logic, inspect the corresponding code in `/Users/luqmannul.hakim/htdocs/panrouter`.
-   - Check upstream git history, PRs, issues, and vitest unit tests in `/Users/luqmannul.hakim/htdocs/panrouter/tests/` to understand edge cases, headers, and protocol nuances.
-2. **Behavioral Compatibility (100% Contract Match)**:
-   - Request and response schemas for `/v1/*` (Chat Completions, Messages, Embeddings, Audio, Models).
-   - Dashboard endpoints `/api/*` (Connections, Combos, ProxyPools, Settings, ProviderNodes, Usage, Auth).
-   - Combo expansion, model fallback, account rotation, and strike-breaker quota handling.
+
+1. **Inspect PanRouter first.** Before writing or modifying logic, read the
+   corresponding file in the PanRouter clone. Its `tests/unit/` holds the
+   regression cases that encode *why* each behaviour exists.
+2. **Behavioural compatibility (100% contract match)**:
+   - `/v1/*` request/response schemas (Chat Completions, Messages, Embeddings,
+     Audio, Models).
+   - Dashboard `/api/*` endpoints (Connections, Combos, ProxyPools, Settings,
+     ProviderNodes, Usage, Auth).
+   - Combo expansion, model fallback, account rotation, strike-breaker quota.
    - SQLite database compatibility (`~/.panrouter/db/data.sqlite`).
-3. **Changelog Tracking**:
-   - When porting features or fixes, reference the upstream commit/issue/PR in
-     your `.changes/<pr-number>-<slug>.md` fragment (e.g. `upstream
-     decolua/panrouter#4197 parity`). **Never write it into `CHANGELOG.md`** — see
-     §7.6 for the rule and the reason behind it.
+3. **Changelog tracking.** When porting, reference the PanRouter commit or the
+   9router issue in your `.changes/<pr-number>-<slug>.md` fragment. Never write
+   it into `CHANGELOG.md` — see §7.6 for the rule and the reason.
 
-### Secondary Reference: OmniRoute (source of many feature requests)
+### Drift that must be ported first
 
-Some feature issues in this repo are not parity requests against `decolua/panrouter` — they are **port requests sourced from OmniRoute**, cited by a file path inside that repo (e.g. issue #38 cites `src/lib/usage/codexResetCredits.ts`).
+These are fixed in PanRouter and **not yet** here. They are why accounts were
+being banned, so they outrank any feature work.
 
-- **Reference Repository**: `https://github.com/diegosouzapw/OmniRoute` — TypeScript/Next.js, MIT, a *sibling* gateway project (not this repo's upstream). It vendors its own `open-sse/` tree under the `@omniroute/open-sse` package alias, so its provider/executor layout is recognizable but **not** the same as `decolua/panrouter`'s.
-- **When an issue cites OmniRoute**, treat the cited file as the *feature specification*. Do not guess its contents and do not port from memory.
+**1. CodeBuddy CLI identity is stale.** `internal/proxy/executor/codebuddy.go`
+says `cliVersion = "2.108.1"`, `codebuddy_identity.go` says `"2.133.1"`.
+PanRouter is on **2.178.0**, which sends `Accept: application/json`,
+`Content-Encoding: gzip` on the request body, `X-User-Id` from the token's `sub`
+claim, Stainless SDK `7.39.0`, Node `v26.7.0`, and **no** `X-App`,
+`X-Product-Version` or `X-Stainless-Helper-Method` — the official CLI never sends
+those, and sending them is itself a signal. Port the whole identity, not just the
+version string.
+
+**2. A rate limit must stop the rotation, not walk the pool.**
+`internal/handlers/chat/fallback.go` appends the account to `excludeIDs` and
+continues. PanRouter: a 429 on CodeBuddy Intl gets **zero retries**, the account
+is locked until the provider's own reset **plus ten minutes**, and the rotation
+**stops**. 29 requests in two seconds across 29 accounts is the automation
+signature that produced `11140 request illegal` and 30-day bans.
+
+**3. The reset timestamp carries its own offset, plus a margin.**
+`"your usage will reset at 2026-11-02 10:05:00 UTC+8"` becomes a lock until
+`10:15 WITA`. The offset comes from the body — the server runs WIB (UTC+7), the
+account is on WITA (UTC+8), and 10:05 UTC+8 is 02:05 UTC either way. Building the
+epoch from the server's local zone shifts the lock by an hour. The ten-minute
+margin exists because the request in flight, the clock skew, and the moment the
+counter rolls over are not the same instant.
+
+**4. Stream watchdog: two budgets, not one.** PanRouter separates the
+**first-chunk** budget (slow prefill on a 120k-token context) from the
+**inter-chunk** budget (silence once tokens flow). One budget for both aborted
+healthy MiniMax turns. MiniMax carries `stallTimeoutMs: 15m` and
+`firstChunkTimeoutMs: 10m`. The abort message names the phase and carries the
+numbers; the error carries `code: "STREAM_STALL"`.
+
+**5. Auto-ping must be off unless switched on.** PanRouter uses
+`CODEBUDDY_AUTOPING_ENABLED === "1"` — an env var that has to be SET, not one
+that has to be unset. The daily chat burst is what got the accounts flagged.
+
+### Secondary reference: OmniRoute
+
+Some feature issues here are **port requests sourced from OmniRoute**, cited by a
+file path in that repo.
+
+- **Reference Repository**: `https://github.com/diegosouzapw/OmniRoute` —
+  TypeScript/Next.js, MIT, a *sibling* gateway (not this repo's upstream). It
+  vendors its own `open-sse/` tree under the `@omniroute/open-sse` alias, so its
+  layout is recognizable but **not** the same as ours.
+- **When an issue cites OmniRoute**, treat the cited file as the *feature
+  specification*. Do not guess its contents and do not port from memory.
 
 **OmniRoute Porting Protocol**
-1. **Fetch the cited file first**, from raw: `https://raw.githubusercontent.com/diegosouzapw/OmniRoute/main/<path>`. Fetch the related UI component too (dashboard modals live under its `src/app/` tree) — the port must match the dashboard *behavior*, not just the API shape.
-2. **Port the contract, not the code**: endpoints, request/response payloads, error status codes, and filter/sort rules. Never transliterate TypeScript into Go (see §4.A).
-3. **Map by responsibility** — OmniRoute `src/lib/usage/*.ts` → `internal/handlers/dashboard/` + `web/src/api/client.ts`; `open-sse/executors/` → `internal/proxy/executor/`; `src/app/` components → `web/src/`.
-4. **OmniRoute is secondary**. Where it conflicts with `decolua/panrouter`, the §1 parity rules win; record the deliberate divergence in your `.changes/` fragment (§7.6), never in `CHANGELOG.md`.
-5. **Provider IDs are not portable verbatim.** OmniRoute has its own catalog. Map to `panrouter-go` provider IDs and obey §3 (strict provider isolation — no cross-provider aliasing or model hijacking).
-6. **Preserve upstream error semantics.** OmniRoute surfaces typed error classes with explicit status codes (e.g. `409 no_credit`); port that distinction rather than collapsing every upstream failure into one generic error.
+
+1. **Fetch the cited file first**, from raw:
+   `https://raw.githubusercontent.com/diegosouzapw/OmniRoute/main/<path>`. Fetch
+   the related UI component too — the port must match dashboard *behaviour*, not
+   just the API shape.
+2. **Port the contract, not the code**: endpoints, payloads, status codes,
+   filter/sort rules. Never transliterate TypeScript into Go (see §4.A).
+3. **Map by responsibility** — OmniRoute `src/lib/usage/*.ts` →
+   `internal/handlers/dashboard/` + `web/src/api/client.ts`;
+   `open-sse/executors/` → `internal/proxy/executor/`; `src/app/` components →
+   `web/src/`.
+4. **OmniRoute is secondary.** Where it conflicts with PanRouter, §0 and §1 win;
+   record the deliberate divergence in your `.changes/` fragment (§7.6).
+
+### What NOT to port
+
+| PanRouter feature | Why not |
+|---|---|
+| MITM interception | Not used in this deployment |
+| Tunnel (Cloudflare / Tailscale) | Not used in this deployment |
+| Next.js dashboard | Replaced by the embedded Svelte app |
+| `better-sqlite3` | Go uses `modernc.org/sqlite` (pure Go, CGO-free) |
+
+The operator said so explicitly. If they are needed later, they are added
+deliberately, not by copying.
 
 ---
 
 ## 2. Architecture & Codebase Mapping
 
-| Upstream Path (`/Users/luqmannul.hakim/htdocs/panrouter`) | panrouter-go Path | Description & Role |
+| Upstream Path (`C:/Users/ACER/Documents/Project/Panrouter`) | PanRouter-Go Path | Description & Role |
 | :--- | :--- | :--- |
 | `open-sse/translator/` | `internal/translator/` | Protocol format converters (OpenAI ↔ Claude Messages ↔ Gemini ↔ Antigravity). |
 | `open-sse/executors/` | `internal/proxy/executor/`, `internal/proxy/` | Upstream provider callers, SSE stream adapters, tool ID repair, cloaking. |
@@ -484,9 +599,9 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
 1. **Investigate Upstream**:
    ```bash
    # Check recent upstream commits, tags, or file changes
-   git -C /Users/luqmannul.hakim/htdocs/panrouter log -n 5 --oneline
+   git -C C:/Users/ACER/Documents/Project/Panrouter log -n 5 --oneline
    # Inspect specific upstream file or test
-   cat /Users/luqmannul.hakim/htdocs/panrouter/open-sse/...
+   cat C:/Users/ACER/Documents/Project/Panrouter/open-sse/...
    ```
 2. **Locate Equivalent Component**:
    - Backend: Use the **Architecture & Codebase Mapping** table in Section 2 (`internal/...`).
@@ -674,3 +789,27 @@ make changelog-merge TAG=v1.9.11
 rtk git status
 rtk git diff
 ```
+
+---
+
+## 9. Never
+
+- **Never remove the copyright notice** in `LICENSE`. It is the entire
+  attribution for two MIT projects — 9router (decolua and contributors) and
+  9router-go (Luqmanul Hakim). Removing it is a licence violation, not a
+  cleanup.
+- **Never port a change here before it is settled in PanRouter.** This repo
+  reproduces; it does not decide. If a fix looks obvious, land it in PanRouter
+  first, then mirror it.
+- **Never touch a remote server without an explicit, absolute instruction for
+  that exact change.** "Coba cek", "jelaskan" and a pasted log are not permission
+  to SSH in and change something. Read-only inspection (logs, DB queries, DNS/TLS
+  probes) is fine; writing, restarting, killing, reinstalling, editing `/etc`,
+  patching the DB or touching the service manager is not.
+- **Never fold a deployment into a release.** A release ends at the GitHub tag.
+  Installing it on a box is a separate, explicit instruction.
+- **Never add MITM or tunnel back by copying.** They are out of scope here by the
+  operator's decision (see §1, "What NOT to port"). If they are ever needed, they
+  are designed deliberately.
+- **Never let a rate limit walk the pool.** See §1 drift item 2 — that pattern is
+  what bans accounts. One limit, one stop.
