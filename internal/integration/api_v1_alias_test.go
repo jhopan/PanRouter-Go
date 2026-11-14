@@ -4,6 +4,7 @@ package integration
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,32 @@ func TestV1APIv1AliasReachesTheSameEngineHandler(t *testing.T) {
 	}
 	if got := upstream.Count(); got != 2 {
 		t.Errorf("the refused request reached the provider: upstream count %d, want 2", got)
+	}
+}
+
+// TestV1BetaGeminiSurface proves the Gemini-compatible surface answers on the
+// real stack. The SDK is pointed at the gateway's base URL and appends
+// /v1beta/models itself, so a missing route is indistinguishable to it from a
+// gateway with no models at all. The handlers existed for a while without being
+// registered anywhere, which is exactly the failure this test would have caught.
+func TestV1BetaGeminiSurface(t *testing.T) {
+	env, _ := newProviderEnv(t)
+
+	for _, path := range []string{"/v1beta/models", "/api/v1beta/models"} {
+		res := env.Get(t, path)
+		if res.Status != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200 (body: %s)", path, res.Status, truncate(res.Body))
+		}
+		if !strings.Contains(string(res.Body), `"models"`) {
+			t.Errorf("GET %s body has no models key: %s", path, truncate(res.Body))
+		}
+	}
+
+	// The action route is where the model is parsed out of the path; the alias
+	// must resolve the same model, not fall through to "unknown model action".
+	res := env.Post(t, "/api/v1beta/models/deepseek/deepseek-chat:generateContent",
+		`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	if res.Status == http.StatusNotFound {
+		t.Fatalf("POST /api/v1beta/models/...:generateContent = 404 (body: %s)", truncate(res.Body))
 	}
 }

@@ -67,6 +67,18 @@ func (rec *engineRouteRecorder) HandleFunc(pattern string, _ http.HandlerFunc) {
 // observed side is a chi.Walk of the router SetupServerRouter builds. A route
 // the engine adds without the alias, an alias wired to a different handler, or
 // an alias mounted outside the API-key group all fail here.
+
+// concretePath turns a chi wildcard pattern into a path a probe can request.
+// "/v1beta/models/*" is matched by the router, but a request literally for "*"
+// is not, so the probe substitutes a suffix and reads the gate's status instead
+// of the router's 404.
+func concretePath(pattern string) string {
+	if strings.HasSuffix(pattern, "/*") {
+		return strings.TrimSuffix(pattern, "*") + "gemini-2.5-flash:generateContent"
+	}
+	return pattern
+}
+
 func TestAPIv1AliasCoversEveryEngineRoute(t *testing.T) {
 	database, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -104,7 +116,7 @@ func TestAPIv1AliasCoversEveryEngineRoute(t *testing.T) {
 	posts := 0
 	for _, rt := range rec.routes {
 		bare := rt.method + " " + rt.pattern
-		alias := rt.method + " " + apiV1Prefix + rt.pattern
+		alias := rt.method + " " + apiV1Alias(rt.pattern)
 
 		bareHandler, ok := registered[bare]
 		if !ok {
@@ -113,8 +125,8 @@ func TestAPIv1AliasCoversEveryEngineRoute(t *testing.T) {
 		}
 		aliasHandler, ok := registered[alias]
 		if !ok {
-			t.Errorf("%s has no %s alias: /v1%s is served but %s%s is not registered",
-				bare, apiV1Prefix, rt.pattern, apiV1Prefix, rt.pattern)
+			t.Errorf("%s has no alias: %s is served but %s is not registered",
+				bare, rt.pattern, apiV1Alias(rt.pattern))
 			continue
 		}
 		if reflect.ValueOf(bareHandler).Pointer() != reflect.ValueOf(aliasHandler).Pointer() {
@@ -127,12 +139,12 @@ func TestAPIv1AliasCoversEveryEngineRoute(t *testing.T) {
 		// Every POST engine route answers behind the same gate at both
 		// spellings — the API-key group, never the dashboard group.
 		posts++
-		if got := probe(rt.method, rt.pattern); got != http.StatusUnauthorized {
+		if got := probe(rt.method, concretePath(rt.pattern)); got != http.StatusUnauthorized {
 			t.Errorf("POST %s with a bogus key = %d, want 401 (engine group gate)", rt.pattern, got)
 		}
-		if got := probe(rt.method, apiV1Prefix+rt.pattern); got != http.StatusUnauthorized {
-			t.Errorf("POST %s%s with a bogus key = %d, want 401 (same gate as %s)",
-				apiV1Prefix, rt.pattern, got, rt.pattern)
+		if got := probe(rt.method, apiV1Alias(rt.pattern)); got != http.StatusUnauthorized {
+			t.Errorf("POST %s with a bogus key = %d, want 401 (same gate as %s)",
+				apiV1Alias(rt.pattern), got, rt.pattern)
 		}
 	}
 	if posts == 0 {
@@ -144,7 +156,7 @@ func TestAPIv1AliasCoversEveryEngineRoute(t *testing.T) {
 	// without a twin in the surface above.
 	want := make(map[string]bool, len(rec.routes))
 	for _, rt := range rec.routes {
-		want[rt.method+" "+apiV1Prefix+rt.pattern] = true
+		want[rt.method+" "+apiV1Alias(rt.pattern)] = true
 	}
 	for key := range registered {
 		_, path, ok := strings.Cut(key, " ")

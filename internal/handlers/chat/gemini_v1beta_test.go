@@ -99,3 +99,22 @@ func TestGeminiStreamWriter_ErrorBuffering(t *testing.T) {
 		}
 	}
 }
+
+// The Gemini SDK appends /v1beta/models itself; a Node-style client reaches the
+// same endpoint through the /api/v1beta/models alias. Both must yield the same
+// action suffix, or the alias answers "unknown model action" for a request the
+// bare spelling serves.
+func TestGeminiActionSuffixAcceptsBothSpellings(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/v1beta/models/gemini-2.5-flash:generateContent", "gemini-2.5-flash:generateContent"},
+		{"/api/v1beta/models/gemini-2.5-flash:streamGenerateContent", "gemini-2.5-flash:streamGenerateContent"},
+		{"/v1beta/models/deepseek/deepseek-chat:generateContent", "deepseek/deepseek-chat:generateContent"},
+		{"/api/v1beta/models/deepseek/deepseek-chat:generateContent", "deepseek/deepseek-chat:generateContent"},
+		{"/v1beta/models", "/v1beta/models"},
+	}
+	for _, tc := range cases {
+		if got := geminiActionSuffix(tc.path); got != tc.want {
+			t.Errorf("geminiActionSuffix(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}

@@ -51,6 +51,19 @@ type routeRegistrar interface {
 // endpoint, and this port has to answer both.
 const apiV1Prefix = "/api/v1"
 
+// apiV1Alias spells one engine pattern under the dashboard-visible prefix.
+//
+// A pattern that already names its own version segment ("/v1beta/models", the
+// Gemini SDK's spelling) is absolute: its alias is "/api" + the pattern, not
+// "/api/v1" + the pattern, because "/api/v1/v1beta/models" is a path neither
+// upstream nor any client asks for. Everything else lives under /api/v1.
+func apiV1Alias(pattern string) string {
+	if strings.HasPrefix(pattern, "/v1") {
+		return "/api" + pattern
+	}
+	return apiV1Prefix + pattern
+}
+
 // apiV1Mounter registers every route it is handed twice: at the pattern as
 // written — which middleware.RequestLogger serves as /v1/<pattern>, because it
 // strips a leading /v1/ before chi matches — and under /api/v1, which that
@@ -61,32 +74,32 @@ type apiV1Mounter struct{ r routeRegistrar }
 
 func (m apiV1Mounter) Get(pattern string, h http.HandlerFunc) {
 	m.r.Get(pattern, h)
-	m.r.Get(apiV1Prefix+pattern, h)
+	m.r.Get(apiV1Alias(pattern), h)
 }
 
 func (m apiV1Mounter) Post(pattern string, h http.HandlerFunc) {
 	m.r.Post(pattern, h)
-	m.r.Post(apiV1Prefix+pattern, h)
+	m.r.Post(apiV1Alias(pattern), h)
 }
 
 func (m apiV1Mounter) Put(pattern string, h http.HandlerFunc) {
 	m.r.Put(pattern, h)
-	m.r.Put(apiV1Prefix+pattern, h)
+	m.r.Put(apiV1Alias(pattern), h)
 }
 
 func (m apiV1Mounter) Patch(pattern string, h http.HandlerFunc) {
 	m.r.Patch(pattern, h)
-	m.r.Patch(apiV1Prefix+pattern, h)
+	m.r.Patch(apiV1Alias(pattern), h)
 }
 
 func (m apiV1Mounter) Delete(pattern string, h http.HandlerFunc) {
 	m.r.Delete(pattern, h)
-	m.r.Delete(apiV1Prefix+pattern, h)
+	m.r.Delete(apiV1Alias(pattern), h)
 }
 
 func (m apiV1Mounter) HandleFunc(pattern string, h http.HandlerFunc) {
 	m.r.HandleFunc(pattern, h)
-	m.r.HandleFunc(apiV1Prefix+pattern, h)
+	m.r.HandleFunc(apiV1Alias(pattern), h)
 }
 
 // SetupRoutes mounts all domain handlers on the provided router. It returns the
@@ -236,6 +249,15 @@ func mountEngineRoutes(m routeRegistrar, chatH *chat.ChatHandler, mediaH *media.
 	// Ollama's chat lane. Upstream keeps it at src/app/api/v1/api/chat, so the
 	// alias is /api/v1/api/chat and the bare spelling /api/chat.
 	m.Post("/api/chat", chatH.HandleOllamaChat)
+
+	// Gemini's own version segment: the SDK is pointed at the gateway's base URL
+	// and appends /v1beta/models itself, so this surface cannot live under the
+	// /v1 mount and both spellings are registered explicitly (upstream:
+	// src/app/api/v1beta/models plus the /v1/:path* rewrite).
+	m.Get("/v1beta/models", chatH.HandleGeminiListModels)
+	m.Post("/v1beta/models/*", chatH.HandleGeminiGenerateContent)
+	m.Get("/api/v1beta/models", chatH.HandleGeminiListModels)
+	m.Post("/api/v1beta/models/*", chatH.HandleGeminiGenerateContent)
 
 	// Media, Audio, Video & Web Tools Domain
 	m.Post("/embeddings", mediaH.HandleEmbeddings)

@@ -104,6 +104,20 @@ func (h *ChatHandler) HandleGeminiListModels(w http.ResponseWriter, r *http.Requ
 	handlerutil.WriteJSON(w, http.StatusOK, out)
 }
 
+// geminiActionSuffix is the path tail the action parser reads: everything after
+// the last "/models/".
+//
+// The path may arrive under either spelling — /v1beta/models/... or the
+// /api/v1beta/models/... alias — so the suffix is taken from the marker rather
+// than from one hardcoded prefix. A path with no marker is returned unchanged
+// and GeminiPathAction then refuses it.
+func geminiActionSuffix(path string) string {
+	if i := strings.LastIndex(path, "/models/"); i >= 0 {
+		return path[i+len("/models/"):]
+	}
+	return path
+}
+
 // HandleGeminiGenerateContent serves the two POST actions.
 func (h *ChatHandler) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -113,7 +127,7 @@ func (h *ChatHandler) HandleGeminiGenerateContent(w http.ResponseWriter, r *http
 	}
 	defer func() { _ = r.Body.Close() }()
 
-	suffix := strings.TrimPrefix(r.URL.Path, "/v1beta/models/")
+	suffix := geminiActionSuffix(r.URL.Path)
 	model, stream, ok := GeminiPathAction(suffix)
 	if !ok {
 		handlerutil.WriteJSON(w, http.StatusNotFound, map[string]any{
