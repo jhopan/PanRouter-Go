@@ -469,7 +469,7 @@ sesi JWT `auth_token` + `dashboardGuard`.
 httpOnly, SameSite=Lax, secret dari `JWT_SECRET` atau file `DATA_DIR/jwt-secret`),
 `src/app/api/auth/{login,logout,status}/route.js`, `src/dashboardGuard.js`
 (deny-by-default `/api/*`; `/dashboard` redirect ke `/login` bila `requireLogin`
-bukan `false`; bypass `x-9r-cli-token`).
+bukan `false`; bypass `x-panrouter-cli-token`).
 
 **Yang dikerjakan**:
 - **`internal/auth/session.go` (baru)**: HS256 JWT (stdlib `crypto/hmac`) —
@@ -485,7 +485,7 @@ bukan `false`; bypass `x-9r-cli-token`).
   (`{success:true}` + cookie expired), `HandleAuthStatus`, `HandleRequireLogin`
   (plus `authenticated` di response agar SPA percaya server, bukan flag localStorage).
 - **`internal/middleware/dashboard_auth.go` (baru)**: `RequireDashboardAuth`
-  (lolos bila `requireLogin` mati, cookie valid, header `x-9r-cli-token`, atau
+  (lolos bila `requireLogin` mati, cookie valid, header `x-panrouter-cli-token`, atau
   API key aktif — bukan 401 `{error:"Unauthorized"}`) dan `RequireDashboardPage`
   (302 ke `/login`).
 - **Routing (`internal/handlers/router.go`)**: endpoint login/logout/status/
@@ -504,7 +504,7 @@ bukan `false`; bypass `x-9r-cli-token`).
 - Rate-limit login upstream (`loginLimiter`, lockout per IP) belum diport.
 - `oidcConfigured`/`samlConfigured` masih `false` (SSO OIDC/SAML belum ada jalur
   login-nya di Go); `authMode`/`ssoType` dibaca dari settings.
-- Bypass API key + `x-9r-cli-token` di gate dashboard dipertahankan (keputusan
+- Bypass API key + `x-panrouter-cli-token` di gate dashboard dipertahankan (keputusan
   sadar, paling dekat ke upstream yang menerima CLI token) — artinya remote tanpa
   keduanya tetap 401, tapi pemegang API key lokal tidak dipaksa login.
 

@@ -69,7 +69,7 @@ Mọi giá trị dưới đây đọc trực tiếp từ source. Không có drif
 | `daemon.Dir()` | `internal/daemon/daemon.go:62` | `filepath.Join(config.ResolveDataDir(), "run")` |
 | `daemonLocalURL()` | `internal/daemon/daemon.go:245` | `"http://127.0.0.1:" + port`, port từ `config.LoadConfig()`, fallback `defaultPort = 20130` (`:37`) |
 | `claim.owner()` | `internal/daemon/pidfile.go:100-111` | `pid > 0` **và** `exePath != ""` **và** `proc.Alive(pid)` **và** `proc.Executable(pid)` khớp sau `EvalSymlinks` |
-| `daemon.EnvBackground` | `internal/daemon/health.go:26` | `"9ROUTER_BACKGROUND"` |
+| `daemon.EnvBackground` | `internal/daemon/health.go:26` | `"PANROUTER_BACKGROUND"` |
 | `daemon.IsBackgroundProcess()` | `internal/daemon/health.go:34-36` | `os.Getenv(EnvBackground) == "1"` |
 | `daemon.HealthPath` | `internal/daemon/health.go:31` | `"/health"` |
 | `service.Status()` | `internal/service/service.go:138` | `func Status() (Info, bool)` — backend đầu tiên khớp trong thứ tự `:139-146` |
@@ -84,7 +84,7 @@ Mọi giá trị dưới đây đọc trực tiếp từ source. Không có drif
 | `controlTimeout` | `internal/service/control.go:17` | `10 * time.Second` |
 | `auth.CLIToken()` | `internal/auth/clitoken.go:24` | `func CLIToken() string` — `sha256(rawMachineID + "9r-cli-auth" + cliSecret).hex[:16]` |
 | `auth.ValidCLIToken()` | `internal/auth/clitoken.go:36` | so sánh constant-time |
-| `auth.CLITokenHeader` | `internal/auth/session.go:34` | `"x-9r-cli-token"` |
+| `auth.CLITokenHeader` | `internal/auth/session.go:34` | `"x-panrouter-cli-token"` |
 | `/health` | `internal/handlers/router.go:407-410` | `w.Write([]byte("{\"status\":\"ok\"}"))` ở `:409` — công khai, không danh tính |
 | `/api/version/shutdown` | `internal/handlers/router.go:493` | `r.Post("/api/version/shutdown", HandleShutdown)` |
 | Cổng auth của route shutdown | `internal/handlers/router.go:476` | `r.Use(middleware.RequireAdminAuth())` |
@@ -120,7 +120,7 @@ Bổ sung đã đọc và dùng trong tài liệu này:
 | Nhánh select shutdown | `cmd/panrouter-go/main.go:261-266` | `<-signals` và `<-shutdown.StopRequested()` cùng một `select` |
 | `fxApp.Stop` budget | `cmd/panrouter-go/main.go:276-278` | `20 * time.Second` |
 | `daemon.RegisterPID()` gate | `cmd/panrouter-go/main.go:256-259` | chỉ khi `daemon.IsBackgroundProcess()` |
-| Set `9ROUTER_BACKGROUND` | `internal/daemon/daemon.go:145` | `cmd.Env = append(os.Environ(), EnvBackground+"=1")` — **duy nhất** chỗ này |
+| Set `PANROUTER_BACKGROUND` | `internal/daemon/daemon.go:145` | `cmd.Env = append(os.Environ(), EnvBackground+"=1")` — **duy nhất** chỗ này |
 | Lệnh CLI hiện có | `cmd/panrouter-go/daemon_cmd.go:21-142` | `daemonURL`, `startDetached`, `stopDetached`, `restartDetached`, `statusDetached`, `logsDetached`, `forwardArgs` |
 | Alias lệnh con | `cmd/panrouter-go/main.go:127-148` | `start`, `stop`, `restart`, `status`, `logs` |
 | Lệnh `service` | `cmd/panrouter-go/main.go:158-193` | `install`, `uninstall`, `start`, `stop`, `restart`, `status` |
@@ -440,7 +440,7 @@ Không chuỗi nào chứa `CLIToken()`, `api-key`, hay giá trị header.
 | M4 | macOS 14+ | `launchd` integration | `service install` qua launchd, mở tray | trạng thái đọc được từ `launchctl`; không `Unknown` giả |
 | M5 | macOS 14+ | `Quit Tray` giữ gateway | như W4 | 200, cùng PID |
 | L1 | Linux (GNOME) | Icon hiện qua AppIndicator | chạy `panrouter-tray` | icon hiện trong top bar |
-| L2 | Linux (GNOME) | `systemd-user` stop không token | `service install`, `Stop Gateway` | gateway dừng; **không** có header `x-9r-cli-token` trong bất kỳ request nào (kiểm bằng `tcpdump -A -i lo port {port}`) |
+| L2 | Linux (GNOME) | `systemd-user` stop không token | `service install`, `Stop Gateway` | gateway dừng; **không** có header `x-panrouter-cli-token` trong bất kỳ request nào (kiểm bằng `tcpdump -A -i lo port {port}`) |
 | L3 | Linux | unsupervised + port lạ | chạy `python3 -m http.server {port}`, mở tray | `PortConflict`, `Stop` vắng mặt, không request nào rời tray |
 | L4 | Linux | unsupervised + gateway thật | `panrouter-go start`, mở tray, `Stop Gateway` | L1+L2 qua, drain xong, `GET /health` fail, PID đã chết |
 | L5 | Linux (KDE) | Icon hiện qua StatusNotifierItem | như L1 | icon hiện; nếu không, ghi nhận là giới hạn của DE, không phải bug |

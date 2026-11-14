@@ -126,7 +126,7 @@ To pin the notice to one topic, add its id — the number from the topic URL, or
 the last component of `t.me/c/<chat>/<topic>`:
 
 ```bash
-echo 1234 | gh secret set TELEGRAM_TOPIC_ID --repo luqman-v1/panrouter-go
+echo 1234 | gh secret set TELEGRAM_TOPIC_ID --repo jhopan/PanRouter-Go
 ```
 
 The script omits the field entirely when the variable is unset, so leaving it

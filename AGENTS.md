@@ -2,7 +2,7 @@
 
 This repository (`PanRouter-Go`) is the high-performance, native Go implementation
 of [**PanRouter**](https://github.com/jhopan/PanRouter). It started life as a
-cleaned fork of [9router-go](https://github.com/luqman-v1/9router-go) by
+cleaned fork of [panrouter-go](https://github.com/jhopan/PanRouter-Go) by
 Luqmanul Hakim, which is itself a Go port of
 [9router](https://github.com/decolua/9router) by decolua and contributors. Both
 are MIT and both keep their copyright notice in `LICENSE`.
@@ -53,7 +53,7 @@ PanRouter-Go (Go, binary)   <- reproduction: same behaviour, ~6x less RAM
 
 When implementing features, fixing bugs, adding providers, updating routing
 logic, or verifying API parity, treat **PanRouter** as the behavioural
-specification — 9router remains the architectural ancestor.
+specification — panrouter remains the architectural ancestor.
 
 | Role | Repository | Local path |
 |---|---|---|
@@ -74,48 +74,60 @@ specification — 9router remains the architectural ancestor.
    - Combo expansion, model fallback, account rotation, strike-breaker quota.
    - SQLite database compatibility (`~/.panrouter/db/data.sqlite`).
 3. **Changelog tracking.** When porting, reference the PanRouter commit or the
-   9router issue in your `.changes/<pr-number>-<slug>.md` fragment. Never write
+   panrouter issue in your `.changes/<pr-number>-<slug>.md` fragment. Never write
    it into `CHANGELOG.md` — see §7.6 for the rule and the reason.
 
-### Drift that must be ported first
+### Drift that had to be ported first — all five are ported
 
-These are fixed in PanRouter and **not yet** here. They are why accounts were
-being banned, so they outrank any feature work.
+These were fixed in PanRouter and **not yet** here, and they are why accounts were
+being banned, so they outranked any feature work. All five are ported now. The
+reasoning stays beside each one: it is what a future change must not undo.
 
-**1. CodeBuddy CLI identity is stale.** `internal/proxy/executor/codebuddy.go`
-says `cliVersion = "2.108.1"`, `codebuddy_identity.go` says `"2.133.1"`.
-PanRouter is on **2.178.0**, which sends `Accept: application/json`,
-`Content-Encoding: gzip` on the request body, `X-User-Id` from the token's `sub`
-claim, Stainless SDK `7.39.0`, Node `v26.7.0`, and **no** `X-App`,
-`X-Product-Version` or `X-Stainless-Helper-Method` — the official CLI never sends
-those, and sending them is itself a signal. Port the whole identity, not just the
-version string.
+**1. CodeBuddy CLI identity is 2.178.0, one constant for both lanes.**
+`providers.CodeBuddyCLIVersion` (`internal/providers/codebuddy_identity.go`) is
+the single source of truth; the executor sends `Accept: application/json`,
+`Content-Encoding: gzip` over a gzipped body, `X-User-Id` from the token's `sub`
+claim, Stainless SDK `7.39.0`, Node `v26.7.0`, `X-Agent-Type: main` /
+`X-Agent-Runtime: other`, and **no** `X-App`, `X-Product-Version` or
+`X-Stainless-Helper-Method` — the official CLI never sends those, and sending them
+is itself a signal. Pinned by `internal/proxy/executor/codebuddy_cli_identity_test.go`.
 
-**2. A rate limit must stop the rotation, not walk the pool.**
-`internal/handlers/chat/fallback.go` appends the account to `excludeIDs` and
-continues. PanRouter: a 429 on CodeBuddy Intl gets **zero retries**, the account
-is locked until the provider's own reset **plus ten minutes**, and the rotation
-**stops**. 29 requests in two seconds across 29 accounts is the automation
-signature that produced `11140 request illegal` and 30-day bans.
+**2. A rate limit stops the rotation; it does not walk the pool.**
+A 429 on CodeBuddy Intl gets **zero retries**, the account is locked until the
+provider's own reset **plus ten minutes**, and the rotation **stops**
+(`stopsRotationOnRateLimit`, `internal/handlers/chat/fallback.go`); every other
+provider keeps the pool walk. 29 requests in two seconds across 29 accounts is the
+automation signature that produced `11140 request illegal` and 30-day bans.
+Pinned by `TestHandleAccountFallback_CodeBuddyRateLimitStopsRotation`, which
+asserts exactly one upstream attempt.
 
 **3. The reset timestamp carries its own offset, plus a margin.**
 `"your usage will reset at 2026-11-02 10:05:00 UTC+8"` becomes a lock until
 `10:15 WITA`. The offset comes from the body — the server runs WIB (UTC+7), the
 account is on WITA (UTC+8), and 10:05 UTC+8 is 02:05 UTC either way. Building the
-epoch from the server's local zone shifts the lock by an hour. The ten-minute
-margin exists because the request in flight, the clock skew, and the moment the
-counter rolls over are not the same instant.
+epoch from the server's local zone shifts the lock by an hour, so the parser reads
+the body's `UTC±N` and never `time.Local`. The ten-minute margin exists because
+the request in flight, the clock skew, and the moment the counter rolls over are
+not the same instant. Pinned by `TestCodeBuddyResetInstant_HonoursTheBodyOffset`,
+which runs the same body under WIB, WITA and UTC and expects one instant.
 
-**4. Stream watchdog: two budgets, not one.** PanRouter separates the
-**first-chunk** budget (slow prefill on a 120k-token context) from the
-**inter-chunk** budget (silence once tokens flow). One budget for both aborted
-healthy MiniMax turns. MiniMax carries `stallTimeoutMs: 15m` and
-`firstChunkTimeoutMs: 10m`. The abort message names the phase and carries the
-numbers; the error carries `code: "STREAM_STALL"`.
+**4. Stream watchdog: two budgets, not one.** The **first-chunk** budget (slow
+prefill on a 120k-token context) is separate from the **inter-chunk** budget
+(silence once tokens flow); one budget for both aborted healthy MiniMax turns.
+MiniMax carries `stallTimeoutMs: 15m` and `firstChunkTimeoutMs: 10m`. The abort
+message names the phase and carries the numbers, and the error carries
+`code: "STREAM_STALL"` (`internal/proxy/stall_config.go`, `sse_error.go`). Pinned
+by `TestStallReaderUsesTheBudgetForItsPhase` and
+`TestStreamStallPayloadNamesPhase`.
 
-**5. Auto-ping must be off unless switched on.** PanRouter uses
-`CODEBUDDY_AUTOPING_ENABLED === "1"` — an env var that has to be SET, not one
-that has to be unset. The daily chat burst is what got the accounts flagged.
+**5. Auto-ping is off unless switched on.** `CODEBUDDY_AUTOPING_ENABLED` must be
+exactly `"1"`, and the scheduler is not even started otherwise
+(`internal/schedule/codebuddyautoping.go`) — the daily chat burst is what got the
+accounts flagged. When it is on: one ping per connection per daily cycle keyed to
+07:00 WIB, a deterministic slot per connection, a failure cooldown, and the
+immediate first tick upstream sets on start and on a settings change. Pinned by
+`TestCodeBuddyAutoPingMasterSwitch`, `TestCodeBuddyAutoPingImmediateFirstTick`,
+`TestCodeBuddyCycleBoundaryIsWIBMidnight`.
 
 ### Secondary reference: OmniRoute
 
@@ -146,15 +158,14 @@ file path in that repo.
 
 ### What NOT to port
 
-| PanRouter feature | Why not |
-|---|---|
-| MITM interception | Not used in this deployment |
-| Tunnel (Cloudflare / Tailscale) | Not used in this deployment |
-| Next.js dashboard | Replaced by the embedded Svelte app |
-| `better-sqlite3` | Go uses `modernc.org/sqlite` (pure Go, CGO-free) |
-
-The operator said so explicitly. If they are needed later, they are added
-deliberately, not by copying.
+| PanRouter feature | Status | Why |
+|---|---|---|
+| MITM interception (`src/mitm/**`, ~15 files) | **not ported** | Not used in this deployment. `internal/mitm/` exists but is **unwired** — nothing imports it; it arrived with the ancestor sync and carries no Go port of the upstream behaviour. Treat it as dead weight until someone wires it deliberately. |
+| Tunnel (Cloudflare / Tailscale) (`src/lib/tunnel/**`, `src/app/api/tunnel/**`) | **ported** | `internal/tunnel/` (manager, cloudflared, tailscale, healthcheck, pid) + `/api/tunnel/*` dashboard routes + `tunnel_test.go`. This row used to say "not ported"; the code is here and wired. |
+| Next.js dashboard (`src/app/(dashboard)/dashboard/**`) | replaced | The embedded Svelte 5 app in `web/src` is the dashboard. |
+| `better-sqlite3` (`src/lib/db/**`) | replaced | `internal/db` on `modernc.org/sqlite` (pure Go, CGO-free). |
+| `src/lib/pxpipe/**` (4 files: install/loader/service/events) | **not portable** | It `npm install`s a package and `require()`s it in-process to transform requests. A single static Go binary has no npm and no `require`; the Go-native equivalent is `internal/tokensaver` (RTK/Caveman/Ponytail) plus `internal/headroom`. The `/api/pxpipe/*` status/install routes are therefore absent by design, not by omission. |
+| MCP stdio/SSE bridge (`src/app/api/mcp/**`, `src/lib/mcp/**`) | **ported** | `internal/mcpbridge` (plugin table, one child per plugin, session UUIDs, smart text filter) + `/api/mcp/{plugin}/{sse,message}` in `internal/handlers/dashboard/mcp.go`; children are killed on server stop. A plugin whose server is itself a Node package runs as a child process — the bridge does not embed Node. |
 
 ---
 
@@ -684,7 +695,7 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
    - Set the base explicitly, and pass the repo when creating the PR so a
      mismatched default cannot silently redirect it:
      ```bash
-     gh pr create --repo luqman-v1/panrouter-go --base main --head fix/<slug> \
+     gh pr create --repo jhopan/PanRouter-Go --base main --head fix/<slug> \
        --title "..." --body "..."
      ```
    - **A file that does not exist on `main` blocks the PR, not the branch.** If
@@ -710,6 +721,33 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
      current. `GET /api/changelog` shows both, and
      `go run ./cmd/changelog-merge --tag <next> --dry-run` previews what the next
      release will contain without writing anything.
+8. **Commit and push every change — a dirty worktree has no rollback.**
+   The point is not tidiness, it is recoverability: work that exists only in the
+   working tree cannot be recovered by `git`, and one `git checkout -- <path>`,
+   `git reset --hard`, stray agent write or bad codemod deletes it permanently.
+   This repository has already been through that risk once — a full port sat as
+   ~1000 uncommitted files (624 modified, 12 renamed, 365 untracked) on `main`
+   with no remote, where a single reset would have destroyed it.
+   - **Commit before starting the next logical change**, not at the end of the
+     session. If the work is too large for one honest commit, split it by
+     area (rename, sync, per-feature port, per-route batch) and commit each.
+   - **Message says why, body says what proves it**: `type(scope): why` + the
+     tests you ran and their result. `feat(chat): stop rotation on a 429` /
+     `go test ./internal/handlers/chat -run RateLimit → ok`.
+   - **Push immediately after committing** (`git push -u origin <branch>`), so
+     the work exists somewhere other than this disk. A commit that was never
+     pushed is still one disk failure away from gone. If the repo has no remote,
+     add one before the work starts, not after it is at risk.
+   - **Rolling back a bad commit is `git revert`**, never a reset of published
+     work: the revert keeps the evidence of what happened, and a reset on a
+     shared branch breaks everyone who already pulled it.
+   - **Never commit secrets or generated state**: `.env`, tokens in
+     `version.json`, `~/.panrouter/db/*.sqlite`, `web/dist` (it is built, not
+     authored — it is embedded only after `make web-build`). Check
+     `git status` for these before every commit.
+   - **`CHANGELOG.md` still never goes into a commit** for a feature change —
+     that is the fragment rule (§7.6). Only `make changelog-merge` rewrites it,
+     and that commit is a release, not a change.
 
 ---
 
@@ -795,8 +833,8 @@ rtk git diff
 ## 9. Never
 
 - **Never remove the copyright notice** in `LICENSE`. It is the entire
-  attribution for two MIT projects — 9router (decolua and contributors) and
-  9router-go (Luqmanul Hakim). Removing it is a licence violation, not a
+  attribution for two MIT projects — panrouter (decolua and contributors) and
+  panrouter-go (Luqmanul Hakim). Removing it is a licence violation, not a
   cleanup.
 - **Never port a change here before it is settled in PanRouter.** This repo
   reproduces; it does not decide. If a fix looks obvious, land it in PanRouter
@@ -813,3 +851,8 @@ rtk git diff
   are designed deliberately.
 - **Never let a rate limit walk the pool.** See §1 drift item 2 — that pattern is
   what bans accounts. One limit, one stop.
+- **Never leave a change uncommitted and unpushed.** A working tree is not a
+  backup: `git checkout`, `git reset --hard`, a stale agent write or a bad
+  codemod deletes it with no recovery. Commit each logical change and push it
+  the same session (§7.8). A commit that was never pushed is still one disk
+  failure away from gone.

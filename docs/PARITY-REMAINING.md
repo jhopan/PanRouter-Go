@@ -169,15 +169,27 @@ menyentuh `MimoFreeChat` + jalur opencode-go lain — permukaan lebih besar tapi
 perkecil jadi clamp mimo-spesifik di `injectMimoMarker` (kecil, tapi menyimpang dari bentuk upstream).
 Perkecilnya harus membaca nama model dari body, karena `MimoFreeChat` tidak menerima model.
 
-## 2. `thinkingUnified.js` utuh
+## 2. `thinkingUnified.js` — selesai (port lengkap)
 
-Modul ini belum di-port di Go (`internal/translator/` tidak punya `applyThinking`/`applyFormat`).
-Yang sudah terpisah: `internal/providers/thinking_levels.go` (level resolver) + `thinking.display`
-di `internal/proxy/executor/claude_thinking.go`.
+Sudah di-port sebagai paket `internal/thinking/` (bukan `internal/translator/`):
+`Apply`/`ApplyJSON` (padanan `applyThinking`), `formatWriters` (padanan
+`applyFormat`, semua 17 dialek), `stripAll`, `parseSuffix`, `extractThinking`,
+`captureThinking` + `display`, clamp `none→minimal`, lantai output Gemini, dan
+budget Claude.
 
-Memblokir:
-- **clamp `max→high` mimo** (`1b72f02e`) — hidup di `applyFormat` case `"deepseek"`
-- `thinking.display` yang sekarang masih separuh jalan
+Dua klaim lama yang sudah tidak berlaku:
+
+- **clamp `max→high` mimo** — hidup di `writeDeepseek`
+  (`internal/thinking/writers_table.go`), memakai `supportedLevels` seperti
+  upstream.
+- **`thinking.display`** — intent dibaca di `format.go` dan diteruskan lewat
+  `writerCtx.display` (`TestApplyDisplay`).
+
+Sisa yang ditutup sesi ini: dialek `nous` (6 model mendeklarasikannya, tapi
+`hasWriter` punya daftar sendiri sehingga pass berhenti tanpa menulis apa pun) —
+lihat `.changes/873-nous-thinking-dialect.md`. `kiro` tetap tanpa injeksi
+system-tag: itu bagian dari translator Kiro, bukan `applyThinking`, dan
+didokumentasikan sebagai belum di-port di sana.
 
 ---
 
@@ -194,7 +206,10 @@ Memblokir:
 
 ## 4. Codex / OpenCode
 
-- Codex multi model profile (`~/.codex/*.config.toml`) + settings refresh → `grep codex-profiles` → 0
+- Codex multi model profile (`~/.codex/*.config.toml`) → ✅ **selesai**:
+  `GET/POST/DELETE /api/cli-tools/codex-profiles`
+  (`internal/handlers/media/codex_profiles.go`). Upstream tidak punya konsumen UI
+  untuk rute ini (hanya ada di CHANGELOG), jadi parity-nya di level API.
 - `responsesLite` untuk `gpt-6-sol`/`gpt-6-luna` → ✅ **selesai** (`ac103551`)
 - clamp `max→high` mimo → ikut item 2
 
@@ -202,12 +217,48 @@ Memblokir:
 
 ## 5. Dashboard
 
-- **combo limits** di-resolve via server capabilities (`#4360`) — `AggregateComboCapabilities` ada,
-  tapi tanpa resolver server-side
-- vision adapter jadi **tabel berurutan** (sekarang chip inline terpotong 3)
-- Tailwind: health wait dibatasi 20s
-- lazy-load chart
-- tray arm64 native
+Empat dari lima selesai di batch ini (`.changes/875-dashboard-parity-batch.md`):
+
+- **combo limits** (`#4360`) → ✅ resolver server-side sudah dipakai
+  (`ChatHandler.aggregateComboCapabilities` + `comboSeatLimits` di
+  `models_list.go`); yang belum adalah **referensi combo** di capacity adapter:
+  upstream `{enabled, comboName}` memperluas pool dari combo yang ditunjuk,
+  sedangkan Go hanya membaca `models` inline. Sudah di-port
+  (`adapterComboModels`) + UI selectornya.
+- **vision adapter** → ✅ chip inline (terpotong 3) diganti selector combo,
+  mengikuti `CapacityAdapterCap` upstream; `combo` diterima sebagai alias
+  `comboName` di kedua sisi.
+- **health wait 20s** → ✅ boot gate dashboard sekarang punya budget 20 detik:
+  spinner berubah jadi pesan + **Retry** (diuji dengan menahan `/api/settings`
+  25 detik), dan `checkAuth` memakai budget yang sama supaya layar
+  "Loading..." tidak bisa menggantung.
+- **lazy-load chart** → ✅ `UsageChart.svelte` pindah ke chunk sendiri
+  (`UsageChart-*.js`, 7.3 kB / 3.1 kB gzip); main bundle 1412 → 1404 kB, dan
+  chunk-nya baru diminta saat panel tren dibuka (dibuktikan lewat
+  `performance.getEntriesByType('resource')`).
+- **tray arm64 native** → **BELUM**. Butuh artefak tray di CI untuk
+  macOS/arm64 dan Linux/arm64, yang berarti build `CGO_ENABLED=1` di runner
+  masing-masing platform (`systray` memakai Cocoa / appindicator). Tidak ada
+  runner macOS di `.github/workflows/` saat ini dan tidak bisa diverifikasi dari
+  mesin Windows ini. Prasyaratnya: job macOS (arm64) + wiring rilis untuk
+  `cmd/panrouter-tray`.
+
+---
+
+## 5b. Katalog model — lima id yang dulu "BUTUH KEPUTUSAN"
+
+Semuanya diputuskan dari bukti di checkout PanRouter, bukan pilihan selera:
+
+| Id | Bukti upstream | Keputusan |
+|:---|:---|:---|
+| `cline-free/muse-spark-1.3-contributor`, `cline-free/solar-pro4`, `cline-free/longcat-2.0` | `open-sse/providers/registry/cline.js:55-59` + feed free-tier dinamis (`clinepassModels.js`) | **ditambahkan** (tiga id statis); feed dinamisnya belum di-port |
+| `dfmodel_v41` (qoder & qoder-cn) | `registry/qoder.js:46`, label "(paid)", caps `thinkingFormat: deepseek` | **ditambahkan** dengan label paid |
+| `mimo-v2.6-pro`, `mimo-v2.6-flash`, `mimo-v2.6-pro-ultraspeed` (xiaomi-mimo) | `registry/xiaomi-mimo.js:64-66`, `upstreamModelId: xiaomi/...` | **ditambahkan** |
+| `agnes-1.5-flash`, `agnes-2.0-flash` | `registry/agnes.js:28-30` — tetapi baris kita (`registry_models.go:19`) sudah memuat generasi yang lebih baru (2.5/3.0) | **tidak ditambahkan**: daftar kita superset dari snapshot upstream ini |
+| alias `codebuddy` | tidak ada diff konkret terhadap `registry/codebuddy*.js` | **tidak ada perubahan** |
+
+Pin tes: `TestRegistryModelsCarryUpstreamNewerLanes` (Go) + `TestDashboardCatalogListsEveryRoutedModel`
+(sisi web wajib ikut, dan tes itulah yang menangkapnya saat baris web belum disinkronkan).
 
 ---
 
@@ -297,3 +348,52 @@ jadi `bun install && bun run build` di `web/` dulu, kalau tidak `go build` gagal
 `pattern dist/*: no matching files found`.
 
 Hindari `git add -A` di tree utama: `.worktrees/` masih untracked dan akan ikut ter-stage.
+
+---
+
+## 7. Audit parity setelah sync panrouter-go 1.9.17-exp.2 (2026-11-14)
+
+Reference: checkout PanRouter Node di HEAD `51e4310e` (2026-11-14).
+
+**Provider: paritas penuh.** 147 provider di `open-sse/providers/registry/` semuanya
+ada di `ProviderRegistry` (Go) — termasuk 13 yang hanya ada di PanRouter lewat
+`internal/providers/panrouter_extras.go`.
+
+**Bug nyata yang ditemukan dan diperbaiki:** host lane `mimo-free` tertulis
+`api.xiaomimimimo.com` (dobel "mi") di `internal/providers/providers.go` dan
+`internal/handlers/chat/mimofree.go`. Node memakai `api.xiaomimimo.com`; host yang
+salah berarti seluruh lane itu gagal dial. Sudah diperbaiki dan dites.
+
+**Status route dashboard setelah gelombang port (2026-11-15).** Dari 178 route
+`src/app/api/**/route.js`, semuanya kini punya padanan Go kecuali yang tercantum
+di tabel "Sisa" di bawah.
+
+| Kelompok | Route Node | Status di Go |
+|---|---|---|
+| Backup/restore | `/api/backup/{config,download,run,tokens}` | **port**: `internal/handlers/dashboard/backup.go` + `internal/dbbackup`; token mirror `bk-...` di tabel `backupTokens`, `/download` publik dengan header `x-backup-token` |
+| Usage | `/api/usage/{history,logs,request-logs,chart,stats,stream,providers,request-details}` | **port**: `usage_stats.go` + `usage_logs.go` + `dashboard/usage_*.go` |
+| Usage reset | `/api/usage/{id}/{check-release,claude-reset,codex-reset-credits}` | **port**: `dashboard/usage_release.go`, `usage_claude_reset.go`, `codexquota`. Nama lama `claude-reset-credits` **dihapus** (404), SPA sudah ikut pindah |
+| Providers | `/api/providers/{test-batch,[id]/test-models,kilo/free-models}` | **port**: `dashboard/providers_test_batch.go`, `providers_test_models.go`, `providers_kilo_free.go` |
+| Models | `/api/models/{availability,detect-caps}` | **port**: `dashboard/model_availability.go`, `media/detect_caps.go` |
+| OAuth | `/api/oauth/{codex/import-token,xiaomi-mimo/*,zed/*}` | **port**: `oauth/codex_import_token.go`, `oauth/mimo_import.go`, `oauth/mimo_login.go`, `oauth/zed_import.go` |
+| Auth | `/api/auth/{oidc/*,saml/*,reset-password}` | **port**: `handlers/sso/oidc_flow.go`, `saml_flow.go`, `dashboard/reset_password.go` |
+| CLI tools | `/api/cli-tools/*-settings` (19 klien) + `all-statuses`, `hermes-*`, `codex-profiles`, `cowork-mcp-{registry,tools}` | **port**: `internal/clientconfig` (19 adapters) + `media/cli_tool_settings.go` + `dashboard/cowork_mcp.go` |
+| Init/locale/pricing/tags | `/api/init`, `/api/locale`, `/api/pricing`, `/api/tags` | **port**: `dashboard/meta.go`, `pricing.go`, `media/ollama_tags.go`. Node hanya POST `locale`; GET dijawab 405 |
+| MCP bridge | `/api/mcp/{plugin}/{sse,message}` | **port**: `internal/mcpbridge` + `dashboard/mcp.go` |
+| Health/shutdown | `/api/health`, `/api/shutdown` | **port**: alias ke handler `/health` dan `/api/version/shutdown` (satu handler, bukan salinan) |
+| Headroom | `/api/headroom/{status,extras,proxy/*,start,stop,restart}` | **port**: `media/headroom.go` |
+| Translator | `/api/translator/{load,save,send,translate,console-logs}` | **port**: `handlers/translator_playground.go` + `consolelog.go` |
+| Engine prefixes | `/v1/*` **dan** `/api/v1/*` (Node me-rewrite `/v1/:path*` → `/api/v1/:path*`) | **port**: `handlers/apiV1Mounter` di `router.go` — satu registrasi per route, dua mount: pola bare (dilayani `/v1` lewat strip `RequestLogger`) dan `/api/v1` literal, handler yang sama |
+
+**Sisa yang disengaja atau belum:**
+
+| Item | Alasan |
+|---|---|
+| `/api/pxpipe/*` (8 route) | Node-bound: `npm install` + `require()` modul pipe di dalam proses. Padanan Go-native-nya `internal/tokensaver` + `internal/headroom`. Tidak akan diport. |
+| `/__mimo_login/mimo/*` (di `src/proxy.js`) | Branch takeover browser-login di reverse proxy Node; route login/status Go sudah ada, tapi takeover halaman belum. |
+| MITM (`src/mitm/**`) | `internal/mitm/` ada tapi **tidak ter-wire** dan tidak mem-port perilaku Node. Sengaja tidak dipakai di deployment ini. |
+
+**Deviasi yang tercatat, bukan gap:** `/api/tags` mengembalikan model yang benar-benar
+bisa dirutekan (Node mengembalikan fixture dua model hardcoded); `/api/pricing`
+hanya tabel default (belum ada store override); `locale` GET menjawab 405 karena
+Node memang tidak punya GET.

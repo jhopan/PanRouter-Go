@@ -374,10 +374,10 @@ git worktree add ../panrouter-go-smart-combo -b feat/smart-combo-rules origin/ma
 cp -r web/dist ../panrouter-go-smart-combo/web/   # agar //go:embed dan lint tidak gagal
 ```
 
-PR (pull request) ditargetkan ke `luqman-v1/panrouter-go` cabang `main` (§7.7):
+PR (pull request) ditargetkan ke `jhopan/PanRouter-Go` cabang `main` (§7.7):
 
 ```bash
-gh pr create --repo luqman-v1/panrouter-go --base main --head feat/smart-combo-rules \
+gh pr create --repo jhopan/PanRouter-Go --base main --head feat/smart-combo-rules \
   --title "feat(combos): smart select combo via keyword/glob/regex rules" --body "..."
 ```
 

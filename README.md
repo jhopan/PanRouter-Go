@@ -18,9 +18,9 @@
 
 [![CI](https://github.com/jhopan/PanRouter-Go/actions/workflows/ci.yml/badge.svg)](https://github.com/jhopan/PanRouter-Go/actions/workflows/ci.yml)
 [![Release](https://github.com/jhopan/PanRouter-Go/actions/workflows/release.yml/badge.svg)](https://github.com/jhopan/PanRouter-Go/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/release/luqman-v1/panrouter-go)](https://github.com/jhopan/PanRouter-Go/releases/latest)
-[![License](https://img.shields.io/github/license/luqman-v1/panrouter-go)](https://github.com/jhopan/PanRouter-Go/blob/main/LICENSE)
-[![GitHub All Releases](https://img.shields.io/github/downloads/luqman-v1/panrouter-go/total.svg)](https://github.com/jhopan/PanRouter-Go/releases)
+[![GitHub release](https://img.shields.io/github/v/release/jhopan/PanRouter-Go)](https://github.com/jhopan/PanRouter-Go/releases/latest)
+[![License](https://img.shields.io/github/license/jhopan/PanRouter-Go)](https://github.com/jhopan/PanRouter-Go/blob/main/LICENSE)
+[![GitHub All Releases](https://img.shields.io/github/downloads/jhopan/PanRouter-Go/total.svg)](https://github.com/jhopan/PanRouter-Go/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-Join%20Group-26A5E1?logo=telegram&logoColor=white)](https://jhopan.github.io/PanRouter-Go/tg)
 
 [🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🔄 Share DB with PanRouter](#-sharing-a-database-with-panrouter) • [🌐 Upstream](https://github.com/decolua/9router)
@@ -89,12 +89,12 @@ Result: Never stop coding, minimal cost + 20-40% token savings via RTK
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/luqman-v1/panrouter-go/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.sh | bash
 ```
 
 ```powershell
 # Windows (PowerShell — installer writes to %LOCALAPPDATA% + user PATH, no admin needed)
-irm https://raw.githubusercontent.com/luqman-v1/panrouter-go/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.ps1 | iex
 ```
 
 🎉 Then start it (defaults: port `20130`, data `~/.panrouter` — no flags needed):

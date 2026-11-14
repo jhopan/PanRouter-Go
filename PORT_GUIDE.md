@@ -73,12 +73,12 @@ Concretely:
 These are fixed in PanRouter and **not yet** in this repo. They are the reason
 accounts were getting banned, so they matter more than any feature.
 
-### 1. CodeBuddy CLI identity is stale
+### 1. CodeBuddy CLI identity is stale — **ported** (`880-codebuddy-identity-2178`)
 
-| | PanRouter | This repo |
-|---|---|---|
-| `codebuddy.go` `cliVersion` | `2.178.0` | `2.108.1` |
-| `codebuddy_identity.go` `codebuddyCLIVersion` | `2.178.0` | `2.133.1` |
+| | PanRouter | This repo (before) | Now |
+|---|---|---|---|
+| `codebuddy.go` `cliVersion` | `2.178.0` | `2.108.1` | `2.178.0` |
+| `codebuddy_identity.go` `codebuddyCLIVersion` | `2.178.0` | `2.133.1` | `providers.CodeBuddyCLIVersion` (`2.178.0`) |
 
 The 2.178.0 identity sends `Accept: application/json`, `Content-Encoding: gzip`
 on the request body, `X-User-Id` from the token's `sub` claim, Stainless SDK
@@ -87,7 +87,8 @@ on the request body, `X-User-Id` from the token's `sub` claim, Stainless SDK
 them is itself a signal.
 
 Port the whole identity, not just the version string. A wrong header set is what
-the gateway flags.
+the gateway flags. Both lanes (intl and cn) now build that set from the one
+constant in `internal/providers/codebuddy_identity.go`.
 
 ### 2. A rate limit must stop the rotation, not walk the pool
 
