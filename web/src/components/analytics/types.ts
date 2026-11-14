@@ -29,6 +29,8 @@ export interface UsageItem {
   endpoint?: string
   provider?: string
   key?: string
+  avgTps?: number | null
+  avgSpeed?: number | null
 }
 
 export interface RecentRequestItem {
@@ -43,6 +45,7 @@ export interface RecentRequestItem {
   cachedTokens?: number
   completionTokens?: number
   timestamp?: string
+  loopWarning?: string
 }
 export interface ActiveRequestItem {
   model?: string
@@ -66,6 +69,14 @@ export interface FallbackAttemptItem {
   latencyMs?: number
 }
 
+export interface LoopFindingItem {
+  rule: string
+  severity: 'warning' | 'critical'
+  message: string
+  tool?: string
+  count?: number
+}
+
 export interface RequestDetailItem {
   id?: string
   status?: string
@@ -85,6 +96,8 @@ export interface RequestDetailItem {
   cacheSource?: string
   cost?: number
   error?: string
+  loopWarning?: string
+  anomalies?: LoopFindingItem[]
   attempts?: FallbackAttemptItem[]
   latency?: {
     total?: number
@@ -96,6 +109,10 @@ export interface RequestDetailItem {
     cached_tokens?: number
     cache_read_input_tokens?: number
     cache_creation_input_tokens?: number
+    // Anthropic reports the cache-write split per window; absent when the
+    // upstream does not send the cache_creation object.
+    cache_creation_5m_input_tokens?: number
+    cache_creation_1h_input_tokens?: number
     reasoning_tokens?: number
     original_input_tokens?: number
     compressed_input_tokens?: number
@@ -115,6 +132,8 @@ export interface RequestDetailItem {
 
 export interface StatsData {
   totalRequests?: number
+  totalErrors?: number
+  successRate?: number | null
   totalPromptTokens?: number
   totalCompletionTokens?: number
   totalCachedTokens?: number

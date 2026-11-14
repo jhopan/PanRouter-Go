@@ -14,7 +14,7 @@
   // changes cannot fire onerror for a src set later, which is why the previous
   // call sites hid the image instead.
 
-  import { getIconPath, getProviderGlyph } from '../connections/types'
+  import { getIconPath, getProviderGlyph, hasArtwork } from '../connections/types'
   interface Props {
     /** Provider id or alias; falls back to the glyph when absent. */
     id?: string | null
@@ -36,7 +36,9 @@
   // Keyed on the source, so switching providers re-attempts the artwork instead
   // of inheriting the previous provider's failure.
   const failed = $state(new Map<string, boolean>())
-  const showImage = $derived(!failed.get(src))
+  // A provider known to have no artwork renders the badge immediately: waiting
+  // for onerror would still spend the request this fallback exists to avoid.
+  const showImage = $derived(hasArtwork(id) && !failed.get(src))
 
   function handleError() {
     failed.set(src, true)

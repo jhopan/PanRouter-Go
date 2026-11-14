@@ -619,7 +619,7 @@
     const password = dbPassword
     try {
       const res = await fetch('/api/settings/database', {
-        headers: { ...getAuthHeaders(), 'x-9r-password': password },
+        headers: { ...getAuthHeaders(), 'x-panrouter-password': password },
       })
       if (!res.ok) {
         throw new Error(await responseErrorMessage(res, 'Failed to export database'))
@@ -672,7 +672,7 @@
         const buffer = await file.arrayBuffer()
         res = await fetch('/api/settings/database', {
           method: 'POST',
-          headers: { ...getAuthHeaders(), 'x-9r-password': password, 'Content-Type': 'application/zip' },
+          headers: { ...getAuthHeaders(), 'x-panrouter-password': password, 'Content-Type': 'application/zip' },
           body: buffer,
         })
       } else {
@@ -680,7 +680,7 @@
         const payload = JSON.parse(raw)
         res = await fetch('/api/settings/database', {
           method: 'POST',
-          headers: { ...getAuthHeaders(), 'x-9r-password': password, 'Content-Type': 'application/json' },
+          headers: { ...getAuthHeaders(), 'x-panrouter-password': password, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
       }

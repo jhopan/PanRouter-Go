@@ -15,6 +15,9 @@
   import CliToolsView from './components/CliToolsView.svelte'
   import CombosView from './components/combos/CombosView.svelte'
   import ConnectionsView from './components/connections/ConnectionsView.svelte'
+  import AddProviderFromLinkModal from './components/connections/AddProviderFromLinkModal.svelte'
+  import ImportProviderModal from './components/connections/ImportProviderModal.svelte'
+  import { parseProviderShareHash, type ProviderShareLink } from './lib/providerShare'
   import OAuthCallbackView from './components/connections/OAuthCallbackView.svelte'
   import EndpointView from './components/EndpointView.svelte'
   import LoginView from './components/LoginView.svelte'
@@ -32,6 +35,7 @@
   import UpdateModal from './components/UpdateModal.svelte'
   import type { SystemVersionInfo } from './api/client'
   import Toasts from './lib/ui/Toasts.svelte'
+  import { notifications } from './lib/notifications'
   import TerminalView from './components/TerminalView.svelte'
   import TokenSaverView from './components/TokenSaverView.svelte'
   import JailbreakView from './components/JailbreakView.svelte'
@@ -87,8 +91,19 @@
   })
 
   let isLoading = $state(true)
+  // The boot gate waits on a handful of dashboard reads with no timeout of
+  // their own, so a gateway that accepts the connection and then never answers
+  // left the spinner up forever. 20s is the budget the boot gets before the
+  // screen says so and offers a retry; the reads keep running, so a late answer
+  // still lands and the retry only speeds it up.
+  const BOOT_BUDGET_MS = 20_000
+  let bootTimedOut = $state(false)
   let isAuthChecking = $state(true)
   let isAuthenticatedState = $state(false)
+  // A share link waiting to be reviewed, and the import surface that fills it.
+  // The receiver modal is the only place a link is confirmed and written.
+  let pendingAddLinks = $state<ProviderShareLink[]>([])
+  let isImportOpen = $state(false)
   let requireLogin = $state(false)
   let isCreateComboOpen = $state(false)
   let isMobileMenuOpen = $state(false)
@@ -185,6 +200,19 @@
     }
   }
 
+  async function boot() {
+    bootTimedOut = false
+    isLoading = true
+    const timer = setTimeout(() => {
+      if (isLoading) bootTimedOut = true
+    }, BOOT_BUDGET_MS)
+    try {
+      await loadData()
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   async function checkAuth() {
     try {
       const authStatus = await api.checkRequireLogin()
@@ -209,6 +237,25 @@
 
   onMount(() => {
     applyAnimationLevel()
+    // A share link is read from the fragment on mount, and from the login stash
+    // when the redirect to /login lost it. sessionStorage, not localStorage: a
+    // pending link must not outlive the tab it was opened in.
+    const stashed = sessionStorage.getItem('panrouter_pending_add')
+    if (stashed) sessionStorage.removeItem('panrouter_pending_add')
+    const parsed = parseProviderShareHash(stashed || window.location.hash)
+    if (Array.isArray(parsed)) pendingAddLinks = parsed
+    else if (parsed) pendingAddLinks = [parsed]
+    // ?import=1 opens the paste surface directly. It is stashed for the same
+    // reason the fragment is: navigate('login', true) drops the query string, so
+    // an operator who arrives unauthenticated would otherwise land on the
+    // dashboard instead of the paste surface.
+    if (new URLSearchParams(window.location.search).get('import') === '1') {
+      sessionStorage.setItem('panrouter_pending_import', '1')
+    }
+    if (sessionStorage.getItem('panrouter_pending_import') === '1') {
+      sessionStorage.removeItem('panrouter_pending_import')
+      isImportOpen = true
+    }
     // Ctrl+K / Cmd+K opens the search palette from anywhere in the dashboard.
     // The guard on the modifier is what keeps a bare "k" from opening it while
     // the operator types in a field.
@@ -236,7 +283,7 @@
         if (activeTab === 'login') {
           navigate('endpoint', true)
         }
-        loadData()
+        boot()
       }
     })
 
@@ -325,7 +372,7 @@
     }
   })
   const pageMeta: Record<ActiveTab, { title: string; description: string }> = {
-    login: { title: 'Login', description: 'Authenticate to access panrouter-go' },
+    login: { title: 'Login', description: 'Authenticate to access PanRouter-Go' },
     endpoint: { title: 'Endpoint & Key', description: 'API endpoint and key configuration' },
     connections: { title: 'Providers & Endpoints', description: 'Manage your AI provider connections' },
     combos: { title: 'Combo & Routing', description: 'Model combos and failover strategies' },
@@ -344,7 +391,7 @@
     'media-systemone': { title: 'System One', description: 'Structured state evaluation models' },
     'media-web': { title: 'Web Fetch & Search', description: 'Configure web search and scrape tools' },
     'proxy-pools': { title: 'Proxy Pools', description: 'Manage your proxy pool configurations' },
-    skills: { title: 'Agent Skills', description: 'Copy a link and paste to your AI to use panrouter-go — no install needed' },
+    skills: { title: 'Agent Skills', description: 'Copy a link and paste to your AI to use PanRouter-Go — no install needed' },
     'console-log': { title: 'Console Log', description: 'Live server console output' },
     terminal: { title: 'Console Log', description: 'Live server console output' },
     settings: { title: 'Settings', description: 'Manage your preferences and configuration' },
@@ -387,6 +434,41 @@
 {:else}
   <div class="flex h-screen w-full overflow-hidden bg-bg text-text-main font-body transition-colors duration-300">
     <Toasts />
+    {#if isImportOpen}
+      <ImportProviderModal
+        isOpen
+        onClose={() => {
+          isImportOpen = false
+          // Drop ?import=1 so a reload does not reopen the modal.
+          if (typeof window !== 'undefined' && window.location.search.includes('import=1')) {
+            const url = new URL(window.location.href)
+            url.searchParams.delete('import')
+            window.history.replaceState({ tab: activeTab }, '', url.pathname + url.hash)
+          }
+        }}
+        onImport={(links) => {
+          isImportOpen = false
+          pendingAddLinks = links
+        }}
+      />
+    {/if}
+    {#if pendingAddLinks.length}
+      <AddProviderFromLinkModal
+        isOpen
+        links={pendingAddLinks}
+        onClose={() => (pendingAddLinks = [])}
+        onDone={(prov, added, skipped) => {
+          pendingAddLinks = []
+          boot()
+          navigate('connections', false, prov)
+          if (added > 0 || skipped > 0) {
+            notifications.success(`${added} model(s) added to ${prov}${skipped ? `, ${skipped} skipped` : ''}`)
+          } else {
+            notifications.success(`Provider ${prov} added`)
+          }
+        }}
+      />
+    {/if}
     <!-- Mobile sidebar drawer backdrop -->
     {#if isMobileMenuOpen}
       <div
@@ -476,7 +558,20 @@
           {#if isLoading}
             <div class="flex flex-col items-center justify-center h-[70vh] gap-3 text-text-muted">
               <Loader2 class="w-7 h-7 animate-spin text-brand-500" />
+              {#if bootTimedOut}
+              <span class="font-code text-xs">
+                The gateway has not answered within 20 seconds. It may still be starting, or the request may be stuck.
+              </span>
+              <button
+                type="button"
+                class="rounded-lg border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs font-medium text-text-main transition-colors hover:bg-surface-3"
+                onclick={boot}
+              >
+                Retry
+              </button>
+            {:else}
               <span class="font-code text-xs">Connecting to panrouter-go Localhost Gateway (:20130)...</span>
+            {/if}
             </div>
           {:else}
             {#if activeTab === 'endpoint'}
@@ -489,6 +584,7 @@
                 bind:selectedProviderId
                 onSelectProvider={(id) => navigate('connections', false, id)}
                 onBackToOverview={() => navigate('connections', false, null)}
+                onImport={() => (isImportOpen = true)}
               />
             {:else if activeTab === 'combos'}
               <CombosView {combos} {connections} {providerNodes} onRefresh={loadData} bind:isCreatingOpen={isCreateComboOpen} />

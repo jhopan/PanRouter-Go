@@ -140,3 +140,19 @@ function catConstToKey(name: string): string {
       return 'apikey'
   }
 }
+
+/**
+ * Reads the PanRouter-only overlay (`internal/providers/panrouter_extras.go`).
+ *
+ * That file assigns into the same tables from an init(), so the literal parser
+ * above cannot see it directly. Each assignment is re-shaped into the map form
+ * the parser walks; the other tables' assignments stay inside the body of the
+ * entry they follow and are ignored by the field matchers.
+ */
+export function parseProviderRegistryExtras(src: string): ProviderCatalogItem[] {
+  const asMap =
+    'var ProviderRegistry = map[string]ProviderMeta{\n' +
+    src.replace(/\tProviderRegistry\["([a-z0-9-]+)"\] = ProviderMeta\{/g, '\t"$1": {') +
+    '\n}'
+  return parseProviderRegistry(asMap)
+}

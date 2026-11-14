@@ -23,6 +23,7 @@
   import { copyToClipboard } from '../lib/clipboard'
   import { api, type APIKey } from '../api/client'
   import HermesToolCard from './cli-tools/HermesToolCard.svelte'
+  import CliToolConfigForm from './cli-tools/CliToolConfigForm.svelte'
 
   interface Props {
     apiKeys?: APIKey[]
@@ -51,6 +52,15 @@
   let enable1mContext = $state(false)
   // SSR fallback uses the Go default port 20130; live origin wins on mount.
   let localOrigin = $state(typeof window !== 'undefined' ? window.location.origin : 'http://localhost:20130')
+  const ADAPTER_SUPPORTED_TOOLS = new Set([
+    'claude',
+    'codex',
+    'opencode',
+    'droid',
+    'crush',
+    'kilo',
+    'cline',
+  ])
   onMount(() => {
     if (typeof window !== 'undefined') {
       localOrigin = window.location.origin
@@ -413,7 +423,7 @@
       description: 'High-performance Rust-based coding agent harness',
       configType: 'env',
       instructions: [
-        `export JCODE_9ROUTER_API_KEY="<your-api-key>"`,
+        `export JCODE_PANROUTER_API_KEY="<your-api-key>"`,
         `Configure [[providers.panrouter]] with base_url = "${localOrigin}/v1"`,
       ],
     },
@@ -459,10 +469,10 @@
       configType: 'guide',
       instructions: [
         `Add a panrouter-go provider to ~/.omp/agent/models.yml (profiles live in ~/.omp/profiles/<name>/agent/):`,
-        `providers:\n  panrouter:\n    baseUrl: ${localOrigin}/v1\n    api: openai-completions\n    authHeader: true\n    apiKey: 9ROUTER_API_KEY\n    models:\n      - id: kr/claude-sonnet-4.5\n        name: panrouter kr/claude-sonnet-4.5\n        reasoning: true\n        contextWindow: 200000\n        maxTokens: 64000`,
+        `providers:\n  panrouter:\n    baseUrl: ${localOrigin}/v1\n    api: openai-completions\n    authHeader: true\n    apiKey: PANROUTER_API_KEY\n    models:\n      - id: kr/claude-sonnet-4.5\n        name: panrouter kr/claude-sonnet-4.5\n        reasoning: true\n        contextWindow: 200000\n        maxTokens: 64000`,
         noApiKey
-          ? `No API key exists yet — open API Keys, create one, then reopen this card; 9ROUTER_API_KEY has to be set to that key before 'omp' can authenticate.`
-          : `export 9ROUTER_API_KEY="${snippetApiKey}" before starting 'omp' — the key is read from the environment first, and an unset variable is sent as its literal name.`,
+          ? `No API key exists yet — open API Keys, create one, then reopen this card; PANROUTER_API_KEY has to be set to that key before 'omp' can authenticate.`
+          : `export PANROUTER_API_KEY="${snippetApiKey}" before starting 'omp' — the key is read from the environment first, and an unset variable is sent as its literal name.`,
         `Run 'omp', then /model to select the model. 'omp models' lists everything the gateway exposes.`,
         `Use api: openai-responses instead if a model does not stream correctly over Chat Completions.`,
       ],
@@ -805,46 +815,18 @@
       <!-- Hermes has per-profile settings the generic env snippet cannot express. -->
       {#if selectedTool.id === 'hermes'}
         <HermesToolCard installed={!!statuses.hermes?.installed} {apiKeys} />
+      {:else if ADAPTER_SUPPORTED_TOOLS.has(selectedTool.id)}
+        <CliToolConfigForm
+          toolId={selectedTool.id}
+          toolName={selectedTool.name}
+          {apiKeys}
+          installed={!!statuses[selectedTool.id]?.installed}
+          hasPanRouter={!!statuses[selectedTool.id]?.hasPanRouter}
+          envVars={selectedTool.envVars}
+          instructions={selectedTool.instructions}
+          onStatusChange={loadStatuses}
+        />
       {:else}
-        <!-- Claude Code Specific Controls -->
-        {#if selectedTool.id === 'claude'}
-          <div class="p-3 rounded-xl bg-surface-2 border border-border/80 space-y-3">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <span class="text-xs font-bold text-text-main">Auto-Compact Window</span>
-                <p class="text-[11px] text-text-muted">Threshold before Claude Code auto-compacts context</p>
-              </div>
-              <div class="flex items-center gap-1 bg-surface-3 p-1 rounded-lg border border-border/60">
-                {#each ['default', '100k', '150k', '180k'] as opt}
-                  <button
-                    type="button"
-                    class="px-2 py-0.5 text-[11px] font-medium rounded-md transition-colors {autoCompactWindow === opt ? 'bg-brand-500 text-white' : 'text-text-muted hover:text-text-main'}"
-                    onclick={() => (autoCompactWindow = opt as any)}
-                  >
-                    {opt === 'default' ? 'Default' : opt}
-                  </button>
-                {/each}
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between pt-2 border-t border-border/40">
-              <div>
-                <span class="text-xs font-bold text-text-main">1M Context Window</span>
-                <p class="text-[11px] text-text-muted">Suggest [1m] suffix for compatible models</p>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  class="sr-only peer"
-                  checked={enable1mContext}
-                  onchange={(e) => (enable1mContext = e.currentTarget.checked)}
-                />
-                <div class="w-9 h-5 bg-surface-3 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-500 border border-border"></div>
-              </label>
-            </div>
-          </div>
-        {/if}
-
         <!-- Quick Copy Snippet (if env variables available) -->
         {#if selectedTool.envVars}
           <div class="space-y-2">

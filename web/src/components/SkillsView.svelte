@@ -10,8 +10,8 @@
     isEntry?: boolean
   }
 
-  const repo = 'decolua/panrouter'
-  const branch = 'master'
+  const repo = 'jhopan/PanRouter-Go'
+  const branch = 'main'
   const baseFolder = 'skills'
   const githubRepoUrl = `https://github.com/${repo}`
   const rawBaseUrl = `https://raw.githubusercontent.com/${repo}/refs/heads/${branch}/${baseFolder}`
@@ -54,6 +54,13 @@
       description: 'Transcribe audio via OpenAI Whisper, Groq, Gemini, Deepgram, AssemblyAI…',
       endpoint: '/v1/audio/transcriptions',
       icon: 'mic',
+    },
+    {
+      id: 'panrouter-video',
+      name: 'Video Generation',
+      description: 'Text-to-video via Kling, Hailuo, Runway, Luma, Pika…',
+      endpoint: '/v1/video/generations',
+      icon: 'movie',
     },
     {
       id: 'panrouter-embeddings',

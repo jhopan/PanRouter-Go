@@ -9,16 +9,24 @@ import {
   PROVIDER_CATALOG,
   __setProviderCatalogForTest,
 } from './providers'
-import { parseProviderRegistry } from './providers.registry-test'
+import { parseProviderRegistry, parseProviderRegistryExtras } from './providers.registry-test'
 import { resolve } from 'node:path'
 import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from './models'
 import { pathToTab, TAB_ROUTES } from './router'
+import { ARTWORKLESS_PROVIDERS, hasArtwork } from '../components/connections/types'
 
 // The catalog is served by the Go registry (internal/providers), so the suite
 // reads it from that file rather than a TypeScript literal. Parsing the Go map
 // keeps this honest about what the server actually sends.
 const goRegistry = resolve(import.meta.dirname, '../../../internal/providers/provider_registry.go')
-__setProviderCatalogForTest(parseProviderRegistry(readFileSync(goRegistry, 'utf8')))
+const goExtras = resolve(import.meta.dirname, '../../../internal/providers/panrouter_extras.go')
+// The PanRouter-only providers live in panrouter_extras.go (an init() overlay),
+// so the parsed catalogue has to fold that file in too or every one of them
+// reads as "not in the catalog".
+__setProviderCatalogForTest([
+  ...parseProviderRegistry(readFileSync(goRegistry, 'utf8')),
+  ...parseProviderRegistryExtras(readFileSync(goExtras, 'utf8')),
+])
 
 describe('providers & media separation', () => {
   it('correctly classifies chat vs pure media providers', () => {
@@ -202,12 +210,34 @@ describe('providers & media separation', () => {
   it('ships artwork for every provider the dashboard can render', () => {
     // getIconPath derives the URL from the catalog id, so a catalog entry
     // without an asset under web/public/providers is a 404 on every surface
-    // that draws it. Only the alias table may point at another provider's file.
+    // that draws it. Only the alias table may point at another provider's file,
+    // and only providers named in ARTWORKLESS_PROVIDERS may draw the initials
+    // badge instead — neither list exists for a provider that simply lost its
+    // image on the way in.
     const assets = new Set(readdirSync(join(import.meta.dir, '../../public/providers')))
-    const shared = new Set(['zai-search', 'zcode'])
     const missing = PROVIDER_CATALOG.filter(
-      (p) => !shared.has(p.id) && !assets.has(`${p.id}.png`) && !assets.has(`${p.id}.svg`)
+      (p) =>
+        !hasArtwork(p.id) &&
+        ARTWORKLESS_PROVIDERS[p.id] !== true &&
+        !assets.has(`${p.id}.png`) &&
+        !assets.has(`${p.id}.svg`)
     ).map((p) => p.id)
     assert.deepStrictEqual(missing, [], `providers without artwork: ${missing.join(', ')}`)
+  })
+
+  it('pins the artwork-less list to providers that exist and have no file', () => {
+    // The list is the escape hatch from the check above, so it has to stay
+    // honest in both directions: a stale id keeps a file-less provider
+    // unremarkable, and an id that later ships artwork would silently stop
+    // rendering it.
+    const assets = new Set(readdirSync(join(import.meta.dir, '../../public/providers')))
+    const stale = Object.keys(ARTWORKLESS_PROVIDERS).filter(
+      (id) => !PROVIDER_CATALOG.some((p) => p.id === id)
+    )
+    assert.deepStrictEqual(stale, [], `artwork-less ids not in the catalog: ${stale.join(', ')}`)
+    const nowHasFile = Object.keys(ARTWORKLESS_PROVIDERS).filter(
+      (id) => assets.has(`${id}.png`) || assets.has(`${id}.svg`)
+    )
+    assert.deepStrictEqual(nowHasFile, [], `artwork-less ids that ship artwork: ${nowHasFile.join(', ')}`)
   })
 })

@@ -144,7 +144,7 @@ describe('dashboard API authentication and errors', () => {
     const requests: Array<{ url: string; init?: RequestInit }> = []
     globalThis.fetch = async (input, init) => {
       requests.push({ url: String(input), init })
-      if (String(input).endsWith('/consume')) {
+      if (init?.method === 'POST') {
         return Response.json({ outcome: 'reset', selectionToken: 'c1', idempotencyKey: 'idem-1' })
       }
       return Response.json({ credits: [{ selectionToken: 'c1', title: 'Weekly reset' }], availableCount: 1 })
@@ -156,8 +156,8 @@ describe('dashboard API authentication and errors', () => {
       globalThis.fetch = originalFetch
     }
 
-    expect(requests[0]?.url).toBe('/api/usage/codex-1/reset-credits')
-    expect(requests[1]?.url).toBe('/api/usage/codex-1/reset-credits/consume')
+    expect(requests[0]?.url).toBe('/api/usage/codex-1/codex-reset-credits')
+    expect(requests[1]?.url).toBe('/api/usage/codex-1/codex-reset-credits')
     expect(requests[1]?.init?.method).toBe('POST')
     expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
       selectionToken: 'c1',
@@ -178,7 +178,7 @@ describe('dashboard API authentication and errors', () => {
       globalThis.fetch = originalFetch
     }
 
-    expect(urls[0]).toBe('/api/usage/id%20with%2Fslash/reset-credits')
+    expect(urls[0]).toBe('/api/usage/id%20with%2Fslash/codex-reset-credits')
   })
 
   it('normalizes object lastError to string message when listing connections', async () => {

@@ -2,6 +2,7 @@ import { api, getAuthHeaders, type ProviderConnection } from '../../api/client'
 import { parseCustomModelsResponse, parseDisabledModelsMap } from '../../lib/customModels'
 import { getModelCaps, getModelKind } from '../../lib/models'
 import { PROVIDER_CATALOG, PROVIDER_CATALOG_MAP, type ProviderCatalogItem } from '../../lib/providers'
+import { isBannedConnection } from '../../lib/ban'
 
 export const MEDIA_KINDS: Record<string, true> = {
   image: true,
@@ -63,6 +64,45 @@ const ICON_ALIASES: Record<string, string> = {
   'zcode': 'glm',
 }
 
+// Providers with no artwork anywhere to file under their own id.
+//
+// Neither this repo nor PanRouter (Node) ships a PNG for these: upstream draws
+// a Material icon and a `textIcon` for them, and they arrived here through
+// registry ports rather than the panrouter asset library. Listing them is what
+// keeps ProviderArtwork from requesting a file that does not exist — one 404
+// per tile on a dashboard that draws dozens — and lets the initials badge in the
+// provider's brand colour render directly.
+//
+// The list is pinned by `providers.test.ts`: a provider added to the Go registry
+// without artwork fails the suite until it either ships a PNG, takes an
+// ICON_ALIASES entry, or is named here on purpose.
+export const ARTWORKLESS_PROVIDERS: Record<string, true> = {
+  apinex: true,
+  apmix: true,
+  freeai: true,
+  'freeai-vl': true,
+  'freemodel-dev': true,
+  justdowork: true,
+  orcarouter: true,
+  vyceai: true,
+}
+
+/** hasArtwork reports whether a provider resolves to a PNG this build serves. */
+export function hasArtwork(id?: string | null): boolean {
+  const clean = id?.trim()
+  if (!clean) return false
+  if (clean.startsWith('openai-compatible')) return true
+  if (clean.startsWith('anthropic-compatible') || clean.includes('anthropic')) return true
+  const fileId =
+    ICON_ALIASES[clean] ??
+    (PROVIDER_CATALOG_MAP.has(clean) ? clean : PROVIDER_CATALOG.find((p) => p.alias === clean)?.id)
+  // No resolution at all is a custom node, which has no file either: the glyph
+  // is its icon, and asking for `/providers/<whatever-the-user-typed>.png` would
+  // 404 on every render.
+  if (!fileId) return false
+  return ARTWORKLESS_PROVIDERS[fileId] !== true
+}
+
 export function getIconPath(id?: string | null, apiType?: string): string {
   if (!id) return '/providers/oai-cc.png'
   const clean = id.trim()
@@ -115,17 +155,22 @@ export function getProviderStats(
   })
 
   const total = list.length
-  const isConnError = (c: ProviderConnection) =>
-    c.testStatus === 'error' || c.testStatus === 'failed' || (c.testStatus !== 'active' && c.testStatus !== 'passed' && !!c.lastError)
   const isConnConnected = (c: ProviderConnection) =>
     c.isActive === 1 && (c.testStatus === 'active' || c.testStatus === 'passed' || (c.testStatus !== 'error' && c.testStatus !== 'failed' && !c.lastError))
 
   const connected = list.filter(isConnConnected).length
-  const errorCount = list.filter(isConnError).length
+  const errorCount = list.filter(isConnectionError).length
   const allDisabled = total > 0 && list.every((c) => c.isActive === 0)
-  const latestError = list.find(isConnError)?.lastError
+  const latestError = list.find(isConnectionError)?.lastError
 
   return { total, connected, errorCount, allDisabled, latestError, connections: list }
+}
+
+/** A connection is an error when it has a failed/errored persisted state, but a
+ * banned connection is never an error — it belongs to the Banned tab instead. */
+export function isConnectionError(c: ProviderConnection): boolean {
+  if (isBannedConnection(c)) return false
+  return c.testStatus === 'error' || c.testStatus === 'failed' || (c.testStatus !== 'active' && c.testStatus !== 'passed' && !!c.lastError)
 }
 
 

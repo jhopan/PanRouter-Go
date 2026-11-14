@@ -1,22 +1,28 @@
 <script lang="ts">
-  import { ArrowDown, ArrowUp, Brain, Eye, Headphones, X } from 'lucide-svelte'
-  import Button from '../../lib/ui/Button.svelte'
+  // Capacity adapter: a per-capability pool that covers a request the named
+  // model cannot handle (an image sent to a text-only model, audio to a model
+  // without input support).
+  //
+  // Ported from upstream's CapacityAdapterCap
+  // (src/app/(dashboard)/dashboard/combos/page.js): the pool is a *combo
+  // reference*, not an inline list. The combo already owns the models, their
+  // order and the fallback/round-robin strategy, so duplicating those controls
+  // here meant two places to edit the same pool and two orders that could
+  // disagree. A stored row from before the combo reference still works — the
+  // server resolves `models` as the fallback — it is just edited in the combo
+  // itself now.
   import Card from '../../lib/ui/Card.svelte'
   import Toggle from '../../lib/ui/Toggle.svelte'
   import type { CapacityAdapterState } from './types'
-  import { getModelCaps } from '../../lib/models'
 
   interface Props {
     capacityAdapter: CapacityAdapterState
     onSaveAdapter: (next: CapacityAdapterState) => void
-    onOpenModelPicker: (target: 'vision' | 'audio') => void
+    /** LLM combos only: a web-search combo is not a chat pool. */
+    combos: Array<{ name: string }>
   }
 
-  let {
-    capacityAdapter,
-    onSaveAdapter,
-    onOpenModelPicker,
-  }: Props = $props()
+  let { capacityAdapter, onSaveAdapter, combos }: Props = $props()
 
   function toggleAdapter(type: 'vision' | 'audioInput', enabled: boolean) {
     onSaveAdapter({
@@ -25,31 +31,10 @@
     })
   }
 
-  function toggleAdapterRoundRobin(type: 'vision' | 'audioInput', roundRobin: boolean) {
+  function setAdapterCombo(type: 'vision' | 'audioInput', comboName: string) {
     onSaveAdapter({
       ...capacityAdapter,
-      [type]: { ...capacityAdapter[type], roundRobin },
-    })
-  }
-
-  function moveAdapterModel(type: 'vision' | 'audioInput', index: number, delta: number) {
-    const arr = [...capacityAdapter[type].models]
-    const target = index + delta
-    if (target < 0 || target >= arr.length) return
-    const temp = arr[index]
-    arr[index] = arr[target]
-    arr[target] = temp
-    onSaveAdapter({
-      ...capacityAdapter,
-      [type]: { ...capacityAdapter[type], models: arr },
-    })
-  }
-
-  function removeAdapterModel(type: 'vision' | 'audioInput', index: number) {
-    const arr = capacityAdapter[type].models.filter((_, i) => i !== index)
-    onSaveAdapter({
-      ...capacityAdapter,
-      [type]: { ...capacityAdapter[type], models: arr },
+      [type]: { ...capacityAdapter[type], comboName },
     })
   }
 </script>
@@ -59,7 +44,7 @@
     <div class="min-w-0">
       <p class="text-sm font-medium text-text-main">Vision Adapter</p>
       <p class="text-xs text-text-muted mt-0.5">
-        Your model can't read image/audio? Auto-switches to a model in the pool below.
+        Your model can't read image/audio? Auto-switches to the combo below.
       </p>
     </div>
   </div>
@@ -80,84 +65,24 @@
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5">
               <code class="font-mono text-sm font-medium text-text-main">Vision</code>
-              <span class="text-[10px] text-text-muted">— images (png, jpg, webp, …)</span>
+              <span class="text-[10px] text-text-muted">— images (png, jpg, webp, ...)</span>
             </div>
-            <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-              {#if capacityAdapter.vision.models.length === 0}
-                <span class="text-xs text-text-muted italic">No models</span>
-              {:else}
-                {#each capacityAdapter.vision.models.slice(0, 3) as model, idx}
-                  {@const vcaps = getModelCaps(model)}
-                  <code
-                    class="group/chip inline-flex items-center gap-1 rounded bg-black/5 dark:bg-white/5 px-1.5 py-0.5 font-mono text-xs text-text-muted"
-                  >
-                    <span>{model}</span>
-                    {#if vcaps.vision}
-                      <Eye class="w-3 h-3 text-blue-500 shrink-0" title="Vision — Supports image input" />
-                    {/if}
-                    {#if vcaps.reasoning}
-                      <Brain class="w-3 h-3 text-amber-500 shrink-0" title="Reasoning — Supports reasoning / thinking" />
-                    {/if}
-                    <button
-                      type="button"
-                      onclick={() => moveAdapterModel('vision', idx, -1)}
-                      disabled={idx === 0}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 {idx === 0
-                        ? 'text-text-muted/20 cursor-not-allowed'
-                        : 'text-text-muted hover:text-brand-500'} cursor-pointer"
-                      title="Move up"
-                    >
-                      <ArrowUp class="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onclick={() => moveAdapterModel('vision', idx, 1)}
-                      disabled={idx === capacityAdapter.vision.models.length - 1}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 {idx ===
-                      capacityAdapter.vision.models.length - 1
-                        ? 'text-text-muted/20 cursor-not-allowed'
-                        : 'text-text-muted hover:text-brand-500'} cursor-pointer"
-                      title="Move down"
-                    >
-                      <ArrowDown class="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onclick={() => removeAdapterModel('vision', idx)}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500 cursor-pointer"
-                      title="Remove model"
-                    >
-                      <X class="w-3 h-3" />
-                    </button>
-                  </code>
+            <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <label class="text-[10px] text-text-muted" for="vision-adapter-combo">Combo:</label>
+              <select
+                id="vision-adapter-combo"
+                value={capacityAdapter.vision.comboName}
+                onchange={(e) => setAdapterCombo('vision', e.currentTarget.value)}
+                disabled={!capacityAdapter.vision.enabled}
+                class="h-7 rounded-md border border-border-subtle bg-surface-2 px-2 text-xs text-text-main outline-none transition-colors hover:bg-surface-3 disabled:opacity-60"
+              >
+                <option value="">None</option>
+                {#each combos as combo (combo.name)}
+                  <option value={combo.name}>{combo.name}</option>
                 {/each}
-                {#if capacityAdapter.vision.models.length > 3}
-                  <span class="text-[10px] text-text-muted">+{capacityAdapter.vision.models.length - 3} more</span>
-                {/if}
-              {/if}
+              </select>
             </div>
           </div>
-        </div>
-
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
-          <label class="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none">
-            <Toggle
-              checked={capacityAdapter.vision.roundRobin}
-              disabled={!capacityAdapter.vision.enabled}
-              onChange={(v) => toggleAdapterRoundRobin('vision', v)}
-            />
-            <span>Round</span>
-          </label>
-          <Button
-            icon="add"
-            variant="ghost"
-            size="sm"
-            onclick={() => onOpenModelPicker('vision')}
-            disabled={!capacityAdapter.vision.enabled}
-            title="Add Vision model"
-          >
-            Add Model
-          </Button>
         </div>
       </div>
     </Card>
@@ -180,75 +105,22 @@
               <code class="font-mono text-sm font-medium text-text-main">Audio</code>
               <span class="text-[10px] text-text-muted">— audio input</span>
             </div>
-            <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-              {#if capacityAdapter.audioInput.models.length === 0}
-                <span class="text-xs text-text-muted italic">No models</span>
-              {:else}
-                {#each capacityAdapter.audioInput.models.slice(0, 3) as model, idx}
-                  <code
-                    class="group/chip inline-flex items-center gap-1 rounded bg-black/5 dark:bg-white/5 px-1.5 py-0.5 font-mono text-xs text-text-muted"
-                  >
-                    <span>{model}</span>
-                    <button
-                      type="button"
-                      onclick={() => moveAdapterModel('audioInput', idx, -1)}
-                      disabled={idx === 0}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 {idx === 0
-                        ? 'text-text-muted/20 cursor-not-allowed'
-                        : 'text-text-muted hover:text-brand-500'} cursor-pointer"
-                      title="Move up"
-                    >
-                      <ArrowUp class="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onclick={() => moveAdapterModel('audioInput', idx, 1)}
-                      disabled={idx === capacityAdapter.audioInput.models.length - 1}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 {idx ===
-                      capacityAdapter.audioInput.models.length - 1
-                        ? 'text-text-muted/20 cursor-not-allowed'
-                        : 'text-text-muted hover:text-brand-500'} cursor-pointer"
-                      title="Move down"
-                    >
-                      <ArrowDown class="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onclick={() => removeAdapterModel('audioInput', idx)}
-                      class="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500 cursor-pointer"
-                      title="Remove model"
-                    >
-                      <X class="w-3 h-3" />
-                    </button>
-                  </code>
+            <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <label class="text-[10px] text-text-muted" for="audio-adapter-combo">Combo:</label>
+              <select
+                id="audio-adapter-combo"
+                value={capacityAdapter.audioInput.comboName}
+                onchange={(e) => setAdapterCombo('audioInput', e.currentTarget.value)}
+                disabled={!capacityAdapter.audioInput.enabled}
+                class="h-7 rounded-md border border-border-subtle bg-surface-2 px-2 text-xs text-text-main outline-none transition-colors hover:bg-surface-3 disabled:opacity-60"
+              >
+                <option value="">None</option>
+                {#each combos as combo (combo.name)}
+                  <option value={combo.name}>{combo.name}</option>
                 {/each}
-                {#if capacityAdapter.audioInput.models.length > 3}
-                  <span class="text-[10px] text-text-muted">+{capacityAdapter.audioInput.models.length - 3} more</span>
-                {/if}
-              {/if}
+              </select>
             </div>
           </div>
-        </div>
-
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
-          <label class="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none">
-            <Toggle
-              checked={capacityAdapter.audioInput.roundRobin}
-              disabled={!capacityAdapter.audioInput.enabled}
-              onChange={(v) => toggleAdapterRoundRobin('audioInput', v)}
-            />
-            <span>Round</span>
-          </label>
-          <Button
-            icon="add"
-            variant="ghost"
-            size="sm"
-            onclick={() => onOpenModelPicker('audio')}
-            disabled={!capacityAdapter.audioInput.enabled}
-            title="Add Audio model"
-          >
-            Add Model
-          </Button>
         </div>
       </div>
     </Card>
