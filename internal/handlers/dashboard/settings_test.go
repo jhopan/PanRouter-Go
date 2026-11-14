@@ -3,6 +3,7 @@ package dashboard
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	json "encoding/json/v2"
 	"mime/multipart"
 	"net/http"
@@ -723,5 +724,58 @@ func TestHandleImportDatabase_ClientContract(t *testing.T) {
 				t.Fatalf("expected 401 for %q, got %d: %s", tc.password, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestSettingsNeverReturnTheAuditChainKey pins a secret that is easy to miss
+// because its name does not look like a credential: audit_chain_key is the HMAC
+// key the audit chain is signed with, and deriving it away from the database is
+// what stops a DB-only writer from forging a chain. Returning it to any
+// dashboard session — or to whatever logs that response — would hand the ability
+// back, so neither the read nor the write echo may carry it, while it must stay
+// stored.
+func TestSettingsNeverReturnTheAuditChainKey(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	if err := repo.UpdateSettingsRaw(map[string]any{"audit_chain_key": key}); err != nil {
+		t.Fatalf("seed audit chain key: %v", err)
+	}
+
+	assertNoKey := func(who string, body []byte) {
+		t.Helper()
+		if bytes.Contains(body, []byte("audit_chain_key")) {
+			t.Fatalf("%s returned the audit chain key: %s", who, body)
+		}
+		if strings.Contains(string(body), key) {
+			t.Fatalf("%s returned the audit chain key material", who)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings = %d: %s", rec.Code, rec.Body.String())
+	}
+	assertNoKey("GET /api/settings", rec.Body.Bytes())
+
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"requireLogin":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/settings = %d: %s", rec.Code, rec.Body.String())
+	}
+	assertNoKey("PUT /api/settings", rec.Body.Bytes())
+
+	// Stripped from the response, still stored: the chain keeps its key.
+	stored, ok := repo.AuditChainKey()
+	if !ok {
+		t.Fatal("the audit chain key was not stored")
+	}
+	if len(stored) != 32 {
+		t.Fatalf("stored audit chain key has %d bytes, want 32", len(stored))
 	}
 }

@@ -49,7 +49,16 @@ func writePlainError(w http.ResponseWriter, status int, message string) {
 
 // secretSettingKeys are stripped from responses so credentials never leave the
 // server (Next strips password + oidcClientSecret from GET /api/settings).
-var secretSettingKeys = []string{"password", "oidcClientSecret"}
+//
+// audit_chain_key belongs here for a reason that is not obvious from the name:
+// it is the HMAC key the audit chain is signed with, and the whole point of
+// deriving it away from the database is that someone who can only write rows
+// cannot forge a chain. Handing it to any authenticated dashboard session — and
+// to anything that logs a response — gives that ability back, so it is never
+// returned, only stored. The read path and the write path both go through
+// sanitizeSettings, so this one entry covers GET /api/settings and the echo that
+// PUT/PATCH answers with.
+var secretSettingKeys = []string{"password", "oidcClientSecret", "audit_chain_key"}
 
 // HandleGetSettings handles GET /api/settings.
 // Reads raw settings data map minus secret keys, mirroring the Next dashboard.
