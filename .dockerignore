@@ -3,8 +3,8 @@
 #
 # `panrouter-go` below therefore excludes the compiled binary at the repo root
 # and NOT cmd/panrouter-go/ — which is the package the Dockerfile builds. Widening
-# it to `**/9router-go` would empty cmd/panrouter-go/ out of the context and the
-# build would fail with no Go files. Same for `9router-go-*`.
+# it to `**/panrouter-go` would empty cmd/panrouter-go/ out of the context and the
+# build would fail with no Go files. Same for `panrouter-go-*`.
 #
 # `*.pgo` must never be added: cmd/panrouter-go/default.pgo is what Go's default
 # -pgo=auto consumes, and dropping it from the context silently produces an

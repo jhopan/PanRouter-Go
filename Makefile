@@ -1,5 +1,5 @@
 BINARY_SUFFIX := $(if $(findstring Windows_NT,$(OS)),.exe,)
-BINARY_NAME := 9router-go$(BINARY_SUFFIX)
+BINARY_NAME := panrouter-go$(BINARY_SUFFIX)
 # A bare `make` builds the binary and stops there — it never runs the server.
 # `run`/`dev` are explicit, separate goals on purpose.
 .DEFAULT_GOAL := build
@@ -28,9 +28,9 @@ BINARY := ./$(BINARY_NAME)
 endif
 
 # DATA_DIR stays empty unless the caller overrides it, so the binary applies its
-# own per-platform default (%APPDATA%\9router on Windows, ~/.9router elsewhere).
-# Do NOT default to $(HOME)/.9router: GNU Make on native Windows expands $(HOME)
-# to empty, which resolved to a literal "/.9router" -> C:/Program Files/Git/.9router,
+# own per-platform default (%APPDATA%\panrouter on Windows, ~/.panrouter elsewhere).
+# Do NOT default to $(HOME)/.panrouter: GNU Make on native Windows expands $(HOME)
+# to empty, which resolved to a literal "/.panrouter" -> C:/Program Files/Git/.panrouter,
 # so every launch wrote a throwaway DB and 401'd on every dashboard call.
 DATA_DIR ?=
 RTK ?=
@@ -40,7 +40,7 @@ AUTO_UPDATE ?= false
 
 # Double quotes, not single: cmd.exe treats ' as a literal character, so the
 # single-quoted form passed a quoted symbol name straight to the linker.
-LDFLAGS := -s -w -X "9router/proxy/internal/updater.CurrentVersion=$(VERSION)"
+LDFLAGS := -s -w -X "panrouter/proxy/internal/updater.CurrentVersion=$(VERSION)"
 
 .PHONY: build run dev version update test test-short test-live test-integration vet vet-integration bench bench-go cross mitm-enable mitm-disable mitm-status docker docker-build clean help web-build web-dev changelog-merge
 
@@ -65,7 +65,7 @@ build: web-build
 	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/panrouter-go/
 	go build -ldflags="$(LDFLAGS)" -o opencode-go$(BINARY_SUFFIX) ./cmd/panrouter-go/
 
-# `PORT=20130 ./9router-go` is POSIX env-assignment prefix syntax. cmd.exe does
+# `PORT=20130 ./panrouter-go` is POSIX env-assignment prefix syntax. cmd.exe does
 # not parse it: it tried to execute a program literally named "PORT" and failed
 # with "'PORT' is not recognized as an internal or external command". GNU Make's
 # export directive is portable, so use it and drop the prefix entirely.
@@ -145,7 +145,7 @@ test-race:
 	go test -race -count=1 -timeout 10m ./...
 
 # Live upstream tests hit real providers with your own credentials from
-# ~/.9router/db/data.sqlite. They are skipped everywhere else on purpose: the
+# ~/.panrouter/db/data.sqlite. They are skipped everywhere else on purpose: the
 # free-tier models these cover (oc/space-bunny-free, muse-spark-*-contributor-free)
 # are rate limited per IP and shared with other users, so a run that passes today
 # can fail tomorrow for reasons unrelated to this gateway. CI never sets the
@@ -191,7 +191,7 @@ bench-go:
 ## cross — cross-compile Linux/macOS/Windows release binaries
 #
 # `GOOS=linux GOARCH=amd64 go build` is a POSIX env-assignment prefix, and
-# cmd.exe chokes on it the same way it choked on `PORT=20130 ./9router-go`.
+# cmd.exe chokes on it the same way it choked on `PORT=20130 ./panrouter-go`.
 # Instead the per-target OS/ARCH go through `export`, which is a Make directive
 # and therefore identical under sh and cmd. The export is scoped to cross-one
 # so an empty GOARCH can never leak into the normal build target.
@@ -202,7 +202,7 @@ export GOOS := $(CROSS_OS)
 export GOARCH := $(CROSS_ARCH)
 endif
 
-CROSS_BIN := 9router-go
+CROSS_BIN := panrouter-go
 
 cross-linux-amd64:
 	@$(MAKE) --no-print-directory cross-one CROSS_OS=linux CROSS_ARCH=amd64 OUT=$(CROSS_BIN)-linux-amd64
@@ -256,7 +256,7 @@ clean:
 
 ## help — show targets
 help:
-	@echo "9router-go — Makefile targets:"
+	@echo "panrouter-go — Makefile targets:"
 	@grep -E '^## ' Makefile | sed 's/## /  make /' | sed 's/ — /  /'
 	@echo ""
 	@echo "Options:"

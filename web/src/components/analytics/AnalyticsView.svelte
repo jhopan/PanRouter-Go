@@ -26,6 +26,7 @@
   import RequestDetailsTab from './RequestDetailsTab.svelte'
   import ProviderTopologyCard from './ProviderTopologyCard.svelte'
   import ComboFlowCard from './ComboFlowCard.svelte'
+  import { untrack } from 'svelte'
   import { usageBlocks, isPanelVisible } from '../../lib/usagePanel.svelte'
   import Card from '../../lib/ui/Card.svelte'
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
@@ -224,8 +225,25 @@
   // The usage and details fetches follow the Overview and Details sections.
   // The moved Cache and Compression sections load their own data, so the
   // Overview's read must not run behind them.
+  //
+  // The read is keyed on (section, period), not on every signal the body
+  // touches. A bare `loadStats(period)` re-ran whenever the visibility state
+  // moved — the panel arrangement arrives asynchronously and is re-read as it
+  // changes — and each re-run fetched the full payload, including the four
+  // per-model maps that are 98% of it. The five-second poll then ran beside
+  // those extra full reads, which is the regression `usageStatsViews.test.ts`
+  // catches: every read inside its window must be the totals-only poll.
+  let loadedStatsKey = ''
   $effect(() => {
-    if (section === 'overview' && overviewLive) loadStats(period)
+    const currentSection = section
+    const live = overviewLive
+    if (currentSection !== 'overview' || !live) return
+    const key = currentSection + '|' + period
+    if (key === loadedStatsKey) return
+    loadedStatsKey = key
+    // The body's own reads (stats, activeRequests, …) are not dependencies: it
+    // decides how to merge, it does not choose when to run.
+    untrack(() => loadStats(period))
   })
 
   $effect(() => {
