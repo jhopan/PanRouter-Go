@@ -98,12 +98,19 @@ func restartDetached(cCtx *cli.Context) error {
 
 // statusDetached reports whether a background daemon is live.
 func statusDetached(_ *cli.Context) error {
-	pid := daemon.RunningPID()
+	pid, verified := daemon.RunningClaim()
 	if pid == 0 {
 		fmt.Println("panrouter-go is not running in background.")
 		return nil
 	}
-	fmt.Printf("panrouter-go is running in background (pid %d)\n", pid)
+	if verified {
+		fmt.Printf("panrouter-go is running in background (pid %d)\n", pid)
+	} else {
+		// The pid is alive but its executable could not be compared — the usual
+		// cause is the binary being replaced while the daemon runs. Say which it
+		// is instead of reporting "not running" for a process that is serving.
+		fmt.Printf("panrouter-go is running in background (pid %d, claim unverified: its executable could not be read)\n", pid)
+	}
 	// The daemon's own record first: this shell's PORT is not the running
 	// process's PORT, and reporting the wrong one sends the operator to a dead
 	// address.

@@ -160,3 +160,58 @@ func TestClaimOwner(t *testing.T) {
 		})
 	}
 }
+
+// TestClaimStateSeparatesUnverifiableFromForeign pins the distinction that made a
+// running daemon vanish from `status`.
+//
+// Replacing the binary while the daemon runs can make its image unreadable for a
+// moment. That is not evidence the pid belongs to somebody else, and treating it
+// as such deleted the claim and stranded a process still holding the port: status
+// said "not running", start said "already running (started outside this binary)",
+// and stop had no pid to work with. A pid that is gone, or one running a
+// different executable, are the only cases that clear the file.
+func TestClaimStateSeparatesUnverifiableFromForeign(t *testing.T) {
+	live := livePID(t)
+
+	cases := []struct {
+		name  string
+		claim claim
+		want  claimState
+	}{
+		{"no pid", claim{}, claimNone},
+		{"pid gone", claim{pid: deadPID(t), exePath: selfExecutable(t)}, claimNone},
+		{"bare number, process alive", claim{pid: live}, claimUnverifiable},
+		{"someone else runs that pid", claim{pid: live, exePath: foreignExecutable(t)}, claimForeign},
+		{"this binary under that pid", claim{pid: live, exePath: selfExecutable(t)}, claimVerified},
+	}
+	for _, tc := range cases {
+		if got := tc.claim.state(); got != tc.want {
+			t.Errorf("%s: state() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestResolvedPathFoldsTheBuildRenameSuffix pins the comparison that keeps a
+// rebuilt daemon findable.
+//
+// `go build -o panrouter-go.exe` replaces the file through panrouter-go.exe~, and
+// Windows then reports the running image with that suffix still attached. The
+// claim recorded the plain name, so a literal comparison said "different
+// executable", deleted the pid file, and left a serving daemon that status could
+// not see and stop could not reach.
+func TestResolvedPathFoldsTheBuildRenameSuffix(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "panrouter-go.exe")
+	if err := os.WriteFile(plain, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if got, want := resolvedPath(plain+"~"), resolvedPath(plain); got != want {
+		t.Errorf("resolvedPath(%q) = %q, want the same path as %q", plain+"~", got, plain)
+	}
+	// A claim recorded with the suffix (the other side of the same rename) also
+	// matches the plain name.
+	if got, want := resolvedPath(plain), resolvedPath(plain+"~"); got != want {
+		t.Errorf("resolvedPath both directions must agree, got %q vs %q", got, want)
+	}
+}

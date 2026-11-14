@@ -145,15 +145,39 @@ func UnregisterPID() {
 // Either way the file is removed, so the next command starts from a clean
 // slate.
 func RunningPID() int {
+	pid, verified := RunningClaim()
+	if !verified {
+		return 0
+	}
+	return pid
+}
+
+// RunningClaim reports the pid the file names and whether its identity could be
+// verified.
+//
+// A claim is only deleted when it is positively not ours: the pid is gone, or it
+// is alive running a different executable. An unreadable image keeps the claim,
+// because that is what a running daemon looks like while its binary is being
+// replaced — and deleting the file then orphans a process the operator can no
+// longer stop with this command.
+func RunningClaim() (pid int, verified bool) {
 	c := readClaim()
-	if c.pid == 0 {
-		return 0
-	}
-	if !c.owner() {
+	switch c.state() {
+	case claimVerified:
+		return c.pid, true
+	case claimUnverifiable:
+		return c.pid, false
+	case claimForeign:
 		clearPID()
-		return 0
+		clearURL()
+		return 0, false
+	default:
+		if c.pid > 0 {
+			clearPID()
+			clearURL()
+		}
+		return 0, false
 	}
-	return c.pid
 }
 
 // Start spawns a detached daemon, records its PID, and waits for it to become
@@ -229,15 +253,25 @@ func Start(url string, extraArgs []string) (StartResult, error) {
 // executable the pid file recorded, so a recycled PID can never turn this into
 // a kill against an unrelated process.
 func Stop() (StopResult, error) {
-	pid := RunningPID()
+	pid, verified := RunningClaim()
 	if pid == 0 {
 		return StopResult{Reason: "not_running"}, nil
 	}
 
+	// The graceful request is safe whatever the claim says: it is our own
+	// authenticated endpoint, answered only by a gateway serving the recorded
+	// address.
 	if requestGracefulStop() && waitExit(pid, stopGraceMS) {
 		clearPID()
 		clearURL()
 		return StopResult{Stopped: true, PID: pid}, nil
+	}
+
+	// Falling back to a signal needs a verified identity. An unverifiable claim
+	// is a live pid we cannot prove is ours, and killing it blind is the one
+	// outcome the executable check exists to prevent.
+	if !verified {
+		return StopResult{PID: pid}, fmt.Errorf("daemon.Stop: pid %d is alive but its claim cannot be verified (its executable could not be read) and it did not answer the shutdown request — stop it manually", pid)
 	}
 
 	if !proc.Terminate(pid, stopGraceMS) {

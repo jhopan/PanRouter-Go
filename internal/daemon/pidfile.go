@@ -98,17 +98,51 @@ func parseClaim(raw string) claim {
 // executable is a recycled PID wearing a real path, and stopping it would kill
 // a stranger.
 func (c claim) owner() bool {
-	if c.pid <= 0 || c.exePath == "" {
-		return false
+	return c.state() == claimVerified
+}
+
+// claimState is the three-way answer owner() used to flatten.
+//
+// The distinction that matters: a pid whose image cannot be read is not the same
+// as a pid running something else. Reading the image can fail transiently (the
+// binary being replaced by a build, a permission the caller lacks), and a bare
+// number from an older build can never be checked at all. Flattening those into
+// "not ours" made the daemon's own claim disappear while it was still serving,
+// after which `status` said nothing was running and `start` said the port was
+// taken by "something started outside this binary".
+type claimState int
+
+const (
+	// claimNone: no pid file, or a pid the OS no longer runs.
+	claimNone claimState = iota
+	// claimVerified: the pid is alive and runs the executable it recorded.
+	claimVerified
+	// claimUnverifiable: the pid is alive but its executable cannot be compared
+	// (unreadable, or a bare number). Never a licence to kill.
+	claimUnverifiable
+	// claimForeign: the pid is alive and runs a different executable — a
+	// recycled PID. The claim says nothing about it and must not be kept.
+	claimForeign
+)
+
+func (c claim) state() claimState {
+	if c.pid <= 0 {
+		return claimNone
 	}
 	if !proc.Alive(c.pid) {
-		return false
+		return claimNone
+	}
+	if c.exePath == "" {
+		return claimUnverifiable
 	}
 	exe, err := proc.Executable(c.pid)
 	if err != nil {
-		return false
+		return claimUnverifiable
 	}
-	return exe == c.exePath || resolvedPath(exe) == resolvedPath(c.exePath)
+	if exe == c.exePath || resolvedPath(exe) == resolvedPath(c.exePath) {
+		return claimVerified
+	}
+	return claimForeign
 }
 
 // resolvedPath expands symlinks on whichever side the filesystem allows it; a
@@ -117,8 +151,26 @@ func (c claim) owner() bool {
 // a symlinked install location, neither of which is the form written to the pid
 // file.
 func resolvedPath(path string) string {
+	path = trimRenameSuffix(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
 	return filepath.Clean(path)
+}
+
+// trimRenameSuffix removes the trailing "~" Go's build uses when it replaces a
+// running binary.
+//
+// `go build -o panrouter-go.exe` writes panrouter-go.exe~ and renames it over the
+// target. A process that is running the old image is then reported by Windows
+// with the temporary name still attached, so the live image reads
+// "…\panrouter-go.exe~" while the claim recorded "…\panrouter-go.exe". Compared
+// literally the two differ, the claim looks foreign, and a daemon that is serving
+// requests gets deleted from the pid file — the orphan this check is supposed to
+// prevent. No install ships a path ending in "~", so folding the two is safe.
+func trimRenameSuffix(path string) string {
+	if len(path) > 1 && strings.HasSuffix(path, "~") {
+		return strings.TrimSuffix(path, "~")
+	}
+	return path
 }
