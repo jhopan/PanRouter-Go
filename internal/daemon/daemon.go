@@ -73,6 +73,48 @@ func LogPath() string {
 	return filepath.Join(Dir(), "gateway.log")
 }
 
+// URLFile returns the path of the record that says which address the running
+// daemon actually listens on.
+func URLFile() string {
+	return filepath.Join(Dir(), "gateway.url")
+}
+
+// RecordedURL returns the address the running daemon was started on, or "".
+//
+// The pid file proves *which* process is the daemon; it does not say where that
+// process listens. Recomputing the port from this shell's environment instead
+// answers a different question: a daemon started with PORT=20990 and a status
+// command run without PORT reported 20130, and the stop request went to a port
+// nothing was serving. The child's own answer is the only correct source.
+func RecordedURL() string {
+	raw, err := os.ReadFile(URLFile())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func writeURL(url string) {
+	if strings.TrimSpace(url) == "" {
+		return
+	}
+	// Start creates the run dir before spawning; the record must not depend on
+	// that ordering, because a restart after a manual cleanup reaches here first.
+	if err := os.MkdirAll(Dir(), constants.FilePermDir); err != nil {
+		log.Warn("daemon", "could not create run dir for url record", "path", Dir(), "error", err)
+		return
+	}
+	if err := os.WriteFile(URLFile(), []byte(url), constants.FilePermFile); err != nil {
+		log.Warn("daemon", "could not record url", "url", url, "path", URLFile(), "error", err)
+	}
+}
+
+func clearURL() {
+	if err := os.Remove(URLFile()); err != nil && !os.IsNotExist(err) {
+		log.Warn("daemon", "could not clear url", "path", URLFile(), "error", err)
+	}
+}
+
 // RegisterPID records this process as the running daemon, which is what lets
 // stop/status/restart find it after the launching terminal is gone. The
 // spawning parent writes the same file first, so the daemon overwrites the
@@ -89,6 +131,7 @@ func RegisterPID() {
 func UnregisterPID() {
 	if c := readClaim(); c.pid == os.Getpid() {
 		clearPID()
+		clearURL()
 	}
 }
 
@@ -164,8 +207,10 @@ func Start(url string, extraArgs []string) (StartResult, error) {
 
 	if err := waitHealthy(url, pid); err != nil {
 		clearPID()
+		clearURL()
 		return StartResult{PID: pid}, err
 	}
+	writeURL(url)
 
 	return StartResult{PID: pid, URL: url}, nil
 }
@@ -191,6 +236,7 @@ func Stop() (StopResult, error) {
 
 	if requestGracefulStop() && waitExit(pid, stopGraceMS) {
 		clearPID()
+		clearURL()
 		return StopResult{Stopped: true, PID: pid}, nil
 	}
 
@@ -198,6 +244,7 @@ func Stop() (StopResult, error) {
 		return StopResult{PID: pid}, fmt.Errorf("daemon.Stop: pid %d ignored the stop request and could not be killed", pid)
 	}
 	clearPID()
+	clearURL()
 	return StopResult{Stopped: true, PID: pid}, nil
 }
 
@@ -243,6 +290,11 @@ func waitExit(pid int, waitMS int) bool {
 // lands on the process this pid file claims rather than on whatever else
 // answers the configured port.
 func daemonLocalURL() string {
+	// The recorded address wins: it is what the running process actually bound,
+	// including any PORT override the launching shell had and this one does not.
+	if recorded := RecordedURL(); recorded != "" {
+		return recorded
+	}
 	cfg := config.LoadConfig()
 	port := cfg.Port
 	if port <= 0 {

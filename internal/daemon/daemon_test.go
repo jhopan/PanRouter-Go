@@ -238,3 +238,43 @@ func deadPID(t *testing.T) int {
 	t.Skip("no unused PID found in the probe range")
 	return 0
 }
+
+// TestRecordedURLRecordsWhatTheDaemonBound pins the record status/stop read.
+//
+// Recomputing the port from the calling shell answered the wrong question: a
+// daemon started with PORT=20990 was reported at the default 20130 and the stop
+// request went to a port nothing served. The record is the running process's own
+// answer, and it must disappear with the pid claim so a stale file can never
+// point the next command at an address this process does not own.
+func TestRecordedURLRecordsWhatTheDaemonBound(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+		t.Fatalf("create run dir: %v", err)
+	}
+	clearURL()
+	t.Cleanup(clearURL)
+
+	if got := RecordedURL(); got != "" {
+		t.Fatalf("RecordedURL() = %q before anything was recorded, want empty", got)
+	}
+
+	writeURL("http://127.0.0.1:20990")
+	if got := RecordedURL(); got != "http://127.0.0.1:20990" {
+		t.Fatalf("RecordedURL() = %q, want the address that was written", got)
+	}
+
+	// The stop path resolves the listener from the same record.
+	if got := daemonLocalURL(); got != "http://127.0.0.1:20990" {
+		t.Errorf("daemonLocalURL() = %q, want the recorded address, not a recomputed one", got)
+	}
+
+	writeURL("   ")
+	if got := RecordedURL(); got != "http://127.0.0.1:20990" {
+		t.Errorf("a blank write overwrote the record with %q", got)
+	}
+
+	clearURL()
+	if got := RecordedURL(); got != "" {
+		t.Fatalf("RecordedURL() = %q after clearURL, want empty", got)
+	}
+}

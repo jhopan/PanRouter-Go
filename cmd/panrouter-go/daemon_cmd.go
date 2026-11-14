@@ -104,7 +104,14 @@ func statusDetached(_ *cli.Context) error {
 		return nil
 	}
 	fmt.Printf("panrouter-go is running in background (pid %d)\n", pid)
-	fmt.Printf("  Dashboard: %s\n", daemonURL())
+	// The daemon's own record first: this shell's PORT is not the running
+	// process's PORT, and reporting the wrong one sends the operator to a dead
+	// address.
+	url := daemon.RecordedURL()
+	if url == "" {
+		url = daemonURL()
+	}
+	fmt.Printf("  Dashboard: %s\n", url)
 	fmt.Printf("  Log:       %s\n", daemon.LogPath())
 	return nil
 }
