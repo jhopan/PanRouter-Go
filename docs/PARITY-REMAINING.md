@@ -385,6 +385,15 @@ di tabel "Sisa" di bawah.
 | Translator | `/api/translator/{load,save,send,translate,console-logs}` | **port**: `handlers/translator_playground.go` + `consolelog.go` |
 | Engine prefixes | `/v1/*` **dan** `/api/v1/*` (Node me-rewrite `/v1/:path*` → `/api/v1/:path*`) | **port**: `handlers/apiV1Mounter` di `router.go` — satu registrasi per route, dua mount: pola bare (dilayani `/v1` lewat strip `RequestLogger`) dan `/api/v1` literal, handler yang sama |
 
+**Engine `/v1/*`.** Node mendaftarkan setiap route engine dua kali (`/v1/x` dan
+`/api/v1/x` lewat rewrite `next.config.mjs`). Go sekarang sama: `apiV1Mounter`
+mendaftarkan tiap route dua kali dengan handler identik, dan `apiV1Alias`
+menangani pola yang membawa segmen versinya sendiri (`/v1beta/models` →
+`/api/v1beta/models`, bukan `/api/v1/v1beta/models`). Permukaan Gemini
+(`GET /v1beta/models`, `POST /v1beta/models/{model}:generateContent|:streamGenerateContent`)
+sempat berupa handler tanpa route — sekarang terpasang di kedua ejaan dan dipin
+oleh `TestV1BetaGeminiSurface`.
+
 **Sisa yang disengaja atau belum:**
 
 | Item | Alasan |
