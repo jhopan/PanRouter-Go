@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -451,6 +452,55 @@ func TestSetupServerRouter_CLIToolsStatusAPIKeyAliasUnchanged(t *testing.T) {
 	}
 }
 
+// TestSetupServerRouter_ClaudeResetGrantIsLive pins that the Claude reset-grant
+// route is registered on the router the server actually mounts.
+//
+// The Codex reset-credit routes first shipped registered only in
+// dashboard.RegisterRoutes — the table the dashboard tests mount — so every
+// handler test passed while the real gateway answered 404. This route must not
+// repeat that: the request below carries an empty grant id, which the handler
+// refuses locally before any upstream call (spending a grant is irreversible),
+// so a 400 proves the route reached the handler while a 404 would prove it did
+// not.
+func TestSetupServerRouter_ClaudeResetGrantIsLive(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-test-secret")
+
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	now := "2026-07-18T00:00:00Z"
+	if _, err := database.Exec(
+		`INSERT INTO providerConnections (id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt)
+		 VALUES ('claude-1', 'claude', 'oauth', 'Claude', '', 1, 1, ?, ?, ?)`,
+		`{"accessToken":"fake"}`, now, now,
+	); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	token, err := auth.Sign("router-test-secret", time.Now())
+	if err != nil {
+		t.Fatalf("sign session token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/usage/claude-1/claude-reset", nil)
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("GET /api/usage/claude-1/claude-reset is not registered on the production router: %s",
+			rec.Body.String())
+	}
+	// The fake token makes the upstream call fail; any answer that is not a 404
+	// proves the route reached the handler on the table production mounts.
+	if rec.Code != http.StatusBadGateway {
+		t.Logf("status = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSetupServerRouter_CodexResetCreditsAreLive pins that the reset-credit
 // routes are registered on the router the server actually mounts.
 //
@@ -491,8 +541,8 @@ func TestSetupServerRouter_CodexResetCreditsAreLive(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/api/usage/codex-1/reset-credits"},
-		{http.MethodPost, "/api/usage/codex-1/reset-credits/consume"},
+		{http.MethodGet, "/api/usage/codex-1/codex-reset-credits"},
+		{http.MethodPost, "/api/usage/codex-1/codex-reset-credits"},
 	} {
 		rec := authed(tc.method, tc.path)
 		// The token is fake, so the wham call is expected to fail. Anything
@@ -510,8 +560,96 @@ func TestSetupServerRouter_CodexResetCreditsAreLive(t *testing.T) {
 	// Anonymous callers must still be stopped by the dashboard gate rather
 	// than reaching the handler.
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/reset-credits", nil))
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/codex-reset-credits", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("anonymous status = %d, want 401", rec.Code)
+	}
+}
+
+// TestHealthAndShutdownAliasesShareOneHandler pins the two route spellings to
+// the handler upstream registers, rather than to a second copy that could
+// drift. chi.Walk hands back the registered handler, so pointer identity is the
+// assertion: one function behind both paths. The health pair is also served,
+// comparing status and body byte for byte.
+//
+// The shutdown pair is not served here. HandleShutdown schedules a real
+// process stop half a second after it replies, which no test should trigger.
+func TestHealthAndShutdownAliasesShareOneHandler(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-test-secret")
+
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	handlers := map[string]http.Handler{}
+	if err := chi.Walk(r, func(method, route string, handler http.Handler, _ ...func(http.Handler) http.Handler) error {
+		handlers[method+" "+route] = handler
+		return nil
+	}); err != nil {
+		t.Fatalf("walk routes: %v", err)
+	}
+
+	sameHandler := func(left, right string) {
+		t.Helper()
+		lh, lok := handlers[left]
+		rh, rok := handlers[right]
+		if !lok {
+			t.Fatalf("%s is not registered", left)
+		}
+		if !rok {
+			t.Fatalf("%s is not registered", right)
+		}
+		if reflect.ValueOf(lh).Pointer() != reflect.ValueOf(rh).Pointer() {
+			t.Errorf("%s and %s do not share one handler", left, right)
+		}
+	}
+	sameHandler("GET /health", "GET /api/health")
+	sameHandler("POST /api/version/shutdown", "POST /api/shutdown")
+
+	serve := func(path string) (int, string) {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code, rec.Body.String()
+	}
+	legacyCode, legacyBody := serve("/health")
+	upstreamCode, upstreamBody := serve("/api/health")
+	if legacyCode != upstreamCode || legacyBody != upstreamBody {
+		t.Errorf("/health answered %d %q, /api/health answered %d %q",
+			legacyCode, legacyBody, upstreamCode, upstreamBody)
+	}
+	if upstreamCode != http.StatusOK || upstreamBody != `{"status":"ok"}` {
+		t.Errorf("/api/health answered %d %q, want 200 {\"status\":\"ok\"}", upstreamCode, upstreamBody)
+	}
+}
+
+// TestUsageResetOldNamesAreGone proves the rename, not an alias: the invented
+// paths this repo used before the port answer 404 on the production router, so
+// a client still calling them fails loudly instead of silently using a route
+// the next release could delete.
+func TestUsageResetOldNamesAreGone(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-test-secret")
+
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/usage/codex-1/reset-credits"},
+		{http.MethodPost, "/api/usage/codex-1/reset-credits/consume"},
+		{http.MethodGet, "/api/usage/claude-1/claude-reset-credits"},
+		{http.MethodPost, "/api/usage/claude-1/claude-reset-credits/consume"},
+	} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s answered %d, want 404 after the rename",
+				tc.method, tc.path, rec.Code)
+		}
 	}
 }

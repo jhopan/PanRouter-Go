@@ -1,15 +1,16 @@
 package handlers
 
 import (
+	"database/sql"
+	json "encoding/json/v2"
+	"errors"
+	"math"
+	"net/http"
+	"net/url"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/translator"
 	"panrouter/proxy/internal/usagetracker"
-	"database/sql"
-	json "encoding/json/v2"
-	"errors"
-	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,7 @@ func usagePeriodCount(raw, unit string) (int, bool) {
 
 type ProviderUsageItem struct {
 	Requests         int     `json:"requests"`
+	Errors           int     `json:"errors,omitempty"`
 	PromptTokens     int64   `json:"promptTokens"`
 	CompletionTokens int64   `json:"completionTokens"`
 	CachedTokens     int64   `json:"cachedTokens"`
@@ -100,14 +102,16 @@ type ProviderUsageItem struct {
 }
 
 type ModelUsageItem struct {
-	Requests         int     `json:"requests"`
-	PromptTokens     int64   `json:"promptTokens"`
-	CompletionTokens int64   `json:"completionTokens"`
-	CachedTokens     int64   `json:"cachedTokens"`
-	Cost             float64 `json:"cost"`
-	RawModel         string  `json:"rawModel"`
-	Provider         string  `json:"provider"`
-	LastUsed         string  `json:"lastUsed"`
+	Requests         int      `json:"requests"`
+	PromptTokens     int64    `json:"promptTokens"`
+	CompletionTokens int64    `json:"completionTokens"`
+	CachedTokens     int64    `json:"cachedTokens"`
+	Cost             float64  `json:"cost"`
+	RawModel         string   `json:"rawModel"`
+	Provider         string   `json:"provider"`
+	LastUsed         string   `json:"lastUsed"`
+	AvgTps           *float64 `json:"avgTps,omitempty"`
+	AvgSpeed         *float64 `json:"avgSpeed,omitempty"`
 }
 
 type AccountUsageItem struct {
@@ -151,6 +155,8 @@ type EndpointUsageItem struct {
 
 type UsageStatsResponse struct {
 	TotalRequests         int                          `json:"totalRequests"`
+	TotalErrors           int                          `json:"totalErrors"`
+	SuccessRate           *float64                     `json:"successRate"`
 	TotalPromptTokens     int64                        `json:"totalPromptTokens"`
 	TotalCompletionTokens int64                        `json:"totalCompletionTokens"`
 	TotalCachedTokens     int64                        `json:"totalCachedTokens"`
@@ -238,348 +244,404 @@ func parseUsageStatsViews(raw string) usageStatsViews {
 
 func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		window := resolveUsagePeriod(r.URL.Query().Get("period"), time.Now())
-		views := parseUsageStatsViews(r.URL.Query().Get("views"))
+		writeUsageStats(repo, w, r, r.URL.Query().Get("period"), r.URL.Query().Get("views"))
+	}
+}
 
-		tracker := usagetracker.GetTracker()
-		activeState := tracker.GetActiveState(repo)
+// HandleUsageHistory serves GET /api/usage/history.
+//
+// Upstream src/app/api/usage/history/route.js takes no parameters: it calls
+// getUsageStats() with its default period, which is "all". The response is the
+// same aggregate the stats endpoint builds, so this is an alias over one body
+// rather than a second aggregation that could drift from it.
+func HandleUsageHistory(repo *db.Repo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeUsageStats(repo, w, r, "all", "")
+	}
+}
 
-		resp := UsageStatsResponse{
-			ByProvider:     make(map[string]ProviderUsageItem),
-			ByModel:        make(map[string]ModelUsageItem),
-			ByAccount:      make(map[string]AccountUsageItem),
-			ByApiKey:       make(map[string]ApiKeyUsageItem),
-			ByEndpoint:     make(map[string]EndpointUsageItem),
-			ActiveRequests: activeState.ActiveRequests,
-			Pending:        activeState.Pending,
-			ErrorProvider:  activeState.ErrorProvider,
+// writeUsageStats is the shared body of the stats and history endpoints. The
+// period and view list are passed in rather than read from the request here,
+// because the history alias must ignore them: a caller that sends
+// ?period=today to the alias still gets the lifetime aggregate upstream
+// answers with.
+func writeUsageStats(repo *db.Repo, w http.ResponseWriter, r *http.Request, rawPeriod, rawViews string) {
+	window := resolveUsagePeriod(rawPeriod, time.Now())
+	views := parseUsageStatsViews(rawViews)
+
+	tracker := usagetracker.GetTracker()
+	activeState := tracker.GetActiveState(repo)
+
+	resp := UsageStatsResponse{
+		ByProvider:     make(map[string]ProviderUsageItem),
+		ByModel:        make(map[string]ModelUsageItem),
+		ByAccount:      make(map[string]AccountUsageItem),
+		ByApiKey:       make(map[string]ApiKeyUsageItem),
+		ByEndpoint:     make(map[string]EndpointUsageItem),
+		ActiveRequests: activeState.ActiveRequests,
+		Pending:        activeState.Pending,
+		ErrorProvider:  activeState.ErrorProvider,
+	}
+
+	// Load connection mapping for friendly account names
+	connMap := make(map[string]string)
+	if conns, err := repo.GetProviderConnections("", true); err == nil {
+		for _, c := range conns {
+			name := c.ID
+			if c.Name != nil && *c.Name != "" {
+				name = *c.Name
+			} else if c.Email != nil && *c.Email != "" {
+				name = *c.Email
+			}
+			connMap[c.ID] = name
 		}
+	}
 
-		// Load connection mapping for friendly account names
-		connMap := make(map[string]string)
-		if conns, err := repo.GetProviderConnections("", true); err == nil {
-			for _, c := range conns {
-				name := c.ID
-				if c.Name != nil && *c.Name != "" {
-					name = *c.Name
-				} else if c.Email != nil && *c.Email != "" {
-					name = *c.Email
-				}
-				connMap[c.ID] = name
+	// Load provider nodes for custom reverse-proxy display names
+	nodeNameMap := make(map[string]string)
+	if nodes, err := repo.GetProviderNodes(); err == nil {
+		for _, n := range nodes {
+			if n.ID != "" && n.Name != nil && *n.Name != "" {
+				nodeNameMap[n.ID] = *n.Name
 			}
 		}
+	}
 
-		// Load provider nodes for custom reverse-proxy display names
-		nodeNameMap := make(map[string]string)
-		if nodes, err := repo.GetProviderNodes(); err == nil {
-			for _, n := range nodes {
-				if n.ID != "" && n.Name != nil && *n.Name != "" {
-					nodeNameMap[n.ID] = *n.Name
-				}
+	// Friendly names for the API-key breakdown. The stored value is not
+	// uniform across the shared database: rows this build writes keep only
+	// the masked key, while rows the Next.js dashboard wrote keep the full
+	// one. Index both forms so a stored row resolves either way.
+	keyNames := make(map[string]string)
+	if keys, err := repo.GetApiKeys(); err == nil {
+		for _, k := range keys {
+			if k.Name == nil || *k.Name == "" {
+				continue
 			}
-		}
-
-		// Friendly names for the API-key breakdown. The stored value is not
-		// uniform across the shared database: rows this build writes keep only
-		// the masked key, while rows the Next.js dashboard wrote keep the full
-		// one. Index both forms so a stored row resolves either way.
-		keyNames := make(map[string]string)
-		if keys, err := repo.GetApiKeys(); err == nil {
-			for _, k := range keys {
-				if k.Name == nil || *k.Name == "" {
-					continue
-				}
-				trimmed := strings.TrimSpace(k.Key)
-				if trimmed != "" {
-					keyNames[trimmed] = *k.Name
-					if m := maskAPIKeyForStats(trimmed); m != "" {
-						keyNames[m] = *k.Name
-					}
-				}
-				keyNames[k.Key] = *k.Name
-				if m := maskAPIKeyForStats(k.Key); m != "" {
+			trimmed := strings.TrimSpace(k.Key)
+			if trimmed != "" {
+				keyNames[trimmed] = *k.Name
+				if m := maskAPIKeyForStats(trimmed); m != "" {
 					keyNames[m] = *k.Name
 				}
 			}
+			keyNames[k.Key] = *k.Name
+			if m := maskAPIKeyForStats(k.Key); m != "" {
+				keyNames[m] = *k.Name
+			}
 		}
+	}
 
-		// addAPIKeyUsage folds one request into the byApiKey bucket. The bucket is
-		// keyed by the stored key value, not by a freshly derived display mask:
-		// every key an instance mints shares the same prefix, so a re-derived
-		// mask collapsed a whole team key set into a single row and attributed
-		// one key's usage to another (upstream v0.5.91, same class of fix).
-		addAPIKeyUsage := func(apiKey, rawModel, provider, providerDisplay, timestamp string, requests int, promptTok, complTok, cachedTok int64, cost float64) {
-			trimmed := strings.TrimSpace(apiKey)
-			if trimmed == "" || trimmed == "***" {
-				apiKey = "local-no-key"
-				trimmed = "local-no-key"
-			}
-			bucketKey := apiKey + "|" + rawModel + "|" + provider
-			cur := resp.ByApiKey[bucketKey]
-			cur.RawModel = rawModel
-			cur.Provider = providerDisplay
-			masked := maskAPIKeyForStats(apiKey)
-			if masked == "" {
-				masked = "local-no-key"
-			}
-			cur.ApiKeyMasked = masked
-			cur.ApiKeyKey = masked
-			switch {
-			case keyNames[trimmed] != "":
-				cur.KeyName = keyNames[trimmed]
-			case keyNames[apiKey] != "":
-				cur.KeyName = keyNames[apiKey]
-			case trimmed == "local-no-key":
+	// addAPIKeyUsage folds one request into the byApiKey bucket. The bucket is
+	// keyed by the stored key value, not by a freshly derived display mask:
+	// every key an instance mints shares the same prefix, so a re-derived
+	// mask collapsed a whole team key set into a single row and attributed
+	// one key's usage to another (upstream v0.5.91, same class of fix).
+	addAPIKeyUsage := func(apiKey, rawModel, provider, providerDisplay, timestamp string, requests int, promptTok, complTok, cachedTok int64, cost float64) {
+		trimmed := strings.TrimSpace(apiKey)
+		if trimmed == "" || trimmed == "***" {
+			apiKey = "local-no-key"
+			trimmed = "local-no-key"
+		}
+		bucketKey := apiKey + "|" + rawModel + "|" + provider
+		cur := resp.ByApiKey[bucketKey]
+		cur.RawModel = rawModel
+		cur.Provider = providerDisplay
+		masked := maskAPIKeyForStats(apiKey)
+		if masked == "" {
+			masked = "local-no-key"
+		}
+		cur.ApiKeyMasked = masked
+		cur.ApiKeyKey = masked
+		switch {
+		case keyNames[trimmed] != "":
+			cur.KeyName = keyNames[trimmed]
+		case keyNames[apiKey] != "":
+			cur.KeyName = keyNames[apiKey]
+		case trimmed == "local-no-key":
+			cur.KeyName = "Local (No Key)"
+		default:
+			if masked != "local-no-key" {
+				cur.KeyName = masked
+			} else {
 				cur.KeyName = "Local (No Key)"
-			default:
-				if masked != "local-no-key" {
-					cur.KeyName = masked
-				} else {
-					cur.KeyName = "Local (No Key)"
-				}
 			}
-			cur.Requests += requests
-			cur.PromptTokens += promptTok
-			cur.CompletionTokens += complTok
-			cur.CachedTokens += cachedTok
-			cur.Cost += cost
-			if timestamp > cur.LastUsed {
-				cur.LastUsed = timestamp
-			}
-			resp.ByApiKey[bucketKey] = cur
 		}
-
-		if window.daily {
-			dailyRows, err := repo.GetUsageDailyRecent(window.days)
-			if err != nil {
-				handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			for _, rowJSON := range dailyRows {
-				var dayData map[string]any
-				if err := json.Unmarshal([]byte(rowJSON), &dayData); err != nil {
-					continue
-				}
-
-				// byProvider
-				if bp, ok := dayData["byProvider"].(map[string]any); ok {
-					for prov, pVal := range bp {
-						if pm, ok := pVal.(map[string]any); ok {
-							cur := resp.ByProvider[prov]
-							cur.Requests += getMapInt(pm, "requests")
-							cur.PromptTokens += getMapInt64(pm, "promptTokens")
-							cur.CompletionTokens += getMapInt64(pm, "completionTokens")
-							cur.CachedTokens += getMapInt64(pm, "cachedTokens")
-							cur.Cost += getMapFloat(pm, "cost")
-							resp.ByProvider[prov] = cur
-						}
-					}
-				}
-
-				// byModel
-				if bm, ok := dayData["byModel"].(map[string]any); ok && views.model {
-					for mk, mVal := range bm {
-						if mm, ok := mVal.(map[string]any); ok {
-							rawModel, _ := mm["rawModel"].(string)
-							prov, _ := mm["provider"].(string)
-							if rawModel == "" {
-								parts := strings.Split(mk, "|")
-								rawModel = parts[0]
-								if len(parts) > 1 && prov == "" {
-									prov = parts[1]
-								}
-							}
-							statsKey := rawModel
-							if prov != "" {
-								statsKey = rawModel + " (" + prov + ")"
-							}
-							displayName := prov
-							if dn, ok := nodeNameMap[prov]; ok && dn != "" {
-								displayName = dn
-							}
-
-							cur := resp.ByModel[statsKey]
-							cur.RawModel = rawModel
-							cur.Provider = displayName
-							cur.Requests += getMapInt(mm, "requests")
-							cur.PromptTokens += getMapInt64(mm, "promptTokens")
-							cur.CompletionTokens += getMapInt64(mm, "completionTokens")
-							cur.CachedTokens += getMapInt64(mm, "cachedTokens")
-							cur.Cost += getMapFloat(mm, "cost")
-							resp.ByModel[statsKey] = cur
-						}
-					}
-				}
-
-				// byAccount
-				if ba, ok := dayData["byAccount"].(map[string]any); ok && views.account {
-					for connID, aVal := range ba {
-						if am, ok := aVal.(map[string]any); ok {
-							rawModel, _ := am["rawModel"].(string)
-							prov, _ := am["provider"].(string)
-							accName := connMap[connID]
-							if accName == "" {
-								if len(connID) > 8 {
-									accName = "Account " + connID[:8] + "..."
-								} else {
-									accName = "Account " + connID
-								}
-							}
-							accountKey := rawModel + " (" + prov + " - " + accName + ")"
-							displayName := prov
-							if dn, ok := nodeNameMap[prov]; ok && dn != "" {
-								displayName = dn
-							}
-
-							cur := resp.ByAccount[accountKey]
-							cur.RawModel = rawModel
-							cur.Provider = displayName
-							cur.ConnectionID = connID
-							cur.AccountName = accName
-							cur.Requests += getMapInt(am, "requests")
-							cur.PromptTokens += getMapInt64(am, "promptTokens")
-							cur.CompletionTokens += getMapInt64(am, "completionTokens")
-							cur.CachedTokens += getMapInt64(am, "cachedTokens")
-							cur.Cost += getMapFloat(am, "cost")
-							resp.ByAccount[accountKey] = cur
-						}
-					}
-				}
-
-				// byApiKey. The daily payload carries no per-request timestamp
-				// (the date is the row key), so LastUsed stays empty here — same
-				// as the other daily branches.
-				if bak, ok := dayData["byApiKey"].(map[string]any); ok && views.apiKey {
-					for _, kVal := range bak {
-						km, ok := kVal.(map[string]any)
-						if !ok {
-							continue
-						}
-						rawModel, _ := km["rawModel"].(string)
-						prov, _ := km["provider"].(string)
-						apiKey, _ := km["apiKey"].(string)
-						displayName := prov
-						if dn, ok := nodeNameMap[prov]; ok && dn != "" {
-							displayName = dn
-						}
-						addAPIKeyUsage(
-							apiKey, rawModel, prov, displayName, "",
-							getMapInt(km, "requests"),
-							getMapInt64(km, "promptTokens"),
-							getMapInt64(km, "completionTokens"),
-							getMapInt64(km, "cachedTokens"),
-							getMapFloat(km, "cost"),
-						)
-					}
-				}
-
-				// byEndpoint
-				if be, ok := dayData["byEndpoint"].(map[string]any); ok && views.endpoint {
-					for epKey, eVal := range be {
-						if em, ok := eVal.(map[string]any); ok {
-							endpoint, _ := em["endpoint"].(string)
-							rawModel, _ := em["rawModel"].(string)
-							prov, _ := em["provider"].(string)
-							if endpoint == "" {
-								parts := strings.Split(epKey, "|")
-								endpoint = parts[0]
-								if len(parts) > 1 && rawModel == "" {
-									rawModel = parts[1]
-								}
-								if len(parts) > 2 && prov == "" {
-									prov = parts[2]
-								}
-							}
-							displayName := prov
-							if dn, ok := nodeNameMap[prov]; ok && dn != "" {
-								displayName = dn
-							}
-
-							cur := resp.ByEndpoint[epKey]
-							cur.Endpoint = endpoint
-							cur.RawModel = rawModel
-							cur.Provider = displayName
-							cur.Requests += getMapInt(em, "requests")
-							cur.PromptTokens += getMapInt64(em, "promptTokens")
-							cur.CompletionTokens += getMapInt64(em, "completionTokens")
-							cur.CachedTokens += getMapInt64(em, "cachedTokens")
-							cur.Cost += getMapFloat(em, "cost")
-							resp.ByEndpoint[epKey] = cur
-						}
-					}
-				}
-			}
-		} else {
-			// Sub-day windows read raw history: a daily rollup cannot express
-			// "since 14:00 yesterday".
-			//
-			// The fold is served from usageWindowCache, which builds a window's
-			// aggregate once and then advances it from a delta. The first read
-			// costs what the handler always cost; every poll after it reads only
-			// the rows written since the previous poll.
-			agg, err := rawWindows.getRawWindow(repo, window)
-			if err != nil {
-				handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			applyRawAggregate(&resp, agg, nodeNameMap, connMap, keyNames, views)
+		cur.Requests += requests
+		cur.PromptTokens += promptTok
+		cur.CompletionTokens += complTok
+		cur.CachedTokens += cachedTok
+		cur.Cost += cost
+		if timestamp > cur.LastUsed {
+			cur.LastUsed = timestamp
 		}
+		resp.ByApiKey[bucketKey] = cur
+	}
 
-		// Calculate total aggregates from byProvider
-		for _, p := range resp.ByProvider {
-			resp.TotalRequests += p.Requests
-			resp.TotalPromptTokens += p.PromptTokens
-			resp.TotalCompletionTokens += p.CompletionTokens
-			resp.TotalCachedTokens += p.CachedTokens
-			resp.TotalCost += p.Cost
-		}
-
-		// Build recent requests list (20 deduped from usageHistory)
-		recentHistory, err := repo.GetRecentUsageHistory(60)
+	if window.daily {
+		dailyRows, err := repo.GetUsageDailyRecent(window.days)
 		if err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		var dedupedRecent []usagetracker.RecentRequest
-		seen := make(map[string]bool)
-		for _, rh := range recentHistory {
-			promptTok, complTok := translator.ResolveTokensCounts([]byte(rh.Tokens), rh.PromptTokens, rh.CompletionTokens)
-			if promptTok == 0 && complTok == 0 {
+		for _, rowJSON := range dailyRows {
+			var dayData map[string]any
+			if err := json.Unmarshal([]byte(rowJSON), &dayData); err != nil {
 				continue
 			}
-			min := ""
-			if len(rh.Timestamp) >= 16 {
-				min = rh.Timestamp[:16]
-			}
-			k := rh.Model + "|" + rh.Provider + "|" + strconv.FormatInt(promptTok, 10) + "|" + strconv.FormatInt(complTok, 10) + "|" + min
-			if seen[k] {
-				continue
-			}
-			seen[k] = true
 
-			cachedTok := int(translator.CachedTokensFromJSON([]byte(rh.Tokens)))
-			status := "ok"
-			if rh.Status != "success" && rh.Status != "ok" && rh.Status != "" {
-				status = rh.Status
+			// byProvider
+			if bp, ok := dayData["byProvider"].(map[string]any); ok {
+				for prov, pVal := range bp {
+					if pm, ok := pVal.(map[string]any); ok {
+						cur := resp.ByProvider[prov]
+						cur.Requests += getMapInt(pm, "requests")
+						cur.Errors += getMapInt(pm, "errors")
+						cur.PromptTokens += getMapInt64(pm, "promptTokens")
+						cur.CompletionTokens += getMapInt64(pm, "completionTokens")
+						cur.CachedTokens += getMapInt64(pm, "cachedTokens")
+						cur.Cost += getMapFloat(pm, "cost")
+						resp.ByProvider[prov] = cur
+					}
+				}
 			}
 
-			dedupedRecent = append(dedupedRecent, usagetracker.RecentRequest{
-				Timestamp:        rh.Timestamp,
-				Model:            rh.Model,
-				Provider:         rh.Provider,
-				PromptTokens:     int(promptTok),
-				CompletionTokens: int(complTok),
-				CachedTokens:     cachedTok,
-				Status:           status,
-			})
-			if len(dedupedRecent) >= 20 {
-				break
+			// byModel
+			if bm, ok := dayData["byModel"].(map[string]any); ok && views.model {
+				for mk, mVal := range bm {
+					if mm, ok := mVal.(map[string]any); ok {
+						rawModel, _ := mm["rawModel"].(string)
+						prov, _ := mm["provider"].(string)
+						if rawModel == "" {
+							parts := strings.Split(mk, "|")
+							rawModel = parts[0]
+							if len(parts) > 1 && prov == "" {
+								prov = parts[1]
+							}
+						}
+						statsKey := rawModel
+						if prov != "" {
+							statsKey = rawModel + " (" + prov + ")"
+						}
+						displayName := prov
+						if dn, ok := nodeNameMap[prov]; ok && dn != "" {
+							displayName = dn
+						}
+
+						cur := resp.ByModel[statsKey]
+						cur.RawModel = rawModel
+						cur.Provider = displayName
+						cur.Requests += getMapInt(mm, "requests")
+						cur.PromptTokens += getMapInt64(mm, "promptTokens")
+						cur.CompletionTokens += getMapInt64(mm, "completionTokens")
+						cur.CachedTokens += getMapInt64(mm, "cachedTokens")
+						cur.Cost += getMapFloat(mm, "cost")
+						resp.ByModel[statsKey] = cur
+					}
+				}
+			}
+
+			// byAccount
+			if ba, ok := dayData["byAccount"].(map[string]any); ok && views.account {
+				for connID, aVal := range ba {
+					if am, ok := aVal.(map[string]any); ok {
+						rawModel, _ := am["rawModel"].(string)
+						prov, _ := am["provider"].(string)
+						accName := connMap[connID]
+						if accName == "" {
+							if len(connID) > 8 {
+								accName = "Account " + connID[:8] + "..."
+							} else {
+								accName = "Account " + connID
+							}
+						}
+						accountKey := rawModel + " (" + prov + " - " + accName + ")"
+						displayName := prov
+						if dn, ok := nodeNameMap[prov]; ok && dn != "" {
+							displayName = dn
+						}
+
+						cur := resp.ByAccount[accountKey]
+						cur.RawModel = rawModel
+						cur.Provider = displayName
+						cur.ConnectionID = connID
+						cur.AccountName = accName
+						cur.Requests += getMapInt(am, "requests")
+						cur.PromptTokens += getMapInt64(am, "promptTokens")
+						cur.CompletionTokens += getMapInt64(am, "completionTokens")
+						cur.CachedTokens += getMapInt64(am, "cachedTokens")
+						cur.Cost += getMapFloat(am, "cost")
+						resp.ByAccount[accountKey] = cur
+					}
+				}
+			}
+
+			// byApiKey. The daily payload carries no per-request timestamp
+			// (the date is the row key), so LastUsed stays empty here — same
+			// as the other daily branches.
+			if bak, ok := dayData["byApiKey"].(map[string]any); ok && views.apiKey {
+				for _, kVal := range bak {
+					km, ok := kVal.(map[string]any)
+					if !ok {
+						continue
+					}
+					rawModel, _ := km["rawModel"].(string)
+					prov, _ := km["provider"].(string)
+					apiKey, _ := km["apiKey"].(string)
+					displayName := prov
+					if dn, ok := nodeNameMap[prov]; ok && dn != "" {
+						displayName = dn
+					}
+					addAPIKeyUsage(
+						apiKey, rawModel, prov, displayName, "",
+						getMapInt(km, "requests"),
+						getMapInt64(km, "promptTokens"),
+						getMapInt64(km, "completionTokens"),
+						getMapInt64(km, "cachedTokens"),
+						getMapFloat(km, "cost"),
+					)
+				}
+			}
+
+			// byEndpoint
+			if be, ok := dayData["byEndpoint"].(map[string]any); ok && views.endpoint {
+				for epKey, eVal := range be {
+					if em, ok := eVal.(map[string]any); ok {
+						endpoint, _ := em["endpoint"].(string)
+						rawModel, _ := em["rawModel"].(string)
+						prov, _ := em["provider"].(string)
+						if endpoint == "" {
+							parts := strings.Split(epKey, "|")
+							endpoint = parts[0]
+							if len(parts) > 1 && rawModel == "" {
+								rawModel = parts[1]
+							}
+							if len(parts) > 2 && prov == "" {
+								prov = parts[2]
+							}
+						}
+						displayName := prov
+						if dn, ok := nodeNameMap[prov]; ok && dn != "" {
+							displayName = dn
+						}
+
+						cur := resp.ByEndpoint[epKey]
+						cur.Endpoint = endpoint
+						cur.RawModel = rawModel
+						cur.Provider = displayName
+						cur.Requests += getMapInt(em, "requests")
+						cur.PromptTokens += getMapInt64(em, "promptTokens")
+						cur.CompletionTokens += getMapInt64(em, "completionTokens")
+						cur.CachedTokens += getMapInt64(em, "cachedTokens")
+						cur.Cost += getMapFloat(em, "cost")
+						resp.ByEndpoint[epKey] = cur
+					}
+				}
 			}
 		}
-		resp.RecentRequests = dedupedRecent
-
-		handlerutil.WriteJSON(w, http.StatusOK, resp)
+	} else {
+		// Sub-day windows read raw history: a daily rollup cannot express
+		// "since 14:00 yesterday".
+		//
+		// The fold is served from usageWindowCache, which builds a window's
+		// aggregate once and then advances it from a delta. The first read
+		// costs what the handler always cost; every poll after it reads only
+		// the rows written since the previous poll.
+		agg, err := rawWindows.getRawWindow(repo, window)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		applyRawAggregate(&resp, agg, nodeNameMap, connMap, keyNames, views)
+		if !window.since.IsZero() {
+			cutoff := window.since.UTC().Format("2006-01-02T15:04:05.000Z")
+			if errCount, err := repo.GetRequestDetailsErrorCountSince(r.Context(), cutoff); err == nil {
+				resp.TotalErrors = errCount
+			}
+		}
 	}
+
+	if views.model && len(resp.ByModel) > 0 && repo != nil {
+		cutoff := ""
+		if !window.since.IsZero() {
+			cutoff = window.since.UTC().Format("2006-01-02T15:04:05.000Z")
+		} else if window.days > 0 {
+			cutoff = time.Now().AddDate(0, 0, -window.days).UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+		if tpsMap, err := repo.GetModelTPSSince(r.Context(), cutoff); err == nil && len(tpsMap) > 0 {
+			for key, item := range resp.ByModel {
+				if tps, ok := tpsMap[key]; ok && tps > 0 {
+					item.AvgTps = &tps
+					item.AvgSpeed = &tps
+					resp.ByModel[key] = item
+				} else if tps, ok := tpsMap[item.RawModel]; ok && tps > 0 {
+					item.AvgTps = &tps
+					item.AvgSpeed = &tps
+					resp.ByModel[key] = item
+				}
+			}
+		}
+	}
+
+	// Calculate total aggregates from byProvider
+	successfulRequests := 0
+	for _, p := range resp.ByProvider {
+		successfulRequests += p.Requests
+		resp.TotalPromptTokens += p.PromptTokens
+		resp.TotalCompletionTokens += p.CompletionTokens
+		resp.TotalCachedTokens += p.CachedTokens
+		resp.TotalCost += p.Cost
+	}
+	resp.TotalRequests = successfulRequests + resp.TotalErrors
+	if resp.TotalRequests > 0 {
+		rate := math.Round(float64(successfulRequests)/float64(resp.TotalRequests)*1000) / 10
+		resp.SuccessRate = &rate
+	}
+
+	// Build recent requests list (20 deduped from usageHistory)
+	recentHistory, err := repo.GetRecentUsageHistory(60)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var dedupedRecent []usagetracker.RecentRequest
+	seen := make(map[string]bool)
+	for _, rh := range recentHistory {
+		promptTok, complTok := translator.ResolveTokensCounts([]byte(rh.Tokens), rh.PromptTokens, rh.CompletionTokens)
+		status := "ok"
+		if rh.Status != "success" && rh.Status != "ok" && rh.Status != "" {
+			status = rh.Status
+		}
+		if promptTok == 0 && complTok == 0 && status == "ok" {
+			continue
+		}
+		min := ""
+		if len(rh.Timestamp) >= 16 {
+			min = rh.Timestamp[:16]
+		}
+		k := rh.Model + "|" + rh.Provider + "|" + strconv.FormatInt(promptTok, 10) + "|" + strconv.FormatInt(complTok, 10) + "|" + status + "|" + min
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+
+		cachedTok := int(translator.CachedTokensFromJSON([]byte(rh.Tokens)))
+
+		dedupedRecent = append(dedupedRecent, usagetracker.RecentRequest{
+			Timestamp:        rh.Timestamp,
+			Model:            rh.Model,
+			Provider:         rh.Provider,
+			PromptTokens:     int(promptTok),
+			CompletionTokens: int(complTok),
+			CachedTokens:     cachedTok,
+			Status:           status,
+		})
+		if len(dedupedRecent) >= 20 {
+			break
+		}
+	}
+	resp.RecentRequests = dedupedRecent
+
+	handlerutil.WriteJSON(w, http.StatusOK, resp)
 }
 
 // detailListItem is one collapsed Details-tab row.
@@ -596,6 +658,7 @@ type detailListItem struct {
 	Cost         float64          `json:"cost,omitempty"`
 	Combo        string           `json:"combo,omitempty"`
 	Protocol     string           `json:"protocol,omitempty"`
+	LoopWarning  string           `json:"loopWarning,omitempty"`
 }
 
 // HandleRequestDetails returns paged request detail objects for the Details tab.
@@ -695,6 +758,7 @@ func newDetailListItem(row db.RequestDetailListRow) detailListItem {
 		Cost:         row.Cost,
 		Combo:        row.Combo,
 		Protocol:     protocol,
+		LoopWarning:  row.LoopWarning,
 	}
 }
 

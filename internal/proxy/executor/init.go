@@ -85,6 +85,9 @@ func RegisterAll() {
 	Register("bedrock-xai", func() Executor { return ForwardBedrock })
 	Register("azure", func() Executor { return ForwardAzure })
 	Register("commandcode", func() Executor { return ForwardCommandcode })
+	// The documented Provider API surface: three lanes on one bearer, the lane
+	// chosen per model from the live catalogue's supported_endpoints.
+	Register("commandcode-goat", func() Executor { return ForwardCommandcodeGoat })
 	Register("qoder", func() Executor { return ForwardQoder })
 	Register("qoder-cn", func() Executor { return ForwardQoder })
 	Register("alims-intl", func() Executor { return ForwardOpenAI })
@@ -93,7 +96,23 @@ func RegisterAll() {
 	Register("bazaarlink", func() Executor { return ForwardOpenAI })
 	Register("bluesminds", func() Executor { return ForwardOpenAI })
 	Register("devin-cli", func() Executor { return ForwardOpenAI })
+	// Vertex AI: the registry entries carried no executor, so every request
+	// POSTed an OpenAI body at aiplatform.googleapis.com, which serves neither
+	// lane. Both provider ids share one implementation — the difference is the
+	// URL shape, decided inside from the provider id.
+	Register("vertex", func() Executor { return ForwardVertex })
+	Register("vertex-partner", func() Executor { return ForwardVertex })
+	// Perplexity Web is not OpenAI-compatible in either direction: the request
+	// is a query_str envelope and the answer is Perplexity's own event stream,
+	// so the passthrough cannot serve it.
+	Register("perplexity-web", func() Executor { return ForwardPerplexityWeb })
 	Register("freebuff", func() Executor { return ForwardFreebuff })
+	// free-pi cannot ride the shared passthrough: it must set two per-account
+	// headers (x-session-id, x-client-version) that the registry's static map
+	// cannot carry, and it must inspect the upstream status so a 409
+	// concurrent_session stays a 409 instead of being written out as a 200
+	// carrying an error body.
+	Register("free-pi", func() Executor { return ForwardFreePi })
 	Register("kilo-gateway", func() Executor { return ForwardOpenAI })
 	Register("llm7", func() Executor { return ForwardOpenAI })
 	Register("morph", func() Executor { return ForwardOpenAI })
@@ -109,4 +128,21 @@ func RegisterAll() {
 	Register("daoxe", func() Executor { return ForwardOpenAI })
 	Register("nan", func() Executor { return ForwardOpenAI })
 	Register("openadapter", func() Executor { return ForwardOpenAI })
+
+	// The PanRouter-only lanes: Chat Completions for apinex, apmix,
+	// freemodel-dev, vyceai and the hidden no-auth mmf lane; Anthropic Messages
+	// for agentrouter and justdowork (Format: claude, so the chat layer converts
+	// and the base URL decides the wire); the Responses API for orcarouter, whose
+	// four models pin openai-responses in model_formats.go.
+	Register("agentrouter", func() Executor { return ForwardOpenAI })
+	Register("apinex", func() Executor { return ForwardOpenAI })
+	Register("apmix", func() Executor { return ForwardOpenAI })
+	Register("freemodel-dev", func() Executor { return ForwardOpenAI })
+	Register("justdowork", func() Executor { return ForwardOpenAI })
+	Register("orcarouter", func() Executor { return ForwardOpenAI })
+	Register("vyceai", func() Executor { return ForwardOpenAI })
+	Register("mmf", func() Executor { return ForwardOpenAI })
+	// Free.ai switches endpoint family per model.
+	Register("freeai", func() Executor { return ForwardFreeAI })
+	Register("freeai-vl", func() Executor { return ForwardOpenAI })
 }

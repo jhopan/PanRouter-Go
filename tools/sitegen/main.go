@@ -36,7 +36,7 @@ func main() {
 	readmePath := flag.String("readme", "README.md", "markdown file rendered as the site homepage")
 	assetsDir := flag.String("assets", "site", "directory of static files copied verbatim into the site")
 	outDir := flag.String("out", "_site", "directory the site is written to")
-	repo := flag.String("repo", "luqman-v1/panrouter-go", "owner/name used to resolve relative repository links")
+	repo := flag.String("repo", "jhopan/PanRouter-Go", "owner/name used to resolve relative repository links")
 	flag.Parse()
 
 	if err := generate(*readmePath, *assetsDir, *outDir, *repo); err != nil {

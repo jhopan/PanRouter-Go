@@ -20,7 +20,7 @@ import (
 // first byte lands, how the events spread out (a streamed answer or one big
 // dump at the end), and how long the thinking phase holds the stream.
 //
-// Same gate as the other live tests: 9ROUTER_LIVE_TESTS=1, make test-live.
+// Same gate as the other live tests: PANROUTER_LIVE_TESTS=1, make test-live.
 func TestLiveE2E_Gemini38_FlashHigh_Timing(t *testing.T) {
 	repo, cleanup := getRealUserDB(t)
 	defer cleanup()

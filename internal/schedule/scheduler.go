@@ -19,7 +19,29 @@ type PingFunc func(ctx context.Context, provider, connectionID string) error
 // dashboard takes effect on the next tick without a restart.
 type ConfigSource func(provider string) Config
 
+// DueSlot is one connection whose slot is due right now.
+type DueSlot struct {
+	Provider     string
+	ConnectionID string
+	Slot         *Slot
+}
+
+// DueSource reports the slots that are due now for a schedule computed from
+// state rather than read from settings — the CodeBuddy Intl daily cycle, whose
+// slot is derived from the connection id and the day.
+//
+// It exists so that feature does not need a second tick loop: the scheduler
+// still owns the fired-key bookkeeping, so a slot reported twice in one tick is
+// pinged once, and a connection the source leaves out is not pinged at all.
+// The source is asked on EVERY tick, in the same way a ConfigSource is, so it
+// can decide per tick whether a connection is due yet.
+type DueSource func(now time.Time) []DueSlot
+
 // Scheduler fires connection pings at their configured wall-clock slots.
+//
+// Two sources feed it: the settings-backed Schedule per provider, and the
+// optional Due source for a schedule computed from state. Both share the
+// bookkeeping below.
 //
 // One slot fires once. The dedupe key is the slot's own "<date>#<index>", not
 // the wall clock, so a tick that lands twice inside the grace window cannot
@@ -28,8 +50,12 @@ type ConfigSource func(provider string) Config
 type Scheduler struct {
 	Interval time.Duration
 	Source   ConfigSource
-	Ping     PingFunc
-	Now      func() time.Time
+	// Due is the optional second source: a schedule computed from state
+	// instead of stored in settings (see DueSource). A scheduler built for the
+	// settings-backed schedules alone leaves it nil.
+	Due  DueSource
+	Ping PingFunc
+	Now  func() time.Time
 
 	mu      sync.Mutex
 	fired   map[string]time.Time
@@ -60,7 +86,7 @@ func NewScheduler(source ConfigSource, ping PingFunc) *Scheduler {
 // on every tick for the whole grace window would hammer a provider that just
 // refused, and the operator sees the log line.
 func (s *Scheduler) Tick(ctx context.Context) []error {
-	if s == nil || s.Source == nil {
+	if s == nil || (s.Source == nil && s.Due == nil) {
 		return nil
 	}
 	now := s.now()
@@ -80,21 +106,40 @@ func (s *Scheduler) Tick(ctx context.Context) []error {
 	}()
 
 	var errs []error
-	for _, provider := range Providers {
-		cfg := s.Source(provider)
-		for connID, sched := range cfg.Schedules {
-			if sched == nil {
+	if s.Source != nil {
+		for _, provider := range Providers {
+			cfg := s.Source(provider)
+			for connID, sched := range cfg.Schedules {
+				if sched == nil {
+					continue
+				}
+				slot := sched.DueSlot(now)
+				if slot == nil || s.Ping == nil {
+					continue
+				}
+				key := provider + ":" + connID + ":" + slot.Key
+				if s.claim(key, now) {
+					continue
+				}
+				if err := s.Ping(ctx, provider, connID); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	// The computed schedules share the same bookkeeping as the configured
+	// ones: one fired map, one tick loop.
+	if s.Due != nil {
+		for _, due := range s.Due(now) {
+			if due.Slot == nil || s.Ping == nil {
 				continue
 			}
-			slot := sched.DueSlot(now)
-			if slot == nil || s.Ping == nil {
-				continue
-			}
-			key := provider + ":" + connID + ":" + slot.Key
+			key := due.Provider + ":" + due.ConnectionID + ":" + due.Slot.Key
 			if s.claim(key, now) {
 				continue
 			}
-			if err := s.Ping(ctx, provider, connID); err != nil {
+			if err := s.Ping(ctx, due.Provider, due.ConnectionID); err != nil {
 				errs = append(errs, err)
 			}
 		}

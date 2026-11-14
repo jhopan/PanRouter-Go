@@ -13,10 +13,10 @@ import (
 	"strings"
 	"testing"
 
+	json "encoding/json/v2"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/providers"
-	json "encoding/json/v2"
 )
 
 func TestBuildWav(t *testing.T) {

@@ -385,7 +385,7 @@ func ForwardZcode(w http.ResponseWriter, req *Request) error {
 
 	var stall io.ReadCloser
 	if req.IsStream {
-		stall = proxy.NewStallReaderWithContext(req.Ctx, io.NopCloser(resp.Body), 0, "zcode")
+		stall = proxy.NewStallReaderWithContext(req.Ctx, io.NopCloser(resp.Body), proxy.DefaultStallBudgets(), "zcode")
 		defer func() { _ = stall.Close() }()
 	}
 

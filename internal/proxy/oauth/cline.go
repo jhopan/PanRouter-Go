@@ -1,14 +1,14 @@
 package oauth
 
 import (
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/updater"
 	"bytes"
 	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/updater"
 	"strings"
 	"time"
 )

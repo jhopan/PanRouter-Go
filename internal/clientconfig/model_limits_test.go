@@ -228,7 +228,7 @@ func TestOmpWritesModelLimitsEntry(t *testing.T) {
 	// omp merges into an existing providers table; the YAML patcher splices
 	// into a document, so the file starts from the shape a previous connect
 	// (or the client itself) leaves behind.
-	writeFixture(t, path, "providers:\n  \"9router\":\n    baseUrl: http://old\n")
+	writeFixture(t, path, "providers:\n  \"panrouter\":\n    baseUrl: http://old\n")
 	opts := Options{
 		Home: home, BaseURL: "http://h:1", APIKey: "k", Model: "glm/glm-5.3",
 		ModelLimits: map[string]ModelLimits{"glm/glm-5.3": {ContextWindow: 200000, MaxOutput: 32000}},
@@ -251,18 +251,20 @@ func TestOmpWritesModelLimitsEntry(t *testing.T) {
 	}
 }
 
-func TestOmpWithoutLimitsKeepsPreviousShape(t *testing.T) {
+func TestOmpWithoutLimitsFallsBackToDefaults(t *testing.T) {
 	home := t.TempDir()
 	path := ompPaths(home).Files[0].Path
-	writeFixture(t, path, "providers:\n  \"9router\":\n    baseUrl: http://old\n")
+	writeFixture(t, path, "providers:\n  \"panrouter\":\n    baseUrl: http://old\n")
 	if _, err := newOmpAdapter().Apply(Options{Home: home, BaseURL: "http://h:1", APIKey: "k", Model: "m"}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	got := readFixture(t, path)
-	if strings.Contains(got, "contextWindow") || strings.Contains(got, "models") {
-		t.Errorf("no limits resolved, yet models were written:\n%s", got)
-	}
-	if !strings.Contains(got, "discovery: {type: proxy}") {
-		t.Errorf("expected the unchanged discovery shape, got:\n%s", got)
+	// omp used to skip the entry entirely when the gateway resolved
+	// nothing; that left the context percentage empty and auto-compact
+	// never fired. It now floors to the pi defaults instead.
+	for _, want := range []string{"contextWindow: 128000", "maxTokens: 16384", "discovery: {type: proxy}"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("after Apply, missing %q\ngot:\n%s", want, got)
+		}
 	}
 }

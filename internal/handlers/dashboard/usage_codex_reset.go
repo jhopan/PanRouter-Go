@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"panrouter/proxy/internal/codexquota"
+	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/log"
 )
 
 // Codex reset credits — port of OmniRoute's
@@ -27,8 +29,9 @@ import (
 
 // codexResetCreditTarget resolves the connection behind a reset-credit request.
 type codexResetCreditTarget struct {
-	AccessToken string
-	AccountID   string
+	ConnectionID string
+	AccessToken  string
+	AccountID    string
 }
 
 // resolveCodexResetCreditTarget validates that the connection is one Codex can
@@ -76,8 +79,9 @@ func (h *DashboardHandler) resolveCodexResetCreditTarget(w http.ResponseWriter, 
 	}
 
 	return codexResetCreditTarget{
-		AccessToken: accessToken,
-		AccountID:   psdStr(psd, "chatgptAccountId", "chatgpt_account_id"),
+		ConnectionID: conn.ID,
+		AccessToken:  accessToken,
+		AccountID:    psdStr(psd, "chatgptAccountId", "chatgpt_account_id"),
 	}, true
 }
 
@@ -113,7 +117,7 @@ func writeResetCreditError(w http.ResponseWriter, err error) {
 	_, _ = w.Write(body)
 }
 
-// HandleListCodexResetCredits handles GET /api/usage/{connectionId}/reset-credits.
+// HandleListCodexResetCredits handles GET /api/usage/{connectionId}/codex-reset-credits.
 func (h *DashboardHandler) HandleListCodexResetCredits(w http.ResponseWriter, r *http.Request) {
 	target, ok := h.resolveCodexResetCreditTarget(w, r)
 	if !ok {
@@ -151,7 +155,7 @@ func (h *DashboardHandler) HandleListCodexResetCredits(w http.ResponseWriter, r 
 }
 
 // HandleConsumeCodexResetCredit handles POST
-// /api/usage/{connectionId}/reset-credits/consume.
+// /api/usage/{connectionId}/codex-reset-credits.
 func (h *DashboardHandler) HandleConsumeCodexResetCredit(w http.ResponseWriter, r *http.Request) {
 	target, ok := h.resolveCodexResetCreditTarget(w, r)
 	if !ok {
@@ -187,6 +191,12 @@ func (h *DashboardHandler) HandleConsumeCodexResetCredit(w http.ResponseWriter, 
 	if err != nil {
 		writeResetCreditError(w, err)
 		return
+	}
+	chat.ClearCodexQuotaBlock(target.ConnectionID)
+	if h.Repo != nil {
+		if err := h.Repo.ResetConnectionHealthState(target.ConnectionID); err != nil {
+			log.Warn("failed to reset connection health state", "connId", target.ConnectionID, "error", err)
+		}
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"outcome":        outcome,

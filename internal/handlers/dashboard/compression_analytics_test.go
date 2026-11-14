@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"panrouter/proxy/internal/db"
 	"github.com/go-chi/chi/v5"
+	"panrouter/proxy/internal/db"
 )
 
 func TestHandleGetCompressionAnalytics(t *testing.T) {

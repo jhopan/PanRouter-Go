@@ -23,7 +23,7 @@ func TestE2E_EdgeTTS_LiveEndpoint(t *testing.T) {
 	repo := db.NewRepo(database)
 	handler := newTestMediaHandler(repo)
 	// Test 1: JSON response format
-	body := []byte(`{"model":"edge-tts/en-US-AriaNeural","input":"Testing 9router speech synthesis"}`)
+	body := []byte(`{"model":"edge-tts/en-US-AriaNeural","input":"Testing panrouter speech synthesis"}`)
 	req := httptest.NewRequest("POST", "/v1/audio/speech?response_format=json", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

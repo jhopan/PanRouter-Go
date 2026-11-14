@@ -27,7 +27,7 @@ const (
 	BackendRunit       Backend = "runit"
 	BackendCron        Backend = "cron"
 	BackendWindowsTask Backend = "windows-task"
-	BackendOverrideEnv         = "9ROUTER_SERVICE_BACKEND"
+	BackendOverrideEnv         = "PANROUTER_SERVICE_BACKEND"
 )
 
 // ErrNotInstalled is returned when no autostart entry exists to remove.
@@ -152,7 +152,7 @@ func Status() (Info, bool) {
 }
 
 // Detect picks the backend Install will use on this machine. The
-// 9ROUTER_SERVICE_BACKEND env var forces one (systemd, launchd, openrc,
+// PANROUTER_SERVICE_BACKEND env var forces one (systemd, launchd, openrc,
 // runit, cron) for machines with several inits or for testing. The override is
 // read before the OS short-circuits so it is authoritative on every platform:
 // a pinned backend must win even on Windows, where the schtasks check would

@@ -1,8 +1,8 @@
 package thinking
 
 import (
-	"panrouter/proxy/internal/providers"
 	json "encoding/json/v2"
+	"panrouter/proxy/internal/providers"
 	"strings"
 )
 

@@ -49,6 +49,16 @@ func SchemaStatements() []string {
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			data TEXT NOT NULL
 		)`,
+		`CREATE TABLE backupTokens (
+			id TEXT PRIMARY KEY,
+			keyId TEXT UNIQUE NOT NULL,
+			name TEXT,
+			machineId TEXT,
+			crc TEXT NOT NULL,
+			isActive INTEGER DEFAULT 1,
+			lastUsedAt TEXT,
+			createdAt TEXT NOT NULL
+		)`,
 		`CREATE TABLE providerNodes (
 			id TEXT PRIMARY KEY,
 			type TEXT,

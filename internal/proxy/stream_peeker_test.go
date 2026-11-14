@@ -68,6 +68,12 @@ func TestStreamContentPeeker_ReasoningContentCommits(t *testing.T) {
 			expectErr:    nil,
 		},
 		{
+			name:         "OpenAI empty reasoning alias does not commit",
+			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}\n\n", "data: [DONE]\n\n"},
+			expectCommit: false,
+			expectErr:    ErrStreamingZeroContent,
+		},
+		{
 			name:         "OpenAI empty reasoning_content does not commit",
 			chunks:       []string{"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}\n\n", "data: [DONE]\n\n"},
 			expectCommit: false,
@@ -90,6 +96,30 @@ func TestStreamContentPeeker_ReasoningContentCommits(t *testing.T) {
 			chunks:       []string{"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}\n\n"},
 			expectCommit: true,
 			expectErr:    nil,
+		},
+		{
+			name:         "Claude content_block_start redacted_thinking commits",
+			chunks:       []string{"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"redacted_bytes\"}}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "Claude content_block_start thinking commits",
+			chunks:       []string{"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "Claude signature_delta commits",
+			chunks:       []string{"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig123\"}}\n\n"},
+			expectCommit: true,
+			expectErr:    nil,
+		},
+		{
+			name:         "Silent stream without content fails with ErrStreamingZeroContent",
+			chunks:       []string{"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n", "data: [DONE]\n\n"},
+			expectCommit: false,
+			expectErr:    ErrStreamingZeroContent,
 		},
 	}
 

@@ -33,8 +33,8 @@ func TestX1BytePreservation(t *testing.T) {
 		{
 			name:   "toml",
 			format: FormatTOML,
-			src:    "# head\n[model_providers.9router]\nbase_url = \"https://old/v1\" # mid\nname = \"x\"\n# tail\n",
-			edit:   Edit{KeyPath: []string{"model_providers", "9router", "base_url"}, Value: "http://localhost:20128/v1"},
+			src:    "# head\n[model_providers.panrouter]\nbase_url = \"https://old/v1\" # mid\nname = \"x\"\n# tail\n",
+			edit:   Edit{KeyPath: []string{"model_providers", "panrouter", "base_url"}, Value: "http://localhost:20128/v1"},
 			oldVal: `"https://old/v1"`,
 		},
 		{

@@ -27,8 +27,8 @@ import (
 
 // Dashboard client headers, matching the Next dashboard settings/database route.
 const (
-	cliTokenHeader  = "x-9r-cli-token"
-	passwordHeader  = "x-9r-password"
+	cliTokenHeader  = "x-panrouter-cli-token"
+	passwordHeader  = "x-panrouter-password"
 	proxyDefaultURL = "https://google.com/"
 	proxyMaxTimeout = 30 * time.Second
 	proxyTimeout    = 8 * time.Second
@@ -137,6 +137,13 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 	// White-label branding is rendered by the sidebar, so the stored shape is
 	// normalized here the same way the sidebar ids are (whitelabel.go).
 	applyWhitelabelUpdate(updates)
+	// The GitHub backup token is written only through POST /api/backup/config.
+	// A settings write that carries a dbBackup block without one preserves the
+	// stored value, so saving an unrelated setting from a page whose form never
+	// received the token cannot silently disable backups (upstream's
+	// mass-assignment guard for SECRET_SETTING_PATHS).
+	h.preserveBackupToken(updates)
+
 	// Clearing appLogoUrl removes the uploaded file with it. The previous value
 	// is read before the write so the path is known, and the file is removed
 	// only after the write succeeds: a failed write must leave the stored logo
@@ -509,6 +516,23 @@ func sanitizeSettings(raw map[string]any) map[string]any {
 	}
 	for _, key := range secretSettingKeys {
 		delete(out, key)
+	}
+	// The GitHub backup token is a secret: it grants write access to the repo
+	// that holds every OAuth token on this box. It is stored like the password
+	// hash, is never returned by this read, and is only ever written through
+	// POST /api/backup/config (upstream SECRET_SETTING_PATHS). The dashboard
+	// gets `githubTokenConfigured` instead.
+	if block, ok := out["dbBackup"].(map[string]any); ok && block != nil {
+		token, _ := block["githubToken"].(string)
+		stripped := make(map[string]any, len(block)+1)
+		for k, v := range block {
+			if k == "githubToken" {
+				continue
+			}
+			stripped[k] = v
+		}
+		stripped["githubTokenConfigured"] = token != ""
+		out["dbBackup"] = stripped
 	}
 	sanitizeNavVisibility(out)
 	sanitizeDisplayCurrency(out)

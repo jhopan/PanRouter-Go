@@ -364,14 +364,14 @@ func TestLoadConfig_DBPathDirResolution(t *testing.T) {
 		t.Errorf("expected data.sqlite resolution, got %s", cfg1.DatabasePath)
 	}
 
-	// Test case 3: DB_PATH directory with 9router.db
+	// Test case 3: DB_PATH directory with panrouter.db
 	dbDir2 := filepath.Join(tempDir, "db2")
 	_ = os.MkdirAll(dbDir2, 0755)
-	_ = os.WriteFile(filepath.Join(dbDir2, "9router.db"), []byte(""), 0600)
+	_ = os.WriteFile(filepath.Join(dbDir2, "panrouter.db"), []byte(""), 0600)
 	t.Setenv("DB_PATH", dbDir2)
 	cfg2 := LoadConfig()
-	if cfg2.DatabasePath != filepath.Join(dbDir2, "9router.db") {
-		t.Errorf("expected 9router.db resolution, got %s", cfg2.DatabasePath)
+	if cfg2.DatabasePath != filepath.Join(dbDir2, "panrouter.db") {
+		t.Errorf("expected panrouter.db resolution, got %s", cfg2.DatabasePath)
 	}
 
 	// Test case 4: DB_PATH directory without known files falls back to db/data.sqlite
@@ -400,5 +400,82 @@ func TestLoadJWTSecret_PersistAndRead(t *testing.T) {
 	cfg2 := LoadConfigFromViper(v)
 	if cfg2.JWTSecret != cfg1.JWTSecret {
 		t.Fatalf("expected persisted JWT secret %q, got %q", cfg1.JWTSecret, cfg2.JWTSecret)
+	}
+}
+
+func TestSyncEnvFromViper(t *testing.T) {
+	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, ".env")
+	envContent := `
+HTTP_PROXY=http://127.0.0.1:8080
+HTTPS_PROXY=socks5h://192.168.22.206:1080
+ALL_PROXY=socks5://192.168.22.206:1080
+STRICT_SSL=true
+FORCE_FALLBACK_ON_ALL_UNAVAILABLE=true
+`
+	if err := os.WriteFile(envFile, []byte(envContent), 0600); err != nil {
+		t.Fatalf("failed to write test .env file: %v", err)
+	}
+
+	// Ensure target keys are clean before test
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("STRICT_SSL", "")
+	t.Setenv("FORCE_FALLBACK_ON_ALL_UNAVAILABLE", "")
+
+	v := NewViperWithFile(envFile)
+	if v == nil {
+		t.Fatal("expected non-nil viper")
+	}
+
+	if got := os.Getenv("HTTP_PROXY"); got != "http://127.0.0.1:8080" {
+		t.Errorf("expected HTTP_PROXY to be synced, got %q", got)
+	}
+	if got := os.Getenv("HTTPS_PROXY"); got != "socks5h://192.168.22.206:1080" {
+		t.Errorf("expected HTTPS_PROXY to be synced, got %q", got)
+	}
+	if got := os.Getenv("ALL_PROXY"); got != "socks5://192.168.22.206:1080" {
+		t.Errorf("expected ALL_PROXY to be synced, got %q", got)
+	}
+	if got := os.Getenv("STRICT_SSL"); got != "true" {
+		t.Errorf("expected STRICT_SSL to be synced, got %q", got)
+	}
+	if got := os.Getenv("FORCE_FALLBACK_ON_ALL_UNAVAILABLE"); got != "true" {
+		t.Errorf("expected FORCE_FALLBACK_ON_ALL_UNAVAILABLE to be synced, got %q", got)
+	}
+}
+
+func TestSyncEnvFromViper_PreservesExistingOSEnv(t *testing.T) {
+	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, ".env")
+	envContent := `HTTP_PROXY=http://env-file-proxy:8080`
+	if err := os.WriteFile(envFile, []byte(envContent), 0600); err != nil {
+		t.Fatalf("failed to write test .env file: %v", err)
+	}
+
+	// Existing OS env must take precedence
+	t.Setenv("HTTP_PROXY", "http://existing-os-proxy:9090")
+
+	_ = NewViperWithFile(envFile)
+	if got := os.Getenv("HTTP_PROXY"); got != "http://existing-os-proxy:9090" {
+		t.Errorf("expected OS env to take precedence over .env, got %q", got)
+	}
+}
+
+// The platform default names this fork, and a sync that overwrites
+// internal/config/config.go must not be able to revert it silently: pointing a
+// fresh install at the upstream directory looks exactly like data loss.
+func TestResolveDataDir_DefaultIsPanrouterNamed(t *testing.T) {
+	dir := t.TempDir()
+	writeDotEnv(t, dir, "PORT=20140\n")
+	t.Chdir(dir)
+	t.Setenv("DATA_DIR", "")
+
+	got := ResolveDataDir()
+	switch filepath.Base(got) {
+	case ".panrouter", "panrouter":
+	default:
+		t.Fatalf("default data dir = %q, want a panrouter-named directory", got)
 	}
 }

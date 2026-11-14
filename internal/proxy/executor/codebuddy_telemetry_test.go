@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,15 +140,17 @@ func TestCodebuddyTelemetryFailsOpenWithoutToken(t *testing.T) {
 	}
 }
 
-// TestCodebuddyHeadersCNVersion asserts the CN lane sends the current CLI build
-// and the intl lane keeps cur.
-func TestCodebuddyHeadersCNVersion(t *testing.T) {
-	h := codebuddyHeaders(&Request{Provider: "codebuddy-cn"}, nil, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
-	if !strings.Contains(h["User-Agent"], codebuddyCLIVersion) {
-		t.Errorf("CN User-Agent = %q, want %s", h["User-Agent"], codebuddyCLIVersion)
-	}
-	hi := codebuddyHeaders(&Request{Provider: "codebuddy-intl"}, nil, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
-	if strings.Contains(hi["User-Agent"], codebuddyCLIVersion) {
-		t.Errorf("intl User-Agent = %q, must NOT carry CN CLI %s", hi["User-Agent"], codebuddyCLIVersion)
+// TestCodebuddyHeadersCLIVersion asserts both lanes advertise the one shipped
+// CLI build. A lane pinned to an older build is a ban signal: the gateway
+// compares what the client reports against what it still serves.
+func TestCodebuddyHeadersCLIVersion(t *testing.T) {
+	for _, provider := range []string{"codebuddy-cn", "codebuddy-intl"} {
+		h := codebuddyHeaders(&Request{Provider: provider}, nil, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+		if want := "CLI/" + providers.CodeBuddyCLIVersion + " CodeBuddy/" + providers.CodeBuddyCLIVersion; h["User-Agent"] != want {
+			t.Errorf("%s User-Agent = %q, want %q", provider, h["User-Agent"], want)
+		}
+		if h["X-IDE-Version"] != providers.CodeBuddyCLIVersion {
+			t.Errorf("%s X-IDE-Version = %q, want %s", provider, h["X-IDE-Version"], providers.CodeBuddyCLIVersion)
+		}
 	}
 }

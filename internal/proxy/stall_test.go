@@ -16,7 +16,7 @@ func TestStallReaderAbortsOnShutdown(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 
-	r := NewStallReader(pr, time.Minute, "test")
+	r := NewStallReader(pr, StallBudgets{FirstChunk: time.Minute, InterChunk: time.Minute}, "test")
 	defer r.Close()
 
 	shutdown.TestReset()
@@ -33,7 +33,7 @@ func TestStallReaderAbortsOnContextCancel(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 
-	r := NewStallReaderWithContext(ctx, pr, time.Minute, "test-cancel")
+	r := NewStallReaderWithContext(ctx, pr, StallBudgets{FirstChunk: time.Minute, InterChunk: time.Minute}, "test-cancel")
 	defer r.Close()
 
 	cancel()
@@ -53,7 +53,7 @@ func TestStallReaderReportsTimeout(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 
-	r := NewStallReader(pr, 20*time.Millisecond, "stall-e2e")
+	r := NewStallReader(pr, StallBudgets{FirstChunk: 20 * time.Millisecond, InterChunk: 20 * time.Millisecond}, "stall-e2e")
 	defer r.Close()
 
 	go func() {
@@ -73,7 +73,7 @@ func TestStallReaderReportsTimeout(t *testing.T) {
 	if !ok {
 		t.Fatalf("client got no error frame: %q", rec.String())
 	}
-	if frame.Error.Code != "gateway_timeout" {
-		t.Errorf("code = %q, want gateway_timeout", frame.Error.Code)
+	if frame.Error.Code != StreamStallCode {
+		t.Errorf("code = %q, want %q", frame.Error.Code, StreamStallCode)
 	}
 }

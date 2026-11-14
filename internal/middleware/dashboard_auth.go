@@ -1,10 +1,11 @@
 package middleware
 
 import (
+	"net/http"
 	"panrouter/proxy/internal/auth"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlerutil"
-	"net/http"
+	"strings"
 )
 
 // RequireDashboardAuth gates the dashboard REST API behind the login session
@@ -33,7 +34,11 @@ const PasswordHeaderCarriesOwnAuth = "/api/settings/database"
 // DashboardPasswordHeader is the step-up credential the backup download
 // re-verifies itself. It lives here as well because the middleware has to let a
 // request carrying it reach that verification.
-const DashboardPasswordHeader = "x-9r-password"
+const DashboardPasswordHeader = "x-panrouter-password"
+
+// LegacyDashboardPasswordHeader is the same header under the former product name,
+// accepted so an un-upgraded dashboard build can still download a backup.
+const LegacyDashboardPasswordHeader = "x-9r-password"
 
 // allowsPasswordHeader reports whether the password header should admit a
 // request past the gate. This is a path check, not a credential check: only the
@@ -53,7 +58,8 @@ func IsAlwaysProtectedPath(path string) bool {
 		"/api/version/update",
 		"/admin/health/reset",
 		"/api/oauth/cursor/auto-import",
-		"/api/oauth/kiro/auto-import":
+		"/api/oauth/kiro/auto-import",
+		"/api/oauth/zed/auto-import":
 		return true
 	default:
 		return false
@@ -126,7 +132,7 @@ func CallerIsDashboardPrivileged(repo *db.Repo, r *http.Request) bool {
 }
 
 // RequireAdminAuth ensures that only requests with a valid dashboard session
-// (auth_token cookie) or local CLI token (x-9r-cli-token) can proceed. Client
+// (auth_token cookie) or local CLI token (x-panrouter-cli-token) can proceed. Client
 // API keys are rejected.
 //
 // The password header is admitted on exactly one path — the backup download —
@@ -143,7 +149,7 @@ func RequireAdminAuth() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if auth.SessionValid(r) ||
 				auth.ValidCLIToken(r.Header.Get(auth.CLITokenHeader)) ||
-				allowsPasswordHeader(r.URL.Path) && r.Header.Get(DashboardPasswordHeader) != "" {
+				allowsPasswordHeader(r.URL.Path) && passwordHeaderPresent(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -152,9 +158,27 @@ func RequireAdminAuth() func(http.Handler) http.Handler {
 	}
 }
 
+// PublicBackupDownloadPath is the one /api path that carries its own
+// credential instead of the dashboard session.
+//
+// Upstream lists it in PUBLIC_API_PATHS (src/dashboardGuard.js) for the same
+// reason: the Debian box that mirrors the database runs unattended, so it holds
+// a backup token (x-backup-token), never a dashboard session. The route itself
+// verifies that token against the stored records — constant-time, and revocable
+// from the dashboard — so letting the request reach it is not admitting an
+// unauthenticated caller: a request without a valid token is still answered
+// 401 by the handler.
+const PublicBackupDownloadPath = "/api/backup/download"
+
 func RequireDashboardAuth(repo *db.Repo) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The database mirror authenticates itself (see
+			// PublicBackupDownloadPath); every other path here is gated.
+			if r.URL.Path == PublicBackupDownloadPath {
+				next.ServeHTTP(w, r)
+				return
+			}
 			// Always-protected routes strictly require valid session cookie or CLI token (upstream parity).
 			// API keys and requireLogin=false are forbidden here. The dashboard
 			// password header is admitted only on the backup download, which
@@ -166,7 +190,7 @@ func RequireDashboardAuth(repo *db.Repo) func(http.Handler) http.Handler {
 			if IsAlwaysProtectedPath(r.URL.Path) {
 				if auth.SessionValid(r) ||
 					auth.ValidCLIToken(r.Header.Get(auth.CLITokenHeader)) ||
-					allowsPasswordHeader(r.URL.Path) && r.Header.Get(DashboardPasswordHeader) != "" {
+					allowsPasswordHeader(r.URL.Path) && passwordHeaderPresent(r) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -230,4 +254,14 @@ func tunnelPageBlocked(repo *db.Repo, r *http.Request) bool {
 		return false
 	}
 	return auth.TunnelLoginBlocked(r, raw)
+}
+
+// passwordHeaderPresent reports whether the step-up password header is set, under
+// either spelling: the pre-rename name stays accepted so an un-upgraded dashboard
+// build can still reach the endpoints that re-verify it.
+func passwordHeaderPresent(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get(DashboardPasswordHeader)) != "" {
+		return true
+	}
+	return strings.TrimSpace(r.Header.Get(LegacyDashboardPasswordHeader)) != ""
 }

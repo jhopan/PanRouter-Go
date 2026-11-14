@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"panrouter/proxy/internal/handlerutil"
 	"github.com/google/uuid"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 var (

@@ -3,7 +3,7 @@ package chat
 import (
 	"context"
 	"net/http"
-	"os"
+	"panrouter/proxy/internal/envx"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,12 +14,12 @@ var (
 	routeHeadersEnabledVal  bool
 )
 
-// isRouteHeadersEnabled checks if route response headers are enabled via NINEROUTER_ROUTE_HEADERS.
+// isRouteHeadersEnabled checks if route response headers are enabled via PANROUTER_ROUTE_HEADERS.
 // Defaults to true. Returns false if set to "0" or "false" (case-insensitive).
 // Cached after the first lookup to avoid per-request os.Getenv overhead.
 func isRouteHeadersEnabled() bool {
 	routeHeadersEnabledOnce.Do(func() {
-		val := os.Getenv("NINEROUTER_ROUTE_HEADERS")
+		val := envx.Get("ROUTE_HEADERS")
 		if val == "" {
 			routeHeadersEnabledVal = true
 			return
@@ -30,7 +30,7 @@ func isRouteHeadersEnabled() bool {
 	return routeHeadersEnabledVal
 }
 
-// resetRouteHeadersConfigForTesting allows unit tests to re-evaluate NINEROUTER_ROUTE_HEADERS.
+// resetRouteHeadersConfigForTesting allows unit tests to re-evaluate PANROUTER_ROUTE_HEADERS.
 func resetRouteHeadersConfigForTesting() {
 	routeHeadersEnabledOnce = sync.Once{}
 }
@@ -67,6 +67,7 @@ func clearRouteHeaders(w http.ResponseWriter) {
 	h.Del("x-panrouter-model")
 	h.Del("x-panrouter-combo")
 	h.Del("x-panrouter-attempts")
+	clearContextHeaders(w)
 }
 
 // attemptCount returns the number of fallback attempts recorded so far on ctx,

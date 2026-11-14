@@ -221,6 +221,42 @@ func TestClaudeUpstreamMapsEffortToThinking(t *testing.T) {
 	}
 }
 
+// TestNousModelUsesTheNestedReasoningDialect pins the wire for the six models
+// whose capability declares `ThinkingFormat: "nous"`. Before the writer existed
+// (and while hasWriter kept its own copy of the format list) the pass resolved
+// `nous` and then bailed out, so the client's flat reasoning_effort reached an
+// API that reads a nested `reasoning` object and nothing else.
+func TestNousModelUsesTheNestedReasoningDialect(t *testing.T) {
+	env := newEnv(t)
+	upstream := env.NewUpstream(t, chatCompletionResponder())
+	env.AddConnection(t, "conn-nous", "nous", "Nous Integration", upstream, "sk-nous")
+
+	body := ChatBody("nous/meituan/longcat-2.0:free", false)
+	body["reasoning_effort"] = "high"
+	res := env.Post(t, "/v1/chat/completions", body)
+	if res.Status != http.StatusOK {
+		t.Fatalf("POST = %d, want 200 (body: %s)", res.Status, truncate(res.Body))
+	}
+	sent := upstream.Last(t)
+	if got := sent.Model(t); got != "meituan/longcat-2.0:free" {
+		t.Errorf("upstream model = %q, want the provider prefix stripped", got)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(sent.Body, &wire); err != nil {
+		t.Fatalf("unmarshal upstream body: %v", err)
+	}
+	if _, has := wire["reasoning_effort"]; has {
+		t.Errorf("reasoning_effort reached a nous upstream: %s", truncate(sent.Body))
+	}
+	reasoning, ok := wire["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %v, want a nested object: %s", wire["reasoning"], truncate(sent.Body))
+	}
+	if reasoning["enabled"] != true || reasoning["effort"] != "high" {
+		t.Errorf("reasoning = %v, want {enabled:true, effort:high}", reasoning)
+	}
+}
+
 // TestSuffixOnAComboNameResolvesAndApplies pins that a "(level)" suffix on a
 // combo name resolves. The suffix is a request override, not part of the model
 // id, so it comes off the name before the name is resolved against the

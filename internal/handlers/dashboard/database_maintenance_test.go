@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"panrouter/proxy/internal/db"
 	json "encoding/json/v2"
+	"panrouter/proxy/internal/db"
 )
 
 func TestHandleDatabaseMaintenance(t *testing.T) {

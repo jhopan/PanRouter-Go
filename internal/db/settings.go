@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ type ComboStrategy struct {
 	Strategy    string `json:"strategy,omitempty"`
 	StickyLimit int    `json:"stickyLimit,omitempty"`
 	JudgeModel  string `json:"judgeModel,omitempty"`
+	// Weights holds optional per-model weights for round-robin rotation.
+	Weights map[string]int `json:"weights,omitempty"`
 	// FirstTokenTimeoutMs bounds every combo candidate except the last until
 	// its first usable response; zero disables it. The last candidate keeps
 	// the global deadline, so the setting never makes a combo fail sooner.
@@ -42,7 +45,28 @@ type ComboStrategy struct {
 	// on every failure path, so this flag is a no-op there.
 	RespectStoredOrder bool     `json:"respectStoredOrder,omitempty"`
 	FallbackCombos     []string `json:"fallbackCombos,omitempty"`
+	// BudgetCalls caps how many requests this combo may serve inside one
+	// budget window. Zero (the default) means unlimited. Reaching the ceiling
+	// withholds the combo for the rest of the window, so the caller falls
+	// through to whatever it would have used without the combo.
+	//
+	// The counter is process-local and in memory: a restart opens a fresh
+	// window, because a durable counter would come back from an outage still
+	// capped from before it, which is a spend the operator cannot account for.
+	BudgetCalls int `json:"budgetCalls,omitempty"`
+	// BudgetWindowMs is the window a BudgetCalls ceiling spans. Zero means
+	// DefaultBudgetWindowMs.
+	BudgetWindowMs int `json:"budgetWindowMs,omitempty"`
 }
+
+// BudgetCallsMax is the largest per-window ceiling the settings parser
+// accepts. A JSON number arrives as float64, so an unvalidated value can be
+// stored as an int that has wrapped negative — and a negative ceiling reads as
+// "unlimited" at the gate, which is the one thing a budget must never be.
+//
+// The dashboard refuses the same value (MAX_BUDGET_CALLS), so the two agree on
+// what a stored budget means rather than the server silently normalizing it.
+const BudgetCallsMax = 1000000
 
 // DefaultFirstTokenGraceMs is the grace period applied after a model response
 // timeout when the combo does not set its own: five minutes.
@@ -118,19 +142,35 @@ type SettingsData struct {
 	// in, so "a URL exists" cannot stand in for "the operator turned this on".
 	// Off by default: an unconfigured proxy must not be a slow path on every
 	// request.
-	HeadroomEnabled            bool                            `json:"headroomEnabled"`
-	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
-	HeadroomKompress           bool                            `json:"headroomKompress"`
-	HeadroomTimeoutMs          int                             `json:"headroomTimeoutMs"`
-	SemanticCacheEnabled       bool                            `json:"semanticCacheEnabled"`
-	SemanticCacheTTL           int                             `json:"semanticCacheTTL,omitempty"`
-	SemanticCacheMaxEntries    int                             `json:"semanticCacheMaxEntries,omitempty"`
+	HeadroomEnabled bool `json:"headroomEnabled"`
+	// HeadroomAutostart launches the local Headroom proxy daemon on panrouter boot.
+	// It is decoupled from HeadroomEnabled so operators who run Headroom standalone or
+	// selectively toggle request compression still have the proxy ready on startup.
+	HeadroomAutostart bool `json:"headroomAutostart"`
+	// HeadroomEngine selects the compression engine: "builtin" runs in-process
+	// with no dependency, "external" posts to HeadroomUrl. Empty means "builtin",
+	// so an existing settings row that never set the field gets the in-process
+	// engine rather than a proxy nobody installed.
+	HeadroomEngine          string `json:"headroomEngine,omitempty"`
+	HeadroomCodeAware       bool   `json:"headroomCodeAware"`
+	HeadroomKompress        bool   `json:"headroomKompress"`
+	HeadroomTimeoutMs       int    `json:"headroomTimeoutMs"`
+	SemanticCacheEnabled    bool   `json:"semanticCacheEnabled"`
+	SemanticCacheTTL        int    `json:"semanticCacheTTL,omitempty"`
+	SemanticCacheMaxEntries int    `json:"semanticCacheMaxEntries,omitempty"`
+	// ClaudeCacheTTL picks the prompt-cache window for the head anchors panrouter
+	// writes onto Claude requests: "5m" (default) or "1h". The two are billed
+	// differently — a cache write costs 1.25x at 5m and 2x at 1h — and which is
+	// cheaper depends on how long the operator's sessions pause between turns.
+	// Empty means "5m", so a row that never set it keeps the default.
+	ClaudeCacheTTL             string                          `json:"claudeCacheTtl,omitempty"`
 	AutoUpdate                 bool                            `json:"autoUpdate"`
 	FallbackStrategy           string                          `json:"fallbackStrategy,omitempty"`
 	StickyRoundRobinLimit      int                             `json:"stickyRoundRobinLimit,omitempty"`
 	ForceFallback              bool                            `json:"forceFallback,omitempty"`
 	ComboStrategy              string                          `json:"comboStrategy,omitempty"`
 	ComboStickyRoundRobinLimit int                             `json:"comboStickyRoundRobinLimit,omitempty"`
+	SeatAttemptBudgetMs        int                             `json:"seatAttemptBudgetMs,omitempty"`
 	ComboStrategies            map[string]ComboStrategy        `json:"comboStrategies,omitempty"`
 	ProviderStrategies         map[string]ProviderStrategy     `json:"providerStrategies,omitempty"`
 	CapacityAdapter            map[string]CapacityAdapterEntry `json:"capacityAdapter,omitempty"`
@@ -198,6 +238,14 @@ func DefaultSettings() *SettingsData {
 		SystemPromptPrefix:      "",
 		SystemPromptSuffix:      "",
 		HeadroomUrl:             "http://localhost:8787",
+		HeadroomAutostart:       false,
+		// The engine is written as the literal rather than imported from
+		// internal/headroom: the db package is imported by everything, and
+		// internal/headroom imports the proxy package, so importing it here
+		// would make the settings layer depend on the network stack.
+		// internal/headroom.NormalizeEngine is the single place that interprets
+		// the value, and it treats the empty string as this same engine.
+		HeadroomEngine:          "builtin",
 		HeadroomKompress:        true,
 		HeadroomTimeoutMs:       3000,
 		SemanticCacheEnabled:    false,
@@ -228,7 +276,7 @@ func DefaultSettings() *SettingsData {
 // not a failure: that is a fresh install.
 func (r *Repo) GetSettings() (*SettingsData, error) {
 	var rawData string
-	err := r.db.QueryRow(`SELECT data FROM settings WHERE id = 1`).Scan(&rawData)
+	err := r.db.QueryRowContext(context.Background(), `SELECT data FROM settings WHERE id = 1`).Scan(&rawData)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DefaultSettings(), nil

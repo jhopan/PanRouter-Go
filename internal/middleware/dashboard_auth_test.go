@@ -320,9 +320,10 @@ func TestPasswordHeaderIsHonouredOnlyWhereTheHandlerVerifiesIt(t *testing.T) {
 		{path: "/api/version/shutdown", admin: true, dash: true, handler: "HandleShutdown"},
 		{path: "/api/version/update", admin: true, dash: true, handler: "HandleTriggerUpdate"},
 		{path: "/admin/health/reset", admin: true, dash: true, handler: "inline health reset"},
-		{path: "/api/shutdown", dash: true, handler: "unregistered but still gated"},
+		{path: "/api/shutdown", dash: true, handler: "HandleShutdown"},
 		{path: "/api/oauth/cursor/auto-import", dash: true, handler: "HandleCursorAutoImport"},
 		{path: "/api/oauth/kiro/auto-import", dash: true, handler: "HandleKiroAutoImport"},
+		{path: "/api/oauth/zed/auto-import", dash: true, handler: "HandleZedAutoImport"},
 	}
 
 	for _, tt := range paths {

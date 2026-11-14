@@ -74,7 +74,7 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 	strictProxy := connData.StrictProxy
 	// Whether the operator meant this connection to leave through a proxy at
 	// all. Upstream gates its strictProxy refusal on exactly this
-	// (decolua/panrouter#4333): executors such as Qoder set strictProxy to mean
+	// (decolua/9router#4333): executors such as Qoder set strictProxy to mean
 	// "do not replay this request directly if the proxy fails" — a replayed
 	// COSY signature answers 403 — not "a proxy must exist". With nothing
 	// configured those callers must keep working direct, so a strict flag
@@ -182,7 +182,8 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		return h.Client, nil
 	}
 
-	if proxyType == "http" || proxyType == "" {
+	if proxyType == "http" || proxyType == "socks5" || proxyType == "socks" || proxyType == "" ||
+		strings.HasPrefix(parsedURL.Scheme, "http") || strings.HasPrefix(parsedURL.Scheme, "socks") {
 		cacheKey := proxyURLStr
 		if strictProxy {
 			cacheKey = strictCachePrefix + proxyURLStr

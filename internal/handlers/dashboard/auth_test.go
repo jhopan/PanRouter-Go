@@ -15,7 +15,7 @@ import (
 )
 
 // authTestEnv pins the JWT secret and data dir so session cookies are
-// deterministic and tests never touch the real ~/.9router.
+// deterministic and tests never touch the real ~/.panrouter.
 func authTestEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("JWT_SECRET", "dashboard-auth-test-secret")
@@ -248,6 +248,32 @@ func TestHandleAuthLogin_RemoteDefaultPasswordMustChange(t *testing.T) {
 		if c.Name == auth.CookieName && c.Value != "" {
 			t.Error("remote default login must not issue a session cookie")
 		}
+	}
+}
+
+func TestHandleAuthLogin_RemoteDefaultPassword_HostSpoofingFails(t *testing.T) {
+	authTestEnv(t)
+	auth.ResetLoginLimiter()
+	repo, cleanup := setupTestDB(t)
+	defer cleanup()
+	h := NewDashboardHandler(repo)
+
+	// Attacker sends Host: localhost from a remote IP
+	body := `{"password":"123456"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Host = "localhost"
+	rec := httptest.NewRecorder()
+	h.HandleAuthLogin(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for remote default password even with Host: localhost, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["mustChangePassword"] != true {
+		t.Errorf("expected mustChangePassword=true, got %v", out["mustChangePassword"])
 	}
 }
 

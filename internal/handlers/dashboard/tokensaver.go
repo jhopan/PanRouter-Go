@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
+	json "encoding/json/v2"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/tokensaver"
-	json "encoding/json/v2"
 )
 
 // TestRTKRequest represents the request body for POST /api/tokensaver/rtk/test.

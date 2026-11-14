@@ -9,12 +9,12 @@ package providers
 // HTTP 426 once cli-chat-proxy required 1.0.13.
 const (
 	// CodexCLIVersion is the codex CLI identity OpenAI's backend sees.
-	CodexCLIVersion = "0.159.0"
+	CodexCLIVersion = "0.167.1"
 	// CodexCLIUserAgent is the User-Agent header the codex backend expects.
 	CodexCLIUserAgent = "codex_cli_rs/" + CodexCLIVersion
 	// CodexCLIVersionHeader carries the same value in the `version` header,
 	// which upstream sends alongside the User-Agent. Omitting it is what
-	// leaves newer Codex models gated (upstream decolua/panrouter ca6e8407).
+	// leaves newer Codex models gated (upstream decolua/9router ca6e8407).
 	CodexCLIVersionHeader = CodexCLIVersion
 
 	// GrokCLIVersion is the @xai-official/grok identity cli-chat-proxy.grok.com
@@ -39,8 +39,13 @@ const (
 
 	// Antigravity client identifiers. Google Cloud Code upstream requires the 'cli'
 	// flavor for Gemini 4 Argon tiered models (the 'ide' flavor receives HTTP 404).
-	AntigravityCLIVersion   = "1.4.0"
-	AntigravityIDEVersion   = "2.23.0"
-	AntigravityCLIUserAgent = "antigravity/cli/" + AntigravityCLIVersion + " (aidev_client; os_type=windows; arch=amd64; cl=1000494485; auth_method=consumer)"
+	// Version and cl observed on the real agy 1.5.1 release (2026-11-05,
+	// capture published same-day in iamxeph/pi-provider-antigravity#108); cl
+	// is not a binary constant, it comes from runtime config, so each bump
+	// needs a fresh live capture. os_type/arch stay pinned to windows/amd64
+	// on purpose so every pooled account presents one identical fingerprint.
+	AntigravityCLIVersion   = "1.5.1"
+	AntigravityIDEVersion   = "2.24.0"
+	AntigravityCLIUserAgent = "antigravity/cli/" + AntigravityCLIVersion + " (aidev_client; os_type=windows; arch=amd64; cl=1014269460; auth_method=consumer)"
 	AntigravityIDEUserAgent = AntigravityCLIUserAgent
 )

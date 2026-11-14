@@ -1,6 +1,9 @@
 package chat
 
 import (
+	"database/sql"
+	"errors"
+	"net/http"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/log"
@@ -8,9 +11,6 @@ import (
 	"panrouter/proxy/internal/models"
 	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/thinking"
-	"database/sql"
-	"errors"
-	"net/http"
 	"strings"
 )
 

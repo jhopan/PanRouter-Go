@@ -1,12 +1,13 @@
 package translator
 
 import (
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/thinking"
 	"bytes"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/thinking"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -96,6 +97,65 @@ type GeminiFunctionResp struct {
 
 type GeminiFuncResp struct {
 	Result any `json:"result,omitempty"`
+	// raw holds the verbatim response object bytes, captured on unmarshal.
+	// The client request direction stringifies `result` when it is truthy and
+	// falls back to the whole response object otherwise (upstream
+	// `response?.result || response || {}`), so keys beside "result" must
+	// survive the decode.
+	raw jsontext.Value
+	// resultRaw holds the verbatim `result` value bytes. Re-emitting them
+	// verbatim matters: decoding result into a map loses the member order,
+	// and json/v2 re-marshals decoded maps in unstable order, which would
+	// make the tool payload non-deterministic byte for byte.
+	resultRaw jsontext.Value
+}
+
+// UnmarshalJSON decodes the known result field and keeps the verbatim object
+// for the whole-response fallback.
+func (r *GeminiFuncResp) UnmarshalJSON(data []byte) error {
+	type alias GeminiFuncResp
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*r = GeminiFuncResp(a)
+	if len(data) > 0 {
+		r.raw = append(jsontext.Value(nil), data...)
+	}
+	var fields struct {
+		Result jsontext.Value `json:"result"`
+	}
+	if err := json.Unmarshal(data, &fields); err == nil && len(fields.Result) > 0 {
+		r.resultRaw = append(jsontext.Value(nil), fields.Result...)
+	}
+	return nil
+}
+
+// remoteImageMimeType maps a remote image URL extension to a concrete MIME
+// type for the fileData fallback in convertContentToGeminiParts. The result
+// comes from a fixed set, never from the URL, so a caller-supplied URL cannot
+// inject anything into the emitted MIME string; unknown extensions fall back
+// to the default. Port of decolua/9router 7ba1d1ca (remoteImageMimeType),
+// serving the same Antigravity "Unsupported mime type: image/*" 400).
+func remoteImageMimeType(rawURL string) string {
+	path := rawURL
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	if idx := strings.IndexByte(path, '#'); idx >= 0 {
+		path = path[:idx]
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".bmp":
+		return "image/bmp"
+	}
+	return "image/png"
 }
 
 type GeminiInlineData struct {
@@ -181,8 +241,13 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 		TopK                *int           `json:"top_k,omitempty"`
 		Stream              bool           `json:"stream,omitempty"`
 		Tools               jsontext.Value `json:"tools,omitempty"`
-		ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
-		Thinking            *struct {
+		ToolChoice          jsontext.Value `json:"tool_choice,omitempty"`
+		// ResponseFormat carries the client's OpenAI response_format (json_object
+		// / json_schema). The request is rebuilt field by field below, so a field
+		// this struct does not name is a field the Gemini upstream never sees.
+		ResponseFormat  jsontext.Value `json:"response_format,omitempty"`
+		ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+		Thinking        *struct {
 			Type         string `json:"type"`
 			BudgetTokens int    `json:"budget_tokens"`
 		} `json:"thinking,omitempty"`
@@ -212,7 +277,7 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 	// id->name map keeps only the LAST name and an earlier turn's tool result
 	// would then be renamed to the later tool. Each tool result consumes the
 	// oldest unconsumed name for its id, so a functionResponse always answers the
-	// functionCall it belongs to. Parity with decolua/panrouter #4273 / #4589.
+	// functionCall it belongs to. Parity with decolua/9router #4273 / #4589.
 	tcID2Names := make(map[string][]string)
 	tcID2Name := make(map[string]string)
 	for _, msg := range msgs {
@@ -305,6 +370,7 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 				if ts == "" {
 					ts = GetGeminiThoughtSignature(tc.ID, sessionID, oreq.Model)
 				}
+				ts = NormalizeGeminiThoughtSignature(ts)
 				if ts == "" && !firstFunctionCallSeen {
 					ts = DefaultThinkingSignature
 				}
@@ -393,11 +459,31 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 	}
 
 	// Normalize Gemini contents: merge adjacent same-role messages, strip empty parts,
-	// and ensure first turn is "user" (parity with decolua/panrouter v0.5.75 #e7b5f09).
+	// and ensure first turn is "user" (parity with decolua/9router v0.5.75 #e7b5f09).
 	req.Contents = NormalizeGeminiContentsForModel(req.Contents, oreq.Model)
 
 	// Tools
-	if len(oreq.Tools) > 0 {
+	// tool_choice maps to Gemini toolConfig mode:
+	//   "none"   -> NONE  (don't call any tool; don't send tool declarations)
+	//   "required" -> ANY (force at least one tool call)
+	//   "auto"/unset -> VALIDATED (default)
+	toolConfigMode := "VALIDATED"
+	toolChoiceStr := ""
+	if len(oreq.ToolChoice) > 0 {
+		var s string
+		if json.Unmarshal(oreq.ToolChoice, &s) == nil {
+			toolChoiceStr = s
+		}
+	}
+	if toolChoiceStr != "" {
+		switch toolChoiceStr {
+		case "none":
+			toolConfigMode = "NONE"
+		case "required":
+			toolConfigMode = "ANY"
+		}
+	}
+	if toolChoiceStr != "none" && len(oreq.Tools) > 0 {
 		var openaiTools []OpenAITool
 		if err := json.Unmarshal(oreq.Tools, &openaiTools); err != nil {
 			return nil, fmt.Errorf("parse tools: %w", err)
@@ -416,9 +502,18 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 			req.Tools = []GeminiTool{{FunctionDeclarations: decls}}
 			req.ToolConfig = map[string]any{
 				"functionCallingConfig": map[string]any{
-					"mode": "VALIDATED",
+					"mode": toolConfigMode,
 				},
 			}
+		}
+	}
+	if toolChoiceStr == "none" && req.ToolConfig == nil {
+		// No tool declarations but tool_choice: none — still tell Gemini not to
+		// invoke any built-in capability.
+		req.ToolConfig = map[string]any{
+			"functionCallingConfig": map[string]any{
+				"mode": "NONE",
+			},
 		}
 	}
 
@@ -455,6 +550,28 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 		probe["enable_thinking"] = true
 	}
 	intent := thinking.Extract(probe)
+	// Parse include_thoughts / includeThoughts from the raw OpenAI body for the
+	// gemini-level wire format. includeThoughts defaults to true when thinking
+	// is active on the wire (level != "minimal" after clamping); the client can
+	// opt out with include_thoughts: false / includeThoughts: false. When the
+	// effective level is "minimal" (no thinking), GeminiConfig ignores it.
+	if intent != nil {
+		var raw map[string]any
+		if err := json.Unmarshal(openaiBody, &raw); err == nil {
+			if v, ok := raw["include_thoughts"]; ok {
+				if b, ok := v.(bool); ok {
+					intent.IncludeThoughts = &b
+				}
+			}
+			if intent.IncludeThoughts == nil {
+				if v, ok := raw["includeThoughts"]; ok {
+					if b, ok := v.(bool); ok {
+						intent.IncludeThoughts = &b
+					}
+				}
+			}
+		}
+	}
 	// The capability rows are model patterns, and the pattern table carries no
 	// provider scope, so the lookup is provider-agnostic by design: a vendor
 	// prefix on the model id is stripped and the global row for the bare id
@@ -476,6 +593,17 @@ func TranslateOpenAIToGeminiWithSession(openaiBody []byte, sessionID string) ([]
 	}
 	if maxTokens != nil {
 		genConfig["maxOutputTokens"] = *maxTokens
+	}
+	// Carry the client's OpenAI response_format onto Gemini's native structured
+	// output (generationConfig.responseMimeType / responseJsonSchema). Without
+	// this, a client asking for JSON got free text silently: the request is
+	// rebuilt field by field, and response_format was dropped on the way.
+	// Parity with KeiRouter transform.geminiResponseFormat.
+	if mime, schema, ok := geminiResponseFormat(oreq.ResponseFormat); ok {
+		genConfig["responseMimeType"] = mime
+		if schema != nil {
+			genConfig["responseJsonSchema"] = schema
+		}
 	}
 	if len(genConfig) > 0 {
 		configJSON, err := json.Marshal(genConfig, json.Deterministic(true))
@@ -517,7 +645,7 @@ func moveFunctionResponsesLast(parts []GeminiPart) []GeminiPart {
 func extractThoughtSig(id string) string {
 	const sep = "__ts__"
 	if _, after, ok := strings.CutLast(id, sep); ok && after != "" {
-		return after
+		return NormalizeGeminiThoughtSignature(after)
 	}
 	return ""
 }
@@ -974,14 +1102,22 @@ func convertContentToGeminiParts(content any) []GeminiPart {
 								mimeType := url[5:semi]
 								if comma := strings.Index(url, ","); comma > 0 {
 									data := url[comma+1:]
-									parts = append(parts, GeminiPart{
-										InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
-									})
+									// Claude under Antigravity rejects images >5MB base64
+									// (OMP max-image-payload-bytes 5242880 in google-antigravity.kdl).
+									// Dropping over-budget frames keeps the turn alive.
+									if len(data) <= 5242880 {
+										parts = append(parts, GeminiPart{
+											InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
+										})
+									}
 								}
 							}
 						} else if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+							// Antigravity rejects the wildcard (400 "Unsupported
+							// mime type: image/*"), so the fallback emits a
+							// concrete type inferred from a fixed extension set.
 							parts = append(parts, GeminiPart{
-								FileData: &GeminiFileData{FileUri: url, MimeType: "image/*"},
+								FileData: &GeminiFileData{FileUri: url, MimeType: remoteImageMimeType(url)},
 							})
 						}
 					}
@@ -1163,7 +1299,7 @@ func geminiFinishToOpenAI(reason string) string {
 // within a single assistant turn — a replayed id would otherwise make an
 // earlier turn's result carry a later tool's name. Returns "" when no call for
 // the id is known, so the caller can fall back to the id-derived name.
-// Parity with decolua/panrouter #4273 / #4589.
+// Parity with decolua/9router #4273 / #4589.
 func nextToolNameForID(queued map[string][]string, fallback map[string]string, cursor map[string]int, id, cleanID string) string {
 	queue, key := queued[id], id
 	if len(queue) == 0 && cleanID != id {

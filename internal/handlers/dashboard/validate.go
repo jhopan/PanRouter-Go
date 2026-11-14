@@ -13,13 +13,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 
+	"panrouter/proxy/internal/customjson"
 	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlers/media"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/models"
@@ -32,7 +35,7 @@ import (
 const probeMessageContent = "Hi there, how are you?"
 
 // ClassifyUpstreamNetworkError classifies network errors during probe/models fetch.
-// Parity with decolua/panrouter#4843.
+// Parity with decolua/9router#4843.
 func ClassifyUpstreamNetworkError(err error) (int, string, string) {
 	if err == nil {
 		return http.StatusOK, "", ""
@@ -99,6 +102,10 @@ func isProxyFailure(err error, resp *http.Response) bool {
 var validateProbeDo = func(ctx context.Context, method, rawURL string, headers map[string]string, body []byte) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, validateProbeTimeout)
 	defer cancel()
+	// A caller-supplied identity always wins; an unset one would go out as the
+	// Go default, which Cloudflare-fronted catalogues (Nous Research) answer
+	// with HTTP 403 "Attention Required!".
+	headers = handlerutil.WithDefaultUserAgent(headers)
 	var reader io.Reader
 	if len(body) > 0 {
 		reader = bytes.NewReader(body)
@@ -164,6 +171,10 @@ func (h *DashboardHandler) HandleValidateProvider(w http.ResponseWriter, r *http
 		Provider             string         `json:"provider"`
 		APIKey               string         `json:"apiKey"`
 		ProviderSpecificData map[string]any `json:"providerSpecificData"`
+		// ValidateOnly and ModelID only apply to custom JSON nodes: saving a
+		// connection checks configuration, a test request names its model.
+		ValidateOnly bool   `json:"validateOnly"`
+		ModelID      string `json:"modelId"`
 	}
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -181,6 +192,10 @@ func (h *DashboardHandler) HandleValidateProvider(w http.ResponseWriter, r *http
 	// Custom provider nodes (OpenAI-compatible, Anthropic-compatible, Custom Embedding)
 	if h.Repo != nil {
 		if node, nodeData, err := h.Repo.GetProviderNodeByID(provider); err == nil && node != nil {
+			if nodeData != nil && nodeData.APIType == customjson.APIType {
+				handlerutil.WriteJSON(w, http.StatusOK, validateCustomJSONConnection(r.Context(), nodeData, req.APIKey, strings.TrimSpace(req.ModelID), req.ValidateOnly))
+				return
+			}
 			h.validateProviderNodeConnection(w, r, node, nodeData, req.APIKey, req.ProviderSpecificData)
 			return
 		}
@@ -350,7 +365,7 @@ func (h *DashboardHandler) validateProviderNodeConnection(
 
 	// 3. OpenAI Compatible (Default)
 	base := strings.TrimSuffix(baseURL, "/")
-	status, body, err := validateProbeDo(ctx, http.MethodGet, base+"/models", map[string]string{
+	status, body, err := validateProbeDo(ctx, http.MethodGet, chat.CompatibleNodeModelsURL(base), map[string]string{
 		"Authorization": "Bearer " + apiKey,
 	}, nil)
 	if err != nil {
@@ -393,7 +408,7 @@ func (h *DashboardHandler) validateProviderNodeConnection(
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": probeMessageContent}},
 	})
-	chatStatus, _, chatErr := validateProbeDo(ctx, http.MethodPost, base+"/chat/completions", map[string]string{
+	chatStatus, _, chatErr := validateProbeDo(ctx, http.MethodPost, chat.ChatCompletionsURL(base), map[string]string{
 		"Authorization": "Bearer " + apiKey,
 		"Content-Type":  "application/json",
 	}, chatPayload)
@@ -487,10 +502,12 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		return validateOutcome{valid: true, supported: true}
 	case "v1m":
 		return validateV1M(ctx, apiKey)
-	case "commandcode":
-		// The registry's /alpha/generate consumes credits and needs a
-		// conversation id, so only whoami can validate a key against this
-		// upstream.
+	case "nace":
+		return validateSystemOneLane(ctx, apiKey, naceProbeURL, naceProbeModel)
+	case "commandcode", "commandcode-goat":
+		// Command Code uses the same user_... key across the CLI (/alpha/generate)
+		// and the documented Provider API. whoami validates the key without
+		// spending credits on either lane.
 		headers := validateAuthHeaders(cfg, apiKey)
 		headers["Accept"] = "application/json"
 		status, _, err := validateProbeDo(ctx, http.MethodGet,
@@ -612,7 +629,7 @@ func validateNous(ctx context.Context, apiKey string) validateOutcome {
 func validateCloudflareAI(ctx context.Context, cfg providers.ProviderConfig, apiKey string, psd map[string]any) validateOutcome {
 	accountID := psdStr(psd, "accountId")
 	if accountID == "" {
-		accountID = cloudflareAccountFromBaseURL(cfg.BaseURL)
+		accountID = os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 	}
 	if accountID == "" {
 		return validateOutcome{supported: true, message: "Missing Account ID"}
@@ -638,17 +655,17 @@ func validateCloudflareAI(ctx context.Context, cfg providers.ProviderConfig, api
 	return out
 }
 
-// validateV1M probes v1m's only endpoint. The registry ships no /models for
-// it, so the cheapest call that proves the key works is a one-token System One
-// evaluation; a rejected body still proves the credential, so only 401/403
-// count as invalid.
-func validateV1M(ctx context.Context, apiKey string) validateOutcome {
+// validateSystemOneLane proves a key against a System One lane with the
+// cheapest call the protocol offers: one single-token noul evaluation. Both
+// v1m and Nace Drex answer exactly this shape, so the body, the auth header
+// and the rule that only a 401/403 means an invalid key are shared.
+func validateSystemOneLane(ctx context.Context, apiKey, probeURL, probeModel string) validateOutcome {
 	payload, _ := json.Marshal(map[string]any{
-		"model":     v1mProbeModel,
+		"model":     probeModel,
 		"state":     "probe",
 		"questions": map[string]any{"probe": map[string]string{"type": "noul"}},
 	})
-	status, _, err := validateProbeDo(ctx, http.MethodPost, v1mProbeURL, map[string]string{
+	status, _, err := validateProbeDo(ctx, http.MethodPost, probeURL, map[string]string{
 		"Authorization": "Bearer " + apiKey,
 		"Content-Type":  "application/json",
 	}, payload)
@@ -661,19 +678,8 @@ func validateV1M(ctx context.Context, apiKey string) validateOutcome {
 	}
 }
 
-// cloudflareAccountFromBaseURL extracts the account id baked into the registry
-// BaseURL from a CLOUDFLARE_ACCOUNT_ID env var, if any.
-func cloudflareAccountFromBaseURL(baseURL string) string {
-	const marker = "/accounts/"
-	idx := strings.Index(baseURL, marker)
-	if idx < 0 {
-		return ""
-	}
-	rest := baseURL[idx+len(marker):]
-	if end := strings.Index(rest, "/"); end >= 0 {
-		return rest[:end]
-	}
-	return rest
+func validateV1M(ctx context.Context, apiKey string) validateOutcome {
+	return validateSystemOneLane(ctx, apiKey, v1mProbeURL, v1mProbeModel)
 }
 
 func validateAzure(ctx context.Context, apiKey string, psd map[string]any) validateOutcome {
@@ -834,7 +840,7 @@ func validateGrokWeb(ctx context.Context, apiKey string) validateOutcome {
 	})
 	headers := map[string]string{
 		"Accept":             "*/*",
-		"Accept-Encoding":    "gzip, deflate, br, zstd",
+		"Accept-Encoding":    "gzip, deflate",
 		"Accept-Language":    "en-US,en;q=0.9",
 		"Cache-Control":      "no-cache",
 		"Content-Type":       "application/json",

@@ -11,8 +11,8 @@ import (
 	"slices"
 	"strings"
 
-	"panrouter/proxy/internal/handlerutil"
 	json "encoding/json/v2"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 // Hermes per-profile settings API. Port of upstream
@@ -99,11 +99,11 @@ func (h *HermesHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := parseHermesSettings(yaml)
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"installed":  true,
-		"profile":    home,
-		"settings":   settings,
+		"installed":    true,
+		"profile":      home,
+		"settings":     settings,
 		"hasPanRouter": settings.hasPanRouterConfig(),
-		"configPath": home.ConfigPath,
+		"configPath":   home.ConfigPath,
 	})
 }
 
@@ -421,7 +421,6 @@ func resolveHermesHomeParam(w http.ResponseWriter, profile string) (hermesHome, 
 	}
 	return home, true
 }
-
 
 // writeHermesConfig writes config.yaml. The default home is created on demand;
 // a named profile's directory is never fabricated, so a typo cannot leave an

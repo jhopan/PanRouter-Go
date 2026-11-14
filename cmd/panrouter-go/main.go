@@ -1,0 +1,382 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/urfave/cli/v2"
+	"go.uber.org/fx"
+
+	"panrouter/proxy/internal/app"
+	"panrouter/proxy/internal/daemon"
+	"panrouter/proxy/internal/shutdown"
+	"panrouter/proxy/internal/updater"
+)
+
+// binaryName lets the same executable answer to `opencode-go`, so a renamed
+// copy (or symlink) shows the matching name in help and errors.
+func binaryName() string {
+	if base := filepath.Base(os.Args[0]); strings.HasPrefix(base, "opencode-go") {
+		return "opencode-go"
+	}
+	return "panrouter-go"
+}
+
+// guideMisplacedRootFlag rewrites the "flag provided but not defined" message
+// for the flags that do exist, one level up.
+//
+// urfave/cli reports an unknown flag by name only, so `panrouter-go start
+// --rtk=false` prints "flag provided but not defined: -rtk" about a flag the
+// binary does define — which sends the reader looking for a missing feature
+// rather than at the order of their own arguments. The hook moves the flag
+// ahead of the sub-command instead.
+func guideMisplacedRootFlag(_ *cli.Context, err error, isSubcommand bool) error {
+	if !isSubcommand {
+		return err
+	}
+	msg := err.Error()
+	const prefix = "flag provided but not defined: -"
+	if !strings.HasPrefix(msg, prefix) {
+		return err
+	}
+	name := strings.TrimPrefix(msg, prefix)
+	// Only flags that genuinely exist at the root are worth rewriting; a real
+	// typo keeps urfave's message and its suggestions.
+	if !rootFlagNames[name] {
+		return err
+	}
+	return fmt.Errorf("%s is a global flag — put it before the sub-command: %s --%s=... %s",
+		name, binaryName(), name, "<command>")
+}
+
+// rootFlagNames is the set the hook may rewrite, kept beside the app
+// definition so a flag added there cannot silently lose its guidance.
+var rootFlagNames = map[string]bool{
+	"rtk":                 true,
+	"caveman":             true,
+	"ponytail":            true,
+	"adhd":                true,
+	"auto-update":         true,
+	"no-injection-guard":  true,
+	daemon.BackgroundName: true,
+}
+
+func main() {
+	self := binaryName()
+	app := newApp(self)
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// newApp builds the CLI app with the misplaced-root-flag guidance installed on
+// every sub-command.
+//
+// App.OnUsageError alone does not cover this: urfave/cli copies it onto the
+// root command only, and a flag that fails to parse does so inside the
+// sub-command, whose own (nil) hook is the one consulted. Each command
+// therefore gets the hook explicitly.
+
+// installUsageGuidance walks the command tree, giving every command the
+// guidance hook unless it already carries its own.
+func installUsageGuidance(commands []*cli.Command) {
+	for _, c := range commands {
+		if c.OnUsageError == nil {
+			c.OnUsageError = guideMisplacedRootFlag
+		}
+		installUsageGuidance(c.Subcommands)
+	}
+}
+
+// newApp builds the CLI app with the misplaced-root-flag guidance installed
+// on every sub-command.
+func newApp(self string) *cli.App {
+	app := buildApp(self)
+	installUsageGuidance(app.Commands)
+	return app
+}
+func buildApp(self string) *cli.App {
+	return &cli.App{
+		Name:  self,
+		Usage: "AI API proxy gateway with token saver features",
+		// A root flag placed after the sub-command is the single most common
+		// mistake here: `panrouter-go start --rtk=false` is a typo for
+		// `panrouter-go --rtk=false start`, and the stock message names a flag
+		// that exists, which reads as though the binary lost it.
+		OnUsageError: guideMisplacedRootFlag,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "rtk",
+				Value: os.Getenv("RTK_ENABLED") != "false",
+				Usage: "enable RTK input compression (env: RTK_ENABLED)",
+			},
+			&cli.BoolFlag{
+				Name:  "caveman",
+				Value: os.Getenv("CAVEMAN_ENABLED") == "true",
+				Usage: "enable Caveman terse output style (env: CAVEMAN_ENABLED)",
+			},
+			&cli.BoolFlag{
+				Name:  "ponytail",
+				Value: os.Getenv("PONYTAIL_ENABLED") == "true",
+				Usage: "enable Ponytail lazy dev code style (env: PONYTAIL_ENABLED)",
+			},
+			&cli.BoolFlag{
+				Name:  "adhd",
+				Value: os.Getenv("ADHD_ENABLED") == "true",
+				Usage: "enable I have ADHD action-first output style (env: ADHD_ENABLED)",
+			},
+			&cli.BoolFlag{
+				Name:  "auto-update",
+				Value: os.Getenv("AUTO_UPDATE") == "true",
+				Usage: "automatically download and install updates if available (env: AUTO_UPDATE)",
+			},
+			&cli.BoolFlag{
+				Name:  "no-injection-guard",
+				Value: os.Getenv("INJECTION_GUARD_DISABLED") == "true",
+				Usage: "disable the prompt-injection detector (on by default; env: INJECTION_GUARD_DISABLED)",
+			},
+			&cli.BoolFlag{
+				Name:    daemon.BackgroundName,
+				Aliases: []string{"d"},
+				Usage:   "run as a background daemon: detaches from the terminal and returns (env: PANROUTER_BACKGROUND)",
+			},
+		},
+		Commands: []*cli.Command{
+			{
+				Name:  "version",
+				Usage: "Display version details and check for updates",
+				Action: func(cCtx *cli.Context) error {
+					info, err := updater.CheckUpdate(cCtx.Context)
+					if err != nil {
+						fmt.Printf("panrouter-go version %s (%s/%s)\nUpdate check failed: %v\n", updater.CurrentVersion, runtime.GOOS, runtime.GOARCH, err)
+						return nil
+					}
+					fmt.Printf("panrouter-go version %s (%s/%s)\n", info.CurrentVersion, info.OS, info.Arch)
+					fmt.Printf("Latest version: %s\n", info.LatestVersion)
+					if info.HasUpdate {
+						fmt.Printf("\n🚀 NEW UPDATE AVAILABLE! (%s)\nNotes: %s\nRun 'panrouter-go update' to install.\n", info.LatestVersion, info.ReleaseNotes)
+					} else {
+						fmt.Println("App is up to date.")
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "update",
+				Usage: "Check and perform self-update to the latest version",
+				Action: func(cCtx *cli.Context) error {
+					fmt.Printf("Checking for updates (current: %s)...\n", updater.CurrentVersion)
+					info, err := updater.CheckUpdate(cCtx.Context)
+					if err != nil {
+						return fmt.Errorf("update check failed: %w", err)
+					}
+					if !info.HasUpdate {
+						fmt.Printf("panrouter-go is already on the latest version (%s).\n", info.CurrentVersion)
+						return nil
+					}
+					fmt.Printf("Downloading update v%s...\n", info.LatestVersion)
+					if err := updater.PerformSelfUpdate(info.DownloadURL, info.SHA256); err != nil {
+						return fmt.Errorf("update failed: %w", err)
+					}
+					fmt.Println("✅ panrouter-go updated successfully!")
+					return nil
+				},
+			},
+			{
+				Name:  "mitm",
+				Usage: "Manage MITM proxy for CLI tool traffic interception",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "enable",
+						Usage:  "Start MITM proxy (DNS redirect + TLS intercept on :443)",
+						Action: mitmEnable,
+					},
+					{
+						Name:   "disable",
+						Usage:  "Stop MITM proxy and remove DNS entries",
+						Action: mitmDisable,
+					},
+					{
+						Name:   "status",
+						Usage:  "Show MITM proxy status",
+						Action: mitmStatus,
+					},
+				},
+			},
+			{
+				Name:   "start",
+				Usage:  "Start the gateway in the background and return (same as --background)",
+				Action: startDetached,
+			},
+			{
+				Name:   "stop",
+				Usage:  "Stop the background gateway",
+				Action: stopDetached,
+			},
+			{
+				Name:   "restart",
+				Usage:  "Restart the background gateway",
+				Action: restartDetached,
+			},
+			{
+				Name:   "status",
+				Usage:  "Show whether the background gateway is running",
+				Action: statusDetached,
+			},
+			{
+				Name:  "logs",
+				Usage: "Print the tail of the background run log",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "lines", Aliases: []string{"n"}, Value: 40, Usage: "number of log lines to print"},
+				},
+				Action: logsDetached,
+			},
+			{
+				Name:  "service",
+				Usage: "Manage the gateway service: boot autostart plus start/stop/restart",
+				Subcommands: []*cli.Command{
+					{
+						Name:  "install",
+						Usage: "Install autostart (systemd user unit, launchd agent, OpenRC/runit service, cron @reboot, or scheduled task)",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "backend", Usage: "force a backend: systemd, launchd, openrc, runit, cron"},
+						},
+						Action: serviceInstall,
+					},
+					{
+						Name:   "uninstall",
+						Usage:  "Remove the autostart entry",
+						Action: serviceUninstall,
+					},
+					{
+						Name:   "start",
+						Usage:  "Start the supervised service now (falls back to background daemon)",
+						Action: serviceStart,
+					},
+					{
+						Name:   "stop",
+						Usage:  "Stop the supervised service now, stays enabled for boot",
+						Action: serviceStop,
+					},
+					{
+						Name:   "restart",
+						Usage:  "Restart the supervised service now",
+						Action: serviceRestart,
+					},
+					{
+						Name:   "status",
+						Usage:  "Show the autostart entry in effect",
+						Action: serviceStatus,
+					},
+				},
+			},
+		},
+		Action: foregroundOrBackground,
+	}
+}
+
+// newApp builds the CLI app with the misplaced-root-flag guidance installed on
+// every sub-command.
+//
+// App.OnUsageError alone does not cover this: urfave/cli copies it onto the
+// root command only, and a flag that fails to parse does so inside the
+// sub-command, whose own (nil) hook is the one consulted. Each command
+// therefore gets the hook explicitly.
+
+// foregroundOrBackground is the flag-free entry point: with --background (or
+// -d, or the `start` sub-command) it detaches and returns, otherwise it runs
+// the server in this terminal exactly as before.
+//
+// Any positional argument reaching here matched no command, so it is a typo
+// or a stale name — never boot the server on it. Booting on unknown input is
+// what trapped users behind `bind: address already in use`: typing a
+// renamed command while the supervised unit already held the port started a
+// second gateway instead of running the intended subcommand.
+func foregroundOrBackground(cCtx *cli.Context) error {
+	if args := cCtx.Args(); args.Len() > 0 {
+		return unknownCommandError(args.Slice())
+	}
+	if cCtx.Bool(daemon.BackgroundName) {
+		return startDetached(cCtx)
+	}
+	// On a terminal, bare `panrouter-go` offers the interface picker; without one
+	// (service unit, container, pipe) it boots the server as before.
+	if stdinIsTerminal() {
+		return runMenu(cCtx)
+	}
+	return runServer(cCtx)
+}
+
+// unknownCommandError turns a missed command dispatch into guidance instead
+// of a boot.
+func unknownCommandError(args []string) error {
+	return fmt.Errorf("unknown command %q — see '%s help'", args[0], binaryName())
+}
+
+func runServer(cCtx *cli.Context) error {
+	if logPath := os.Getenv("LOG_FILE"); logPath != "" {
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			log.SetOutput(logFile)
+			defer logFile.Close()
+		} else {
+			log.Printf("[config] warning: cannot open LOG_FILE=%s, using stderr: %v", logPath, err)
+		}
+	}
+
+	cliParams := app.NewCLIParams(cCtx)
+
+	fxApp := fx.New(
+		app.AppModule,
+		fx.Replace(cliParams),
+		app.DefaultFxLogger(),
+	)
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := fxApp.Start(startCtx); err != nil {
+		return err
+	}
+
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	// A daemon records its PID so `panrouter-go stop|status|restart` can find it
+	// after the launching terminal is long gone.
+	if daemon.IsBackgroundProcess() {
+		daemon.RegisterPID()
+		defer daemon.UnregisterPID()
+	}
+
+	select {
+	case <-signals: // ^C or a supervisor's SIGTERM
+	case <-shutdown.StopRequested():
+		// The dashboard shutdown button and the updater's restart hook both
+		// land here. Windows cannot raise SIGTERM on itself, so this request
+		// channel is the only portable way to stop this process.
+	}
+
+	// A second signal force-quits immediately (e.g. a stream stuck mid-drain).
+	go func() {
+		<-signals
+		fmt.Fprintln(os.Stdout, "\n  Force quitting...")
+		os.Exit(1)
+	}()
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stopCancel()
+	stopErr := fxApp.Stop(stopCtx)
+
+	// The listener is closed now, so a restart hook can bind the same port.
+	shutdown.RunAfterStop()
+	return stopErr
+}

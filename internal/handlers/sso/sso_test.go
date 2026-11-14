@@ -117,7 +117,7 @@ func TestHandleSamlTest_ValidatesConfiguration(t *testing.T) {
 
 	// Complete configuration passes.
 	cert := selfSignedPEM(t)
-	body := `{"samlEntryPoint":"https://idp.example.com/sso","samlIssuer":"urn:9router:sp","samlCert":` + toJSONString(cert) + `}`
+	body := `{"samlEntryPoint":"https://idp.example.com/sso","samlIssuer":"urn:panrouter:sp","samlCert":` + toJSONString(cert) + `}`
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/saml/test", strings.NewReader(body))
 	req.Header.Set("Host", "localhost:20130")
 	rec = httptest.NewRecorder()
@@ -149,7 +149,7 @@ func TestHandleSamlMetadata_ServesServiceProviderXML(t *testing.T) {
 		t.Errorf("expected application/xml, got %q", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `entityID="urn:9router:sp"`) {
+	if !strings.Contains(body, `entityID="urn:panrouter:sp"`) {
 		t.Errorf("expected default issuer entityID, got %s", body)
 	}
 	if !strings.Contains(body, "/api/auth/saml/acs") {
@@ -195,6 +195,27 @@ func TestFormatCertificate_AcceptsRawBase64(t *testing.T) {
 	}
 	if formatCertificate("") != nil {
 		t.Error("empty certificate should return nil")
+	}
+}
+
+func TestSSOUtils(t *testing.T) {
+	if got := firstNonEmpty("", "  ", "hello", "world"); got != "hello" {
+		t.Errorf("firstNonEmpty = %q, want hello", got)
+	}
+	if got := firstNonEmpty("", "   "); got != "" {
+		t.Errorf("firstNonEmpty all empty = %q, want empty", got)
+	}
+	if got := xmlEscape("<hello & 'world' \"test\">"); !strings.Contains(got, "&lt;") || !strings.Contains(got, "&amp;") {
+		t.Errorf("xmlEscape failed: %q", got)
+	}
+
+	w := httptest.NewRecorder()
+	writeMetadataError(w, "something went wrong")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("writeMetadataError status = %d, want 500", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "<Error>something went wrong</Error>") {
+		t.Errorf("writeMetadataError body = %q", w.Body.String())
 	}
 }
 

@@ -15,8 +15,8 @@ import (
 	json "encoding/json/v2"
 
 	"panrouter/proxy/internal/db"
-	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/handlers/chat"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 // setupNvidiaTTS seeds one nvidia connection pointed at mock and returns the

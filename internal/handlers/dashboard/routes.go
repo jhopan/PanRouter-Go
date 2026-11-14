@@ -1,16 +1,22 @@
 package dashboard
 
 import (
+	"context"
 	"net/http"
+	"time"
 
+	"github.com/go-chi/chi/v5"
 	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/dbbackup"
 	"panrouter/proxy/internal/handlers/shared"
+	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/mcpbridge"
 	"panrouter/proxy/internal/middleware"
 	"panrouter/proxy/internal/modelhealth"
+	"panrouter/proxy/internal/models"
 	"panrouter/proxy/internal/observ"
 	"panrouter/proxy/internal/resilience"
 	"panrouter/proxy/internal/semanticcache"
-	"github.com/go-chi/chi/v5"
 )
 
 // Default probe URLs for proxy pool health checks.
@@ -52,6 +58,40 @@ type DashboardHandler struct {
 	// captured the loop at construction would hold nil in production and
 	// record nothing.
 	ModelHealth *modelhealth.Loop
+	// Backup is the automatic database-backup runner (daily snapshots pushed to
+	// a private GitHub repo). Every side effect it performs — the GitHub API
+	// read, the snapshot, the git push — is a field on it, so a test replaces
+	// those instead of reaching the network.
+	Backup *dbbackup.Service
+	// DatabasePath is the SQLite file /api/backup/download serves. Empty means
+	// the configured path, resolved per request so a test can point the route
+	// at a fixture file.
+	DatabasePath string
+	// batchTest runs one connection probe for POST /api/providers/test-batch.
+	// Nil means the production probe (the same testSingleConnection +
+	// persistProbeResult pair the single-row Test button runs); a test injects
+	// a fake sender here so "one attempt per connection" is asserted without a
+	// network and without sleeping.
+	batchTest func(ctx context.Context, conn *models.ProviderConnection) batchTestOutcome
+	// modelProbe runs one per-model probe for POST
+	// /api/providers/{id}/test-models. Nil means the handler was built outside a
+	// boot (tests, tooling) and no probe was wired; the route then refuses rather
+	// than reporting verdicts nothing measured. Production wires the media
+	// handler's probe, so a model test here is the same call the dashboard's Test
+	// button makes.
+	modelProbe func(ctx context.Context, model, kind string) handlerutil.ModelProbeOutcome
+	// MCPBridge is the stdio MCP bridge the /api/mcp routes drive. Nil means the
+	// process-wide bridge (mcpbridge.Default), which is what production uses:
+	// one child per plugin is shared by every request, so a second bridge would
+	// spawn a second npx process under the same plugin name. A test supplies its
+	// own so the routes drive a stub process instead of npx.
+	MCPBridge *mcpbridge.Bridge
+	// coworkRegistry is the one cached Anthropic MCP catalogue entry, with the
+	// upstream TTL and a size cap. The zero value is ready to use.
+	coworkRegistry coworkRegistryCache
+	// coworkMCPNow is the TTL clock for the registry cache. Nil means time.Now;
+	// a test freezes it instead of sleeping.
+	coworkMCPNow func() time.Time
 }
 
 // NewDashboardHandler initializes a DashboardHandler with the provided Repo.
@@ -60,10 +100,15 @@ func NewDashboardHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *Dashboa
 		Repo:              repo,
 		PrimaryProbeURL:   DefaultPrimaryProbeURL,
 		SecondaryProbeURL: DefaultSecondaryProbeURL,
+		Backup:            dbbackup.New(repo),
 	}
 	if len(ts) > 0 && ts[0] != nil {
 		h.TokenSaver = ts[0]
 	}
+	// An install that already had backups switched on keeps its schedule across
+	// a restart: the handler is built once per boot, which is when upstream's
+	// initializeApp starts the loop. A config write re-runs this to match.
+	h.Backup.Configure()
 	return h
 }
 
@@ -91,6 +136,28 @@ func getURLParam(r *http.Request, key string) string {
 // RegisterRoutes registers all dashboard REST endpoints under /api on the router.
 func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 	r.Route("/api", func(r chi.Router) {
+		// Boot surface: the dashboard pings /api/init on load and the language
+		// switcher writes the locale cookie. Both are public upstream
+		// (dashboardGuard PUBLIC_API_PATHS), so their real mounts are in
+		// SetupServerRouter; the mirrors here keep this table complete for the
+		// dashboard package's own tests.
+		r.Get("/init", h.HandleGetInit)
+		r.Get("/locale", h.HandleGetLocale)
+		r.Post("/locale", h.HandleSetLocale)
+
+		// Pricing table the pricing card reads, and the MCP stdio bridge the
+		// cowork plugin view drives. Both sit in the dashboard auth group
+		// upstream (PROTECTED_API_PATHS).
+		r.Get("/pricing", h.HandleGetPricing)
+		r.Get("/mcp/{plugin}/sse", h.HandleMCPSSE)
+		r.Post("/mcp/{plugin}/message", h.HandleMCPMessage)
+
+		// Cowork's network-backed CLI-tools routes: Anthropic's MCP catalogue
+		// (cached for an hour) and an SSRF-gated MCP tools probe. They share the
+		// dashboard auth group with /api/cli-tools/cowork-settings upstream.
+		r.Get("/cli-tools/cowork-mcp-registry", h.HandleCoworkMCPRegistry)
+		r.Post("/cli-tools/cowork-mcp-tools", h.HandleCoworkMCPTools)
+
 		// Connections
 		r.Get("/connections", h.HandleGetConnections)
 		r.Post("/connections", h.HandleCreateConnection)
@@ -101,6 +168,9 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/connections/{id}/test", h.HandleTestConnection)
 		r.Post("/providers/{id}/test", h.HandleTestConnection)
 		r.Get("/providers/{id}/models", h.HandleGetConnectionModels)
+		// Per-model probe: the connection id resolves the provider and its
+		// catalogue, and each model is pinged through the endpoint its kind serves.
+		r.Post("/providers/{id}/test-models", h.HandleTestProviderModels)
 		r.Get("/providers/{id}/export-keys", h.HandleExportProviderKeys)
 		// Bulk removal for the rows the import path writes; the single-row form
 		// stays at DELETE /models/custom/{key}.
@@ -108,6 +178,11 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Get("/providers/{id}/overrides", h.HandleGetProviderOverrides)
 		r.Put("/providers/{id}/overrides", h.HandleSaveProviderOverrides)
 		r.Post("/providers/validate", h.HandleValidateProvider)
+		// Batch connection test and Kilo's free-model feed: the dashboard's
+		// "test all" buttons and the Kilo card, both beside the provider routes
+		// they belong to.
+		r.Post("/providers/test-batch", h.HandleTestProvidersBatch)
+		r.Get("/providers/kilo/free-models", h.HandleGetKiloFreeModels)
 		// The provider registry is the single source of truth for the dashboard's
 		// catalog (category, icon, colour, auth type, service kinds), so the SPA
 		// fetches it instead of shipping a second copy that can drift.
@@ -147,6 +222,9 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Put("/proxy-pools/{id}", h.HandleUpdateProxyPool)
 		r.Delete("/proxy-pools/{id}", h.HandleDeleteProxyPool)
 		r.Post("/proxy-pools/{id}/test", h.HandleTestProxyPool)
+		// Pre-flight for the Netlify CLI, the same read the deploy button makes
+		// before it offers an install instead of a doomed deploy.
+		r.Get("/proxy-pools/netlify-cli-status", h.HandleGetNetlifyCLIStatus)
 
 		// API Keys
 		r.Get("/keys", h.HandleGetApiKeys)
@@ -156,6 +234,7 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/keys/{id}/rotate", h.HandleRotateApiKey)
 		r.Get("/keys/{id}/models", h.HandleGetApiKeyModels)
 		r.Put("/keys/{id}/models", h.HandleSetApiKeyModels)
+		r.Get("/keys/{id}/budget", h.HandleGetApiKeyBudget)
 		r.Put("/keys/{id}", h.HandleUpdateApiKey)
 
 		// F-3 Plans: reusable policy templates the keys inherit from.
@@ -201,6 +280,9 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		// Models
 		r.Get("/models/custom", h.HandleGetCustomModels)
 		r.Get("/models/caps", h.HandleGetModelCaps)
+		// Live cooldown board: which models are parked, and clearing one.
+		r.Get("/models/availability", h.HandleGetModelAvailability)
+		r.Post("/models/availability", h.HandleClearModelCooldown)
 		r.Post("/models/custom", h.HandleSaveCustomModel)
 		r.Delete("/models/custom/{key}", h.HandleDeleteCustomModel)
 		r.Delete("/models/custom/*", h.HandleDeleteCustomModel)
@@ -209,6 +291,20 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/models/auto-disable", h.HandleAutoDisableModels)
 		r.Get("/models/health", h.HandleGetModelHealth)
 		r.Put("/models/health", h.HandleSaveModelHealth)
+
+		// Automatic database backup: GitHub snapshot config, one-shot run, the
+		// mirror download token and its CRUD. The download is the only route
+		// here that authenticates with its own credential (x-backup-token)
+		// instead of the dashboard session, so the server drops it out of the
+		// dashboard auth group — see middleware.RequireDashboardAuth.
+		r.Get("/backup/config", h.HandleGetBackupConfig)
+		r.Post("/backup/config", h.HandlePostBackupConfig)
+		r.Post("/backup/run", h.HandleRunBackup)
+		r.Get("/backup/download", h.HandleDownloadBackup)
+		r.Get("/backup/tokens", h.HandleListBackupTokens)
+		r.Post("/backup/tokens", h.HandleCreateBackupToken)
+		r.Patch("/backup/tokens", h.HandleUpdateBackupToken)
+		r.Delete("/backup/tokens", h.HandleDeleteBackupToken)
 
 		// Settings
 		r.Get("/settings", h.HandleGetSettings)
@@ -239,19 +335,33 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/tunnel/repair-origin", h.HandleTunnelRepairOrigin)
 		r.Get("/tunnel/tailscale-check", h.HandleTailscaleCheck)
 		r.Post("/tunnel/tailscale-enable", h.HandleTailscaleEnable)
+		// SSE install stream: progress lines, then the login URL.
+		r.Post("/tunnel/tailscale-install", h.HandleTailscaleInstall)
 		r.Post("/tunnel/tailscale-disable", h.HandleTailscaleDisable)
 		// Usage & Quotas
 		r.Get("/usage/providers", h.HandleGetUsageProviders)
+		// Usage per client API key. Registered before the {connectionId}
+		// route: chi matches in order, so a route added after it would be
+		// read as a connection id.
+		r.Get("/usage/api-keys", h.HandleGetUsageByAPIKey)
 		r.Get("/usage/{connectionId}", h.HandleGetConnectionUsage)
-		// Codex reset credits. These sit one segment deeper than the
-		// per-connection usage route, so chi matches them without the static
-		// before-parameter ordering that /usage/providers needs.
-		r.Get("/usage/{connectionId}/reset-credits", h.HandleListCodexResetCredits)
-		r.Post("/usage/{connectionId}/reset-credits/consume", h.HandleConsumeCodexResetCredit)
+		// Codex reset credits, upstream names
+		// (src/app/api/usage/[connectionId]/codex-reset-credits/route.js):
+		// GET lists, POST spends one.
+		r.Get("/usage/{connectionId}/codex-reset-credits", h.HandleListCodexResetCredits)
+		r.Post("/usage/{connectionId}/codex-reset-credits", h.HandleConsumeCodexResetCredit)
+		// "Check & release": read the provider's live quota and lift the block
+		// when the provider says the account is usable again.
+		r.Post("/usage/{connectionId}/check-release", h.HandleCheckRelease)
 
 		// GLM Reset Cards (Z.ai international). Only for provider == "glm".
 		r.Get("/usage/{connectionId}/glm-reset-cards", h.HandleGetGLMResetCards)
 		r.Post("/usage/{connectionId}/glm-reset-cards", h.HandleRedeemGLMResetCard)
+
+		// Claude reset credits (cedar_ember grants), upstream's /claude-reset
+		// resource: GET is the list the chooser reads, POST spends one grant.
+		r.Get("/usage/{connectionId}/claude-reset", h.HandleListClaudeResetCredits)
+		r.Post("/usage/{connectionId}/claude-reset", h.HandleConsumeClaudeResetCredit)
 
 		// Cache Analytics & Management
 		r.Get("/resilience", h.HandleGetResilience)

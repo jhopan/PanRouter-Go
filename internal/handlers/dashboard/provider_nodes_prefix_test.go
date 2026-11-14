@@ -1,10 +1,10 @@
 package dashboard
 
 import (
-	"panrouter/proxy/internal/providers"
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"panrouter/proxy/internal/providers"
 	"strings"
 	"testing"
 )

@@ -48,7 +48,7 @@ func TestSSECopy_AbortEmitsInBandErrorFrame(t *testing.T) {
 			name:        "stall watchdog reports a timeout, not a lost socket",
 			cause:       ErrStreamStall,
 			wantMessage: "stream stall timeout",
-			wantCode:    "gateway_timeout",
+			wantCode:    StreamStallCode,
 		},
 		{
 			name:        "context cancellation is not a gateway failure",

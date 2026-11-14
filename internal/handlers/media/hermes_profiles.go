@@ -48,15 +48,15 @@ type hermesHome struct {
 
 // hermesProfile is one entry of the dashboard's profile picker.
 type hermesProfile struct {
-	Name        string  `json:"name"`
-	Dir         string  `json:"dir"`
-	IsDefault   bool    `json:"isDefault"`
-	DisplayName *string `json:"displayName"`
-	Command     string  `json:"command"`
-	Alias       *string `json:"alias"`
-	Model       *string `json:"model"`
-	BaseURL     *string `json:"baseUrl"`
-	HasPanRouter  bool    `json:"hasPanRouter"`
+	Name         string  `json:"name"`
+	Dir          string  `json:"dir"`
+	IsDefault    bool    `json:"isDefault"`
+	DisplayName  *string `json:"displayName"`
+	Command      string  `json:"command"`
+	Alias        *string `json:"alias"`
+	Model        *string `json:"model"`
+	BaseURL      *string `json:"baseUrl"`
+	HasPanRouter bool    `json:"hasPanRouter"`
 }
 
 // hermesRoot is the install root. HERMES_HOME wins over the home directory so
@@ -165,14 +165,14 @@ func buildHermesEntry(home hermesHome) (hermesProfile, error) {
 	delegation := parseHermesDelegationBlock(yaml)
 
 	entry := hermesProfile{
-		Name:        home.Name,
-		Dir:         home.Dir,
-		IsDefault:   home.IsDefault,
-		DisplayName: parseHermesDisplayName(profileYAML),
-		Command:     "hermes",
-		Model:       model.defaultModel(),
-		BaseURL:     model.baseURL(),
-		HasPanRouter:  hasPanRouterConfig(model.provider(), model.baseURL()) || hasPanRouterConfig(delegation.provider(), delegation.baseURL()),
+		Name:         home.Name,
+		Dir:          home.Dir,
+		IsDefault:    home.IsDefault,
+		DisplayName:  parseHermesDisplayName(profileYAML),
+		Command:      "hermes",
+		Model:        model.defaultModel(),
+		BaseURL:      model.baseURL(),
+		HasPanRouter: hasPanRouterConfig(model.provider(), model.baseURL()) || hasPanRouterConfig(delegation.provider(), delegation.baseURL()),
 	}
 	if !home.IsDefault {
 		// What the user types to run this profile; alias is the

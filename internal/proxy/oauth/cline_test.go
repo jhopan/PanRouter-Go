@@ -1,11 +1,11 @@
 package oauth
 
 import (
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/updater"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/updater"
 	"testing"
 )
 
@@ -60,11 +60,11 @@ func TestRefreshCline(t *testing.T) {
 	if res.ExpiresIn != 7200 {
 		t.Errorf("expected expiresIn 7200, got: %d", res.ExpiresIn)
 	}
-	if capturedUA != "9Router/"+updater.CurrentVersion {
-		t.Errorf("expected User-Agent '9Router/%s', got: %s", updater.CurrentVersion, capturedUA)
+	if capturedUA != "PanRouter/"+updater.CurrentVersion {
+		t.Errorf("expected User-Agent 'PanRouter/%s', got: %s", updater.CurrentVersion, capturedUA)
 	}
-	if capturedClientType != "9router" {
-		t.Errorf("expected X-CLIENT-TYPE '9router', got: %s", capturedClientType)
+	if capturedClientType != "panrouter" {
+		t.Errorf("expected X-CLIENT-TYPE 'panrouter', got: %s", capturedClientType)
 	}
 
 	// Verify clinepass is registered in oauth registry

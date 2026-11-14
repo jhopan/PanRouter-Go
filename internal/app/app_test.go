@@ -9,16 +9,16 @@ import (
 	"path/filepath"
 	"testing"
 
-	"panrouter/proxy/internal/app"
-	"panrouter/proxy/internal/config"
-	"panrouter/proxy/internal/db"
-	"panrouter/proxy/internal/handlers"
-	"panrouter/proxy/internal/shutdown"
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/viper"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/fx"
 	_ "modernc.org/sqlite"
+	"panrouter/proxy/internal/app"
+	"panrouter/proxy/internal/config"
+	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/handlers"
+	"panrouter/proxy/internal/shutdown"
 )
 
 func TestAppModule_Validate(t *testing.T) {
@@ -87,7 +87,7 @@ func TestNewCLIParams_WithContext(t *testing.T) {
 		}
 		return nil
 	}
-	_ = appCLI.Run([]string{"9router", "--rtk", "--caveman", "--ponytail", "--adhd", "--auto-update", "--no-injection-guard"})
+	_ = appCLI.Run([]string{"panrouter", "--rtk", "--caveman", "--ponytail", "--adhd", "--auto-update", "--no-injection-guard"})
 }
 
 func TestConfigModule(t *testing.T) {

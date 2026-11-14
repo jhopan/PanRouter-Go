@@ -9,13 +9,13 @@ import (
 
 	json "encoding/json/v2"
 
+	"github.com/go-chi/chi/v5"
+	"go.uber.org/fx"
 	"panrouter/proxy/internal/app"
 	"panrouter/proxy/internal/config"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/translator"
-	"github.com/go-chi/chi/v5"
-	"go.uber.org/fx"
 )
 
 // TestHandlersModule_ProvidesTheEngineChatHandler pins that the fx graph hands

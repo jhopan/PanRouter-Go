@@ -2,16 +2,18 @@ package dashboard
 
 import (
 	"io"
+	"time"
 
-	"panrouter/proxy/internal/db"
 	"bytes"
 	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
+	"panrouter/proxy/internal/db"
 	"testing"
 
 	"panrouter/proxy/internal/auth"
 	"panrouter/proxy/internal/codexquota"
+	"panrouter/proxy/internal/handlers/chat"
 )
 
 // insertResetCreditConn seeds a provider connection the reset-credit handlers
@@ -64,7 +66,7 @@ func TestCodexResetCreditListRoute(t *testing.T) {
 	pointCodexResetURLs(t, srv.URL)
 	insertResetCreditConn(t, repo, "codex-1", "codex", "oauth", codexOAuthData("tok-1", "acct-1"))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/reset-credits", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/codex-reset-credits", nil)
 	req.Header.Set(cliTokenHeader, auth.CLIToken())
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -113,15 +115,27 @@ func TestCodexResetCreditConsumeRoute(t *testing.T) {
 	defer srv.Close()
 	pointCodexResetURLs(t, srv.URL)
 	insertResetCreditConn(t, repo, "codex-1", "codex", "oauth", codexOAuthData("tok-1", "acct-1"))
+	chat.BlockCodexConnectionUntil("codex-1", time.Now().UTC().Add(time.Hour))
+	repo.LockConnectionModel("codex-1", "gpt-6.1-sol", 3600, 1)
+	if !chat.IsCodexConnectionExhausted("codex-1") {
+		t.Fatal("precondition: expected codex-1 to be blocked in quota cache")
+	}
 
 	body, _ := json.Marshal(map[string]string{"selectionToken": "c1", "idempotencyKey": "idem-1"})
-	req := httptest.NewRequest(http.MethodPost, "/api/usage/codex-1/reset-credits/consume", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/usage/codex-1/codex-reset-credits", bytes.NewReader(body))
 	req.Header.Set(cliTokenHeader, auth.CLIToken())
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("consume: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if chat.IsCodexConnectionExhausted("codex-1") {
+		t.Error("expected reset-credit consume to unblock quota cache")
+	}
+	if locked, _ := repo.IsConnectionModelLocked("codex-1", "gpt-6.1-sol"); locked {
+		t.Error("expected reset-credit consume to clear model lock")
 	}
 
 	var out struct {
@@ -135,6 +149,62 @@ func TestCodexResetCreditConsumeRoute(t *testing.T) {
 	}
 	if consumeBody["credit_id"] != "c1" || consumeBody["redeem_request_id"] != "idem-1" {
 		t.Errorf("consume payload = %+v, want credit_id c1 and redeem_request_id idem-1", consumeBody)
+	}
+}
+
+// Consuming a reset credit on one connection must not clear model locks or
+// quota backoffs on a sibling connection of the same provider — the health
+// reset is scoped to the target connection, not broadcast to the whole provider.
+func TestCodexResetCreditConsumeDoesNotUnlockOtherConnections(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	var consumeBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/credits/consume" {
+			raw, _ := io.ReadAll(r.Body)
+			json.Unmarshal(raw, &consumeBody)
+			w.Write([]byte(`{"outcome":"reset"}`))
+			return
+		}
+		w.Write([]byte(`{"credits":[{"credit_id":"c1"}]}`))
+	}))
+	defer srv.Close()
+	pointCodexResetURLs(t, srv.URL)
+	insertResetCreditConn(t, repo, "codex-1", "codex", "oauth", codexOAuthData("tok-1", "acct-1"))
+	insertResetCreditConn(t, repo, "codex-2", "codex", "oauth", codexOAuthData("tok-2", "acct-2"))
+
+	// Both connections carry a model lock and a quota backoff.
+	repo.LockConnectionModel("codex-1", "gpt-6.1-sol", 3600, 1)
+	repo.LockConnectionModel("codex-2", "gpt-6.1-sol", 3600, 1)
+	chat.BlockCodexConnectionUntil("codex-1", time.Now().UTC().Add(time.Hour))
+	chat.BlockCodexConnectionUntil("codex-2", time.Now().UTC().Add(time.Hour))
+
+	body, _ := json.Marshal(map[string]string{"selectionToken": "c1", "idempotencyKey": "idem-1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/usage/codex-1/codex-reset-credits", bytes.NewReader(body))
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consume: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// codex-1: lock cleared, quota unblocked.
+	if locked, _ := repo.IsConnectionModelLocked("codex-1", "gpt-6.1-sol"); locked {
+		t.Error("expected codex-1 model lock to be cleared")
+	}
+	if chat.IsCodexConnectionExhausted("codex-1") {
+		t.Error("expected codex-1 quota block to be cleared")
+	}
+
+	// codex-2: lock and backoff must remain untouched.
+	if locked, _ := repo.IsConnectionModelLocked("codex-2", "gpt-6.1-sol"); !locked {
+		t.Error("expected codex-2 model lock to remain locked")
+	}
+	if !chat.IsCodexConnectionExhausted("codex-2") {
+		t.Error("expected codex-2 quota block to remain in place")
 	}
 }
 
@@ -157,7 +227,7 @@ func TestCodexResetCreditConsumeSurfacesTypedRefusal(t *testing.T) {
 	pointCodexResetURLs(t, srv.URL)
 	insertResetCreditConn(t, repo, "codex-1", "codex", "oauth", codexOAuthData("tok-1", "acct-1"))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/usage/codex-1/reset-credits/consume",
+	req := httptest.NewRequest(http.MethodPost, "/api/usage/codex-1/codex-reset-credits",
 		bytes.NewReader([]byte(`{"selectionToken":"c1"}`)))
 	req.Header.Set(cliTokenHeader, auth.CLIToken())
 	req.Header.Set("Content-Type", "application/json")
@@ -191,7 +261,7 @@ func TestCodexResetCreditRejectsWrongConnectionShape(t *testing.T) {
 			router := setupTestRouter(repo)
 			insertResetCreditConn(t, repo, "conn-x", tc.provider, tc.authType, `{"apiKey":"sk-x"}`)
 
-			req := httptest.NewRequest(http.MethodGet, "/api/usage/conn-x/reset-credits", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/usage/conn-x/codex-reset-credits", nil)
 			req.Header.Set(cliTokenHeader, auth.CLIToken())
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
@@ -210,7 +280,7 @@ func TestCodexResetCreditRejectsMissingConnection(t *testing.T) {
 	defer cleanup()
 	router := setupTestRouter(repo)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/usage/nope/reset-credits", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/usage/nope/codex-reset-credits", nil)
 	req.Header.Set(cliTokenHeader, auth.CLIToken())
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -237,7 +307,7 @@ func TestCodexResetCreditUpstreamAuthFailureIsNotA401(t *testing.T) {
 			pointCodexResetURLs(t, srv.URL)
 			insertResetCreditConn(t, repo, "codex-1", "codex", "oauth", codexOAuthData("stale", "acct-1"))
 
-			req := httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/reset-credits", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/usage/codex-1/codex-reset-credits", nil)
 			req.Header.Set(cliTokenHeader, auth.CLIToken())
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)

@@ -37,7 +37,7 @@ var antigravityRequestBlacklist = []string{
 }
 
 // AntigravityRequest is the wrapper format for Antigravity API.
-// RequestType is omitempty: PR decolua/panrouter#3986 showed Google's Cloud Code
+// RequestType is omitempty: PR decolua/9router#3986 showed Google's Cloud Code
 // endpoint enforces a tiny separate quota bucket whenever requestType="agent"
 // is present, causing false 429 RESOURCE_EXHAUSTED on OMP harness payloads
 // even with quota remaining. So the agent path omits the field entirely.
@@ -225,7 +225,7 @@ var competitivePromptBlacklist = []string{
 }
 
 // Harness tag patterns that trigger false 429 RESOURCE_EXHAUSTED rejections on
-// the Antigravity gateway (parity with decolua/panrouter PR #3987). OMP-family
+// the Antigravity gateway (parity with decolua/9router PR #3987). OMP-family
 // harnesses inject these XML markers in system text; normalizing them to
 // neutral tags keeps instruction bodies intact while bypassing the filter.
 var (
@@ -239,14 +239,14 @@ var (
 	// antigravityOpenCodeRegex matches the literal `opencode` provider
 	// identifier upstream rewrites in the system instruction. Upstream's rule
 	// is unbounded and case-insensitive, so `opencode-zen` and
-	// `.config/opencode/` are rewritten too (parity with decolua/panrouter
+	// `.config/opencode/` are rewritten too (parity with decolua/9router
 	// open-sse/config/appConstants.js:194).
 	antigravityOpenCodeRegex = regexp.MustCompile(`(?i)opencode`)
 	// hermesIdentityRegex matches every Hermes identity variant upstream
 	// rewrites, and the whole match is replaced by a neutral sentence. The
 	// legacy rule only matched one exact phrasing, so the other variants
 	// reached the Antigravity backend with the fingerprint intact and could
-	// trigger a fake 429 RESOURCE_EXHAUSTED (parity with decolua/panrouter
+	// trigger a fake 429 RESOURCE_EXHAUSTED (parity with decolua/9router
 	// commit a61fc6a0).
 	//
 	// The upstream expression is transliterated exactly, including the
@@ -274,7 +274,7 @@ func rewriteCompetingBranding(text string) string {
 
 // rewriteAntigravityBrand rewrites the literal `opencode` provider
 // identifier to `antigravity`, matching upstream's fourth row of
-// ANTIGRAVITY_PROMPT_REWRITES (decolua/panrouter
+// ANTIGRAVITY_PROMPT_REWRITES (decolua/9router
 // open-sse/config/appConstants.js:194). Upstream's replacement preserves the
 // three capitalisations it names and lowercases everything else.
 func rewriteAntigravityBrand(text string) string {
@@ -372,12 +372,17 @@ func StripCompetitivePrompts(req *GeminiRequest) *GeminiRequest {
 // this value, so it must stay family-shaped. Only AntigravityUpstreamModel
 // applies the effort suffix the backend actually needs.
 var AntigravityModelSynonyms = map[string]string{
+	// Gemini 4 Carbon serves one backend id per tier; the bare catalog id is medium tier.
+	"gemini-4-carbon":        "gemini-4-carbon-medium",
+	"gemini-4-carbon-high":   "gemini-4-carbon-high",
+	"gemini-4-carbon-medium": "gemini-4-carbon-medium",
+	"gemini-4-carbon-low":    "gemini-4-carbon-low",
 	// Gemini 4 Argon serves one backend id per tier; the bare catalog id is medium tier.
 	"gemini-4-argon":        "gemini-4-argon-medium",
 	"gemini-4-argon-high":   "gemini-4-argon-high",
 	"gemini-4-argon-medium": "gemini-4-argon-medium",
 	"gemini-4-argon-low":    "gemini-4-argon-low",
-	// Upstream decolua/panrouter#24034f69 retired the gemini-3.5 family and
+	// Upstream decolua/9router#24034f69 retired the gemini-3.5 family and
 	// gemini-3-flash; the default moved to the 3.8 medium tier.
 	"gemini-default":             "gemini-3.8-flash-medium",
 	"gemini-3.5-flash":           "gemini-3.8-flash-medium",
@@ -412,6 +417,11 @@ var AntigravityModelSynonyms = map[string]string{
 	"gemini-3.6-flash-high":   "gemini-3.6-flash-tiered",
 	"gemini-3.6-flash-medium": "gemini-3.6-flash-tiered",
 	"gemini-3.6-flash-low":    "gemini-3.6-flash-tiered",
+	// Claude 5.5: bare model maps to high tier in synonyms for quota/lock lookups.
+	"claude-sonnet-5-5": "claude-sonnet-5-5-high",
+	"claude-opus-5-5":   "claude-opus-5-5-high",
+	"claude-sonnet-5.5": "claude-sonnet-5-5-high",
+	"claude-opus-5.5":   "claude-opus-5-5-high",
 }
 
 // NormalizeAntigravityModel maps known aliases/synonyms to Antigravity internal backend model names.
@@ -440,9 +450,14 @@ func NormalizeAntigravityModel(model string) string {
 // shared with the lock and quota paths, which key on a bare model family.
 //
 // Port of open-sse/providers/registry/antigravity.js (upstream
-// decolua/panrouter#a07ed95b, refreshed by #24034f69). Every value was probed
+// decolua/9router#a07ed95b, refreshed by #24034f69). Every value was probed
 // live against daily-cloudcode-pa.googleapis.com on 2026-10-09.
 var antigravityUpstreamModelIDs = map[string]string{
+	// Gemini 4 Carbon serves one backend id per tier; the bare catalog id is medium tier.
+	"gemini-4-carbon":        "gemini-4-carbon-medium",
+	"gemini-4-carbon-high":   "gemini-4-carbon-high",
+	"gemini-4-carbon-medium": "gemini-4-carbon-medium",
+	"gemini-4-carbon-low":    "gemini-4-carbon-low",
 	// Gemini 4 Argon serves one backend id per tier; the bare catalog id is medium tier.
 	"gemini-4-argon":        "gemini-4-argon-medium",
 	"gemini-4-argon-high":   "gemini-4-argon-high",
@@ -829,7 +844,8 @@ func fixAntigravityContents(req *GeminiRequest, model string) bool {
 }
 
 // WrapForAntigravity wraps a standard Gemini request in Antigravity API envelope.
-func WrapForAntigravity(geminiBody []byte, projectID, modelName string) ([]byte, error) {
+// sessionID scopes conversation and trajectory UUIDs per connection or client session.
+func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionID ...string) ([]byte, error) {
 	// The wire id is the registry's upstreamModelId with panrouter's own effort
 	// notation stripped, not the bare synonym the lock and quota paths share.
 	// proxy.ForwardGemini normalises the model before calling this, so the
@@ -853,14 +869,19 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string) ([]byte,
 	}
 	geminiBody = hardenAntigravityRequest(geminiBody)
 
+	sess := projectID
+	if len(sessionID) > 0 && sessionID[0] != "" {
+		sess = sessionID[0]
+	}
+
 	wrapper := AntigravityRequest{
 		Project:   projectID,
 		Model:     modelName,
 		UserAgent: "antigravity",
-		// Omit RequestType (was "agent"): parity with decolua/panrouter#3986.
+		// Omit RequestType (was "agent"): parity with decolua/9router#3986.
 		// Google rejects agent-bucketed requests with false 429s; requestId
 		// keeps its existing agent/<...>/<...>/<...>/<step> shape.
-		RequestID: antigravityBuildRequestID(projectID, modelName, "agent", contentCount),
+		RequestID: antigravityBuildRequestID(sess, modelName, "agent", contentCount),
 		Request:   geminiBody,
 	}
 	out, err := json.Marshal(wrapper, json.Deterministic(true))
@@ -924,7 +945,8 @@ func ParseImageConfig(model string) (cleanModel, aspectRatio string) {
 }
 
 // WrapAntigravityImageRequest builds an Antigravity request envelope for image generation.
-func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio string) ([]byte, error) {
+// sessionID scopes conversation and trajectory UUIDs per connection or client session.
+func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio string, sessionID ...string) ([]byte, error) {
 	parts := []GeminiPart{}
 	if base64Input != "" {
 		parts = append(parts, GeminiPart{
@@ -947,7 +969,11 @@ func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, asp
 		},
 	}
 
-	sessionID := fmt.Sprintf("img-%d", time.Now().UnixNano())
+	sess := projectID
+	if len(sessionID) > 0 && sessionID[0] != "" {
+		sess = sessionID[0]
+	}
+
 	genConfig := map[string]any{
 		"temperature":     1.0,
 		"topP":            0.95,
@@ -961,7 +987,7 @@ func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, asp
 	reqPayload := map[string]any{
 		"contents":         contents,
 		"generationConfig": genConfig,
-		"sessionId":        sessionID,
+		"sessionId":        sess,
 	}
 
 	reqJSON, err := json.Marshal(reqPayload)
@@ -974,7 +1000,7 @@ func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, asp
 		Model:       cleanModel,
 		UserAgent:   "antigravity",
 		RequestType: "image_gen",
-		RequestID:   antigravityBuildRequestID(projectID, cleanModel, "image_gen", 1),
+		RequestID:   antigravityBuildRequestID(sess, cleanModel, "image_gen", 1),
 		Request:     reqJSON,
 	}
 

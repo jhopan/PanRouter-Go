@@ -82,22 +82,8 @@ func dbusKeyringSecret(ctx context.Context, app string) string {
 	}
 	defer func() { _ = conn.Close() }()
 
-	secretObject := conn.Object(dbusSecretService, dbus.ObjectPath(dbusSecretObject))
-
-	// A session is needed before an item's secret can be unsealed. The
-	// "plain" algorithm sends the secret as it is, over the session bus,
-	// which is the same transport the keyring already uses.
-	var output dbus.Variant
-	var sessionPath dbus.ObjectPath
-	call := secretObject.CallWithContext(ctx, "org.freedesktop.Secret.Service.OpenSession",
-		0, "plain", dbus.MakeVariant(""))
-	if call.Err != nil {
-		return ""
-	}
-	if err := call.Store(&output, &sessionPath); err != nil {
-		return ""
-	}
-	if sessionPath == "" {
+	sessionPath, err := openSecretSession(ctx, conn)
+	if err != nil {
 		return ""
 	}
 

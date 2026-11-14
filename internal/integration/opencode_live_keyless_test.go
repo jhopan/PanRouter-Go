@@ -26,7 +26,7 @@ import (
 //
 // Two consequences:
 //
-//   - It is opt-in via 9ROUTER_LIVE_OPENCODE=1. CI never sets it, so a run
+//   - It is opt-in via PANROUTER_LIVE_OPENCODE=1. CI never sets it, so a run
 //     without the variable skips instead of reaching the network.
 //   - A refusal from the provider is not this gateway's defect. The free tier
 //     is shared and rate limited per IP, so 403/429/5xx skip with the body
@@ -35,9 +35,9 @@ import (
 //
 // Run it with:
 //
-//	9ROUTER_LIVE_OPENCODE=1 go test -tags=integration ./internal/integration/ \
+//	PANROUTER_LIVE_OPENCODE=1 go test -tags=integration ./internal/integration/ \
 //	    -run TestLiveOpenCode -v
-const liveOpenCodeEnv = "9ROUTER_LIVE_OPENCODE"
+const liveOpenCodeEnv = "PANROUTER_LIVE_OPENCODE"
 
 func liveOpenCodeEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(liveOpenCodeEnv))) {

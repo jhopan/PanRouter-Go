@@ -2,7 +2,6 @@ package providers
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -81,8 +80,25 @@ type ProviderConfig struct {
 	// which is the point.
 	RelayURL string
 
+	// ProxyPoolID is the proxy pool this connection routed through, or "" when
+	// the request leaves directly. It is the gateway's own identity for the
+	// egress, not a request header: the breaker and the semaphore key on
+	// provider+pool so one dead pool opens its own gate instead of taking every
+	// other egress for that provider with it (internal/handlers/chat
+	// resilienceProxyKey).
+	//
+	// It is deliberately NOT written into HeaderOverrides: that map is applied
+	// to the outbound request (internal/proxy/openai.go ApplyHeaderOverrides),
+	// so an internal key there would be sent to every upstream provider.
+	ProxyPoolID string
 	// StallTimeoutMs is the optional per-provider stall timeout in milliseconds.
 	StallTimeoutMs int `json:"stallTimeoutMs,omitempty"`
+
+	// FirstChunkTimeoutMs is the optional per-provider budget for the FIRST
+	// chunk — the prompt prefill. A large context is legitimately slow to start,
+	// so this budget is separate from StallTimeoutMs: charging prefill against
+	// the inter-chunk budget aborted healthy turns (MiniMax Code 15m/10m).
+	FirstChunkTimeoutMs int `json:"firstChunkTimeoutMs,omitempty"`
 }
 
 // Bedrock protocol constants. Region is substituted per request by the executor, so the
@@ -132,7 +148,11 @@ func BedrockModelFamily(providerID, model string) (ok bool, hint string) {
 }
 
 // IsGeminiNative returns true if provider uses Gemini-native format.
-func (p *ProviderConfig) IsGeminiNative() bool { return p.Format == "gemini-native" }
+func (p *ProviderConfig) IsGeminiNative() bool {
+	// Cloud Code Assist speaks the same Gemini envelope with a different
+	// wrapper, so it routes through the same native handler.
+	return p.Format == "gemini-native" || p.Format == "gemini-cli"
+}
 
 // IsGeminiOpenAICompat returns true if provider is Gemini behind an
 // OpenAI-compatible endpoint whose tool schema validation is as strict as the
@@ -180,6 +200,10 @@ func WithoutStaticHeader(cfg *ProviderConfig, name string) *ProviderConfig {
 // It is the same set upstream wires into PROVIDER_MODELS_CONFIG
 // (src/app/api/providers/[id]/models/route.js, v0.5.91).
 var modelsListURL = map[string]string{
+	// free-pi publishes its catalog at /client-version rather than the standard
+	// /v1/models shape. The suggested-models handler has a "free-pi" filter that
+	// reads the `models` array from this response.
+	"free-pi":     "https://api.freepi.ai/client-version",
 	"tokenharbor": "https://tokenharbor.ai/v1/models",
 	"dahl":        "https://inference.dahl.global/v1/models",
 	"atria":       "https://api.atria-asi.ai/v1/models",
@@ -201,6 +225,12 @@ var modelsListURL = map[string]string{
 	// registry catalog is a fixed 22-model list, so without this entry the
 	// dashboard cannot discover anything the snapshot predates.
 	"commandcode": "https://api.commandcode.ai/provider/v1/models",
+	// The documented Provider API entry reads the same keyless feed. It lists
+	// every id the provider serves (97 at the 2026-11-11 snapshot), which is
+	// what the generated catalogue in commandcode_goat_catalog.go was built
+	// from; the live fetch is what keeps a new release discoverable.
+	"commandcode-goat": "https://api.commandcode.ai/provider/v1/models",
+	"cmc-goat":         "https://api.commandcode.ai/provider/v1/models",
 	// Five more providers whose catalogue is reachable without a valid
 	// credential, so the discovery path that fixed commandcode covers them
 	// unchanged: "Check Latest Models", "Import from /models" and "Sync Models"
@@ -234,6 +264,7 @@ var modelsListURL = map[string]string{
 	// is absent, so the shape needs no special case here.
 	"ollama":     "https://ollama.com/api/tags",
 	"openrouter": "https://openrouter.ai/api/v1/models",
+	"hcnsec":     "https://api.hcnsec.cn/v1/models",
 }
 
 // modelsListHeaders carries the extra headers one live-catalogue endpoint
@@ -324,7 +355,7 @@ func WithHeader(headers map[string]string, key, value string) map[string]string 
 // MergeHeaderOverrides returns a copy of headers with the operator's
 // per-provider overrides applied on top. It is the Go shape of upstream's
 // `Object.assign(headers, providerOverrides.headers)`
-// (decolua/panrouter v0.5.95, open-sse/executors/base.js:132) — an override
+// (decolua/9router v0.5.95, open-sse/executors/base.js:132) — an override
 // wins over what the registry set, which is the whole point: the operator is
 // correcting a header the gateway sends, not adding a second opinion.
 //
@@ -414,6 +445,19 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:   "bearer",
 		SystemoneURL: "https://v1m.ir/v1/systemone",
 	},
+	// Nace Drex — decision models on the System One protocol, the same lane
+	// shape as v1m: a state plus typed questions (noul / choice / score) in,
+	// calibrated probabilities out. The lane forwards the body and the JSON
+	// reply untouched, so a score answer's `legend` array and every
+	// `confidence` reach the client as Drex returns them. drex-max also reads
+	// a top-level `images` array; the text-only drex-v2.0 answers 422 when it
+	// is non-empty, so nothing rewrites images here (upstream v0.5.112,
+	// f7f6f5e; catalog verified live against console.nace.ai/v1/models).
+	"nace": {
+		AuthHeader:   "Authorization",
+		AuthScheme:   "bearer",
+		SystemoneURL: "https://console.nace.ai/v1/systemone",
+	},
 	"anthropic": {
 		BaseURL:    "https://api.anthropic.com/v1/messages",
 		AuthHeader: "x-api-key",
@@ -455,6 +499,13 @@ var KnownProviders = map[string]ProviderConfig{
 	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
 	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
 	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
+	"hcnsec": {
+		BaseURL:        "https://api.hcnsec.cn/v1/chat/completions",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "bearer",
+		ThinkingFormat: "openai",
+		TTSURL:         "https://api.hcnsec.cn/v1/audio/speech",
+	},
 	"sumopod": {
 		BaseURL:    "https://ai.sumopod.com/v1/chat/completions",
 		AuthHeader: "Authorization",
@@ -615,13 +666,13 @@ var KnownProviders = map[string]ProviderConfig{
 		ImageURL:   "https://token.sensenova.cn/v1/images/generations",
 	},
 	"cloudflare-ai": {
-		BaseURL:        "https://api.cloudflare.com/client/v4/accounts/" + os.Getenv("CLOUDFLARE_ACCOUNT_ID") + "/ai/v1/chat/completions",
+		BaseURL:        "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
 		AuthHeader:     "Authorization",
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
 	},
 	"mimo-free": {
-		BaseURL:       "https://api.xiaomimimimo.com/api/free-ai/openai/chat",
+		BaseURL:       "https://api.xiaomimimo.com/api/free-ai/openai/chat",
 		AuthHeader:    "Authorization",
 		AuthScheme:    "bearer",
 		DefaultAPIKey: "mimo-dynamic",
@@ -655,7 +706,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"opencode-go": {
-		BaseURL:    "https://opencode.ai/zen/go/v1/chat/completions",
+		BaseURL:    "https://opencode.ai/inference/go/openai/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
@@ -728,12 +779,17 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader:     "Authorization",
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
+		// Both CodeBuddy lanes mimic the same shipped CLI build. The executor
+		// adds the rest of the CLI header set on the chat path; these entries
+		// only have to agree with it, which is why they read the shared
+		// constants rather than repeating a version literal
+		// (AGENTS.md §1: version drift is a ban signal).
 		StaticHeaders: map[string]string{
-			"User-Agent":          "CLI/2.133.1 CodeBuddy/2.133.1",
+			"User-Agent":          CodeBuddyUserAgent,
 			"X-Product":           "SaaS",
 			"X-IDE-Type":          "CLI",
 			"X-IDE-Name":          "CLI",
-			"X-IDE-Version":       "2.133.1",
+			"X-IDE-Version":       CodeBuddyCLIVersion,
 			"X-Domain":            "www.codebuddy.cn",
 			"x-requested-with":    "XMLHttpRequest",
 			"x-codebuddy-request": "1",
@@ -745,10 +801,11 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
 		StaticHeaders: map[string]string{
-			"User-Agent":          "CLI/2.108.1 CodeBuddy/2.108.1",
+			"User-Agent":          CodeBuddyUserAgent,
 			"X-Product":           "SaaS",
 			"X-IDE-Type":          "CLI",
 			"X-IDE-Name":          "CLI",
+			"X-IDE-Version":       CodeBuddyCLIVersion,
 			"x-requested-with":    "XMLHttpRequest",
 			"x-codebuddy-request": "1",
 		},
@@ -791,6 +848,11 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme:     "bearer",
 		ThinkingFormat: "openai",
 		Hidden:         true,
+	},
+	"kenari": {
+		BaseURL:    "https://kenari.id/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
 	},
 	"alitp-intl": {
 		// Token Plan is served from the .maas host under the compatible-mode
@@ -845,13 +907,27 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 		StaticHeaders: map[string]string{
 			// Static identity headers of command-code@1.88.0
-			// buildCommandAuthHeaders() (upstream decolua/panrouter b1effa03).
+			// buildCommandAuthHeaders() (upstream decolua/9router b1effa03).
 			"User-Agent":             "cli",
 			"x-command-code-version": "1.88.0",
 			"x-cli-environment":      "production",
 			"x-cli-surface":          "cli",
 			"x-taste-learning":       "false",
 		},
+	},
+	// Command Code's documented Provider API (commandcode.ai/docs/provider):
+	// standard OpenAI Chat/Responses and Anthropic Messages lanes on one bearer,
+	// no CLI identity spoofing. It is a separate entry from `commandcode`
+	// because both product surfaces exist on the same host and key, but only
+	// this one follows the published schemas. The executor picks the lane from
+	// the model's supported_endpoints (commandcode_goat_catalog.go); BaseURL is
+	// the shared /provider/v1 prefix.
+	"commandcode-goat": {
+		BaseURL:       "https://api.commandcode.ai/provider/v1/chat/completions",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "bearer",
+		SystemoneURL:  "https://api.commandcode.ai/provider/v1/systemone",
+		SystemonePath: "/systemone",
 	},
 	"ollama-local": {
 		BaseURL:       "http://localhost:11434/v1/chat/completions",
@@ -877,7 +953,7 @@ var KnownProviders = map[string]ProviderConfig{
 	// Global is the same protocol on different hosts, and sign-ins are per
 	// site — an account on agent.minimax.cn says nothing about
 	// agent.minimax.io. The two are never aliased onto each other
-	// (AGENTS.md §3.A). Port of upstream decolua/panrouter registry
+	// (AGENTS.md §3.A). Port of upstream decolua/9router registry
 	// minimax-code.js / minimax-code-global.js.
 	"minimax-code": {
 		BaseURL:               "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages",
@@ -918,9 +994,9 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "raw",
 		StaticHeaders: map[string]string{
 			"anthropic-version":                         "2023-06-01",
-			"Anthropic-Beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28",
+			"Anthropic-Beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,extended-cache-ttl-2025-04-11,thinking-display-updates-2026-08-18",
 			"Anthropic-Dangerous-Direct-Browser-Access": "true",
-			"User-Agent":                                "claude-cli/2.1.280 (external, sdk-cli)",
+			"User-Agent":                                "claude-cli/2.1.322 (external, sdk-cli)",
 			"X-App":                                     "cli",
 			"X-Stainless-Helper-Method":                 "stream",
 			"X-Stainless-Retry-Count":                   "0",
@@ -1287,9 +1363,15 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"gemini-cli": {
-		BaseURL:    "https://daily-cloudcode-pa.googleapis.com/v1internal",
+		// Cloud Code Assist speaks the Gemini envelope: the body is
+		// {project, model, request} and the path is :generateContent on the
+		// v1internal root. Without the format marker a request fell through to
+		// ForwardOpenAI and POSTed an OpenAI body at cloudcode-pa, which that
+		// endpoint cannot answer.
+		BaseURL:    "https://cloudcode-pa.googleapis.com/v1internal",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+		Format:     "gemini-cli",
 	},
 	"google-pse": {
 		BaseURL:      "https://www.googleapis.com/customsearch/v1",
@@ -1419,6 +1501,24 @@ var KnownProviders = map[string]ProviderConfig{
 			"content-type": "application/json",
 		},
 	},
+	// Free-pi — the free, ad-funded distribution of the `pi` coding agent
+	// (dennisonbertram/free-pi-cli). Its upstream is plain [OI] Chat
+	// Completions behind a Bearer JWT, so the transport looks ordinary; what
+	// is not ordinary is session identity. Every request must carry a stable
+	// `x-session-id`, and the account tolerates only a handful of concurrent
+	// sessions (hungkevin/free-pi-cli-proxy server.mjs:958 pins the cap at 4;
+	// we deliberately occupy one — see internal/proxy/executor/free_pi.go).
+	//
+	// Neither header can live in StaticHeaders: x-session-id is derived per
+	// account and x-client-version is refreshed from GET /client-version, so
+	// both are applied by the executor rather than the shared passthrough.
+	// The auth pair is the ordinary bearer one, which is what makes the JWT a
+	// drop-in credential for the existing connection store.
+	"free-pi": {
+		BaseURL:    "https://api.freepi.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"atmorouter": {
 		BaseURL:    "https://atmorouter.dev/v1/chat/completions",
 		AuthHeader: "Authorization",
@@ -1447,6 +1547,19 @@ var RetryableStatusCodes = map[int]bool{
 func PreservesCacheControl(provider string) bool {
 	if cfg, ok := KnownProviders[provider]; ok {
 		return cfg.PreserveCacheControl
+	}
+	return false
+}
+
+// StrictReasoningRemoving reports whether a provider rejects unknown
+// assistant-message reasoning fields echoed on history (upstream
+// paramSupport dropMessageFields): groq, mistral, and cerebras answer 400
+// or 422 on reasoning_content/reasoning/reasoning_details replayed by
+// reasoning clients (e.g. Hermes).
+func StrictReasoningRemoving(provider string) bool {
+	switch provider {
+	case "groq", "mistral", "cerebras":
+		return true
 	}
 	return false
 }

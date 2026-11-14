@@ -37,7 +37,7 @@ func liveHeap(t *testing.T) uint64 {
 // already read, so the guard has to refuse the body instead of measuring zero.
 func malformedTailMultipart(t *testing.T, payload []byte) (*bytes.Buffer, string) {
 	t.Helper()
-	const boundary = "9routerTestBoundary"
+	const boundary = "panrouterTestBoundary"
 	buf := &bytes.Buffer{}
 	buf.WriteString("--" + boundary + "\r\n")
 	buf.WriteString("Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n")

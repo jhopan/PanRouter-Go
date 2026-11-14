@@ -8,7 +8,8 @@ import (
 	"panrouter/proxy/internal/shutdown"
 )
 
-// HandleShutdown handles POST /api/version/shutdown: acknowledges the request
+// HandleShutdown handles POST /api/version/shutdown and its upstream alias
+// POST /api/shutdown: acknowledges the request
 // and then asks this process to stop, so the operator can release file locks or
 // restart the gateway from the dashboard.
 //

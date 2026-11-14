@@ -85,6 +85,10 @@ func findTailscaleBin() string {
 // rest would be decoded and ignored.
 type tailscaleStatusJSON struct {
 	BackendState string `json:"BackendState"`
+	// AuthURL is where the node has to authenticate. The dashboard's install
+	// flow reads it after `tailscale up`, because the CLI prints the same URL
+	// on stdout only sometimes (Windows exposes it here and nowhere else).
+	AuthURL string `json:"AuthURL"`
 }
 
 func probeTailscale(ctx context.Context, bin string) (*tailscaleStatusJSON, error) {

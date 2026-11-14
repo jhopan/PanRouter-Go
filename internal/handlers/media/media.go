@@ -1,16 +1,6 @@
 package media
 
 import (
-	"panrouter/proxy/internal/constants"
-	"panrouter/proxy/internal/db"
-	"panrouter/proxy/internal/handlers/chat"
-	"panrouter/proxy/internal/handlers/shared"
-	"panrouter/proxy/internal/handlerutil"
-	"panrouter/proxy/internal/log"
-	"panrouter/proxy/internal/middleware"
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/proxy"
-	"panrouter/proxy/internal/usagetracker"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -23,6 +13,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"panrouter/proxy/internal/constants"
+	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/handlers/chat"
+	"panrouter/proxy/internal/handlers/shared"
+	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/log"
+	"panrouter/proxy/internal/middleware"
+	"panrouter/proxy/internal/models"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/proxy"
+	"panrouter/proxy/internal/usagetracker"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,11 @@ type MediaHandler struct {
 	Client     *http.Client
 	TokenSaver *shared.TokenSaverConfig
 	ChatH      *chat.ChatHandler
+	// chatProbe is the capability detector's sender seam (POST
+	// /api/models/detect-caps). Nil dispatches through ChatH, which is the real
+	// chat lane; a test replaces it to count probes and answer without a
+	// provider.
+	chatProbe func(ctx context.Context, body []byte) (int, []byte)
 }
 
 // NewMediaHandler creates a MediaHandler instance.
@@ -72,8 +78,57 @@ func mediaConnectionError(err error, provider string) string {
 	return fmt.Sprintf("no active connections for provider: %s", provider)
 }
 
+// kindFromEndpoint infers the media serviceKind from the API endpoint.
+func kindFromEndpoint(endpoint string) string {
+	switch {
+	case strings.HasPrefix(endpoint, "/v1/images/") || strings.HasPrefix(endpoint, "/images/"):
+		return "image"
+	case strings.HasPrefix(endpoint, "/v1/videos/") || strings.HasPrefix(endpoint, "/videos/"):
+		return "video"
+	case endpoint == "/v1/audio/speech" || endpoint == "/audio/speech":
+		return "tts"
+	case strings.HasPrefix(endpoint, "/v1/audio/") || strings.HasPrefix(endpoint, "/audio/"):
+		return "stt"
+	case endpoint == "/v1/embeddings" || endpoint == "/embeddings":
+		return "embedding"
+	case endpoint == "/v1/search" || endpoint == "/search":
+		return "webSearch"
+	case endpoint == "/v1/web/fetch" || endpoint == "/v1/scrape" || endpoint == "/scrape":
+		return "webFetch"
+	default:
+		return "media"
+	}
+}
+
+// IsConnectionMediaEligible checks if a connection is active and eligible for media routing.
+func IsConnectionMediaEligible(conn *models.ProviderConnection, serviceKind ...string) bool {
+	if conn == nil || conn.IsActive != 1 {
+		return false
+	}
+	return conn.IsMediaActive(serviceKind...)
+}
+
+// SelectMediaConnections returns all active connections for provider eligible for media routing.
+func (h *MediaHandler) SelectMediaConnections(provider string, serviceKind ...string) ([]*models.ProviderConnection, error) {
+	if h.Repo == nil {
+		return nil, nil
+	}
+	conns, err := h.Repo.GetProviderConnections(provider, true)
+	if err != nil {
+		return nil, err
+	}
+	var eligible []*models.ProviderConnection
+	for _, c := range conns {
+		if IsConnectionMediaEligible(c, serviceKind...) {
+			eligible = append(eligible, c)
+		}
+	}
+	return eligible, nil
+}
+
 // HandleEmbeddings forwards /v1/embeddings requests to upstream providers.
 func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "embedding"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
@@ -123,6 +178,14 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 	embeddingsURL := buildEmbeddingsURL(providerCfg.BaseURL)
 	finalBody := handlerutil.UpdateModelInBody(body, modelInfo.Model)
 
+	// Google Gemini embeddings forward dimensions as outputDimensionality (upstream #1366).
+	if providers.ResolveAlias(modelInfo.Provider) == "gemini" {
+		finalBody = forwardGeminiEmbeddingDimensions(finalBody)
+	}
+
+	if isGitHubCopilotProvider(modelInfo.Provider) {
+		finalBody = wrapCopilotEmbeddingInput(finalBody)
+	}
 	req, err := http.NewRequestWithContext(r.Context(), "POST", embeddingsURL, strings.NewReader(string(finalBody)))
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create request: %v", err))
@@ -197,6 +260,7 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 // same way buildEmbeddingsURL does, because a rerank lane lives on the same
 // OpenAI-compatible host as the embeddings one.
 func (h *MediaHandler) HandleRerank(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "embedding"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
@@ -296,6 +360,7 @@ func buildRerankURL(baseURL string) string {
 
 // HandleImages handles /v1/images/generations.
 func (h *MediaHandler) HandleImages(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "image"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -307,6 +372,7 @@ func (h *MediaHandler) HandleImages(w http.ResponseWriter, r *http.Request) {
 
 // HandleAudioSpeech handles /v1/audio/speech.
 func (h *MediaHandler) HandleAudioSpeech(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "tts"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -330,6 +396,7 @@ func (h *MediaHandler) HandleAudioSpeech(w http.ResponseWriter, r *http.Request)
 // Body: {"model":"<provider>/<model>","state":"...","questions":{...}}.
 // Target URL from ProviderConfig.SystemoneURL, else swap /chat/completions.
 func (h *MediaHandler) HandleSystemone(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "systemone"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -669,6 +736,7 @@ func (h *MediaHandler) forwardMiMoSpeech(w http.ResponseWriter, r *http.Request,
 
 // HandleAudioTranscriptions handles /v1/audio/transcriptions.
 func (h *MediaHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "stt"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		middleware.WriteBodyReadError(w, r, err)
@@ -680,6 +748,7 @@ func (h *MediaHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.
 
 // HandleVideoGenerations handles /v1/videos/generations.
 func (h *MediaHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "video"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		middleware.WriteBodyReadError(w, r, err)
@@ -691,6 +760,7 @@ func (h *MediaHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Req
 
 // HandleVideoEdits handles /v1/videos/edits.
 func (h *MediaHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "video"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		middleware.WriteBodyReadError(w, r, err)
@@ -702,6 +772,7 @@ func (h *MediaHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) 
 
 // HandleVideoExtensions handles /v1/videos/extensions.
 func (h *MediaHandler) HandleVideoExtensions(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "video"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		middleware.WriteBodyReadError(w, r, err)
@@ -724,30 +795,67 @@ func (h *MediaHandler) HandleVideoGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// defaultWebSearchModel returns "search-combo" if available, then any webSearch combo, then falls back to tavily/search.
+func (h *MediaHandler) defaultWebSearchModel() string {
+	if h.Repo != nil {
+		if combo, err := h.Repo.GetComboByName("search-combo"); err == nil && combo != nil && combo.Models != "" {
+			return "search-combo"
+		}
+		if combos, err := h.Repo.GetCombos(); err == nil {
+			for _, c := range combos {
+				if c != nil && c.Kind != nil && *c.Kind == "webSearch" && c.Models != "" {
+					return c.Name
+				}
+			}
+		}
+	}
+	return "gpt-4o"
+}
+
+// defaultWebFetchModel returns "fetch-combo" if available, then any webFetch combo, then falls back to jina-reader.
+func (h *MediaHandler) defaultWebFetchModel() string {
+	if h.Repo != nil {
+		if combo, err := h.Repo.GetComboByName("fetch-combo"); err == nil && combo != nil && combo.Models != "" {
+			return "fetch-combo"
+		}
+		if combos, err := h.Repo.GetCombos(); err == nil {
+			for _, c := range combos {
+				if c != nil && c.Kind != nil && *c.Kind == "webFetch" && c.Models != "" {
+					return c.Name
+				}
+			}
+		}
+	}
+	return "jina-reader"
+}
+
 // HandleSearch handles /v1/search.
 func (h *MediaHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "webSearch"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 	defer r.Body.Close()
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/v1/search")
+	h.forwardMediaRequest(w, r, body, h.defaultWebSearchModel(), "/v1/search")
 }
 
 // HandleScrape handles /v1/scrape.
 func (h *MediaHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "webFetch"))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 	defer r.Body.Close()
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/v1/scrape")
+	h.forwardMediaRequest(w, r, body, h.defaultWebFetchModel(), "/v1/scrape")
 }
 
 // HandleWebFetch handles /v1/web/fetch.
 func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(handlerutil.WithServiceKind(r.Context(), "webFetch"))
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -790,7 +898,7 @@ func (h *MediaHandler) HandleWebFetch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	h.forwardMediaRequest(w, r, body, "jina-reader", "/v1/web/fetch")
+	h.forwardMediaRequest(w, r, body, h.defaultWebFetchModel(), "/v1/web/fetch")
 }
 
 // targetPrivate reports whether host names an address the gateway must not
@@ -829,6 +937,9 @@ func targetPrivate(ctx context.Context, host string) bool {
 }
 
 func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Request, body []byte, defaultModel, endpoint string) {
+	if handlerutil.GetServiceKind(r.Context()) == "" {
+		r = r.WithContext(handlerutil.WithServiceKind(r.Context(), kindFromEndpoint(endpoint)))
+	}
 	model := defaultModel
 	var reqBody struct {
 		Model string `json:"model"`
@@ -853,6 +964,12 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				}
 			}
 		}
+	}
+	if (endpoint == "/v1/search" || endpoint == "/v1/scrape") && (model == "search" || model == "default" || model == "web" || model == "webSearch") {
+		model = h.defaultWebSearchModel()
+	}
+	if endpoint == "/v1/web/fetch" && (model == "fetch" || model == "default" || model == "web" || model == "webFetch") {
+		model = h.defaultWebFetchModel()
 	}
 	// Per-API-key access control. This is the single funnel for images, TTS,
 	// STT, video, search, scrape and fetch, so gating here covers all of them
@@ -936,6 +1053,18 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
+			// Cloudflare AI image models answer /ai/run/<model>, which the
+			// generic forwarder cannot reach — dedicated lane for all of them.
+			if (endpoint == "/v1/images/generations" || endpoint == "/images/generations" ||
+				endpoint == "/v1/images/edits" || endpoint == "/images/edits") && isCloudflareImageModel(subInfo) {
+				if err := h.handleCloudflareImage(w, r, body, subInfo); err == nil {
+					return
+				} else {
+					lastErr = err.Error()
+					continue
+				}
+			}
+
 			if (endpoint == "/v1/audio/transcriptions" || endpoint == "/audio/transcriptions") && (subInfo.Provider == "antigravity" || subInfo.Provider == "ag") {
 				if err := h.handleAntigravitySTT(w, r, body, subInfo); err == nil {
 					return
@@ -984,6 +1113,12 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			}
 
 			finalBody := handlerutil.UpdateModelInBody(body, subInfo.Model)
+			if isVideoCreateEndpoint(endpoint) && isXAIVideoProvider(subInfo.Provider) {
+				finalBody = formatXAIVideoPayload(finalBody)
+			}
+			// Cloudflare AI's flux-1-schnell schema rejects width/height — handled
+			// by the cloudflare image lane, not here.
+
 			// The endpoint the caller used is a route on this gateway, not a
 			// path on the vendor's host: appending it to BaseURL built URLs the
 			// vendor never serves (tavily got api.tavily.com/search/v1/search,
@@ -1068,7 +1203,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				lastStatus = resp.StatusCode
 				continue
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			copyUpstreamHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			io.Copy(w, resp.Body)
@@ -1117,6 +1252,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Cloudflare AI image models answer /ai/run/<model>, which the generic
+	// forwarder cannot reach — dedicated lane for all of them.
+	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations" ||
+		endpoint == "/v1/images/edits" || endpoint == "/images/edits") && isCloudflareImageModel(modelInfo) {
+		if err := h.handleCloudflareImage(w, r, body, modelInfo); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
 	// UC web: the persona image API needs a minted Clerk session, not a bearer
 	// key, so the generic forward cannot reach it.
 	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations" ||
@@ -1273,6 +1417,9 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			log.Warn("media", "multipart model rewrite skipped", "endpoint", endpoint, "error", err)
 		}
 	}
+	if isVideoCreateEndpoint(endpoint) && isXAIVideoProvider(modelInfo.Provider) && !isMultipartRequest(r) {
+		finalBody = formatXAIVideoPayload(finalBody)
+	}
 	client, clientErr := h.ChatH.GetClientForConnection(connData)
 	if clientErr != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, clientErr.Error())
@@ -1343,6 +1490,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	method := r.Method
+	if endpoint == "/v1/search" && providerCfg.SearchURL != "" && !hasCustomBaseURL {
+		targetURL = providerCfg.SearchURL
+		if providerCfg.SearchMethod != "" {
+			method = strings.ToUpper(providerCfg.SearchMethod)
+		} else {
+			method = http.MethodPost
+		}
+	}
+	var fetchFmt string
 	if endpoint == "/v1/web/fetch" && providerCfg.FetchURL != "" {
 		targetURL = providerCfg.FetchURL
 		if providerCfg.FetchMethod != "" {
@@ -1350,14 +1506,49 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		} else {
 			method = "POST"
 		}
-		if modelInfo.Provider == "ollama" {
-			var tmp struct {
-				URL string `json:"url"`
-			}
-			if err := json.Unmarshal(body, &tmp); err == nil && tmp.URL != "" {
-				if b, err := json.Marshal(map[string]string{"url": tmp.URL}); err == nil {
+		var fReq struct {
+			URL    string `json:"url"`
+			Format string `json:"format"`
+		}
+		_ = json.Unmarshal(body, &fReq)
+		fetchFmt = strings.ToLower(strings.TrimSpace(fReq.Format))
+		if fetchFmt == "" {
+			fetchFmt = "markdown"
+		}
+
+		switch modelInfo.Provider {
+		case "ollama":
+			if fReq.URL != "" {
+				if b, err := json.Marshal(map[string]string{"url": fReq.URL}); err == nil {
 					finalBody = b
 				}
+			}
+		case "jina-reader", "jina":
+			if fetchFmt != "markdown" && fetchFmt != "text" && fetchFmt != "html" {
+				handlerutil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+					"error": fmt.Sprintf("Unsupported format for %s. Supported: markdown, text, html", modelInfo.Provider),
+				})
+				return
+			}
+			if fReq.URL != "" {
+				if b, err := json.Marshal(map[string]string{"url": fReq.URL}); err == nil {
+					finalBody = b
+				}
+			}
+		case "tavily":
+			if fetchFmt != "markdown" && fetchFmt != "text" {
+				handlerutil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+					"error": "Unsupported format for tavily. Supported: markdown, text",
+				})
+				return
+			}
+			tBody := map[string]any{
+				"urls":          []string{fReq.URL},
+				"extract_depth": "basic",
+				"format":        fetchFmt,
+			}
+			if b, err := json.Marshal(tBody); err == nil {
+				finalBody = b
 			}
 		}
 	}
@@ -1375,6 +1566,9 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	req.Header.Del("Content-Length")
 	for k, v := range providerCfg.StaticHeaders {
 		req.Header.Set(k, v)
+	}
+	if fetchFmt != "" && (modelInfo.Provider == "jina-reader" || modelInfo.Provider == "jina") {
+		req.Header.Set("x-respond-with", fetchFmt)
 	}
 	handlerutil.SetAuthHeader(req, apiKey, providerCfg.AuthHeader, providerCfg.AuthScheme)
 	connIDStr := ""
@@ -1417,7 +1611,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	io.Copy(w, resp.Body)
 
 	if resp.StatusCode == http.StatusOK && conn != nil {
-		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UpdateConnectionLastUsed(conn.ID)
 		latencyMs := time.Since(start).Milliseconds()
 		logInfo := &shared.UsageLogInfo{
 			Provider:     modelInfo.Provider,
@@ -1525,4 +1719,109 @@ func buildSystemoneURL(override, cfgURL, cfgPath string) string {
 		return base + path[len(prefix):]
 	}
 	return base + path
+}
+
+// forwardGeminiEmbeddingDimensions maps incoming OpenAI "dimensions" to
+// Google Gemini's "outputDimensionality" property (upstream decolua/9router#1366 parity).
+func forwardGeminiEmbeddingDimensions(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	dimsRaw, exists := payload["dimensions"]
+	if !exists || dimsRaw == nil {
+		return body
+	}
+	dims := 0
+	switch v := dimsRaw.(type) {
+	case float64:
+		dims = int(v)
+	case int:
+		dims = v
+	case int64:
+		dims = int(v)
+	}
+	if dims <= 0 {
+		return body
+	}
+	payload["outputDimensionality"] = dims
+	if updated, err := json.Marshal(payload); err == nil {
+		return updated
+	}
+	return body
+}
+
+// isGitHubCopilotProvider reports whether the resolved provider is GitHub Copilot.
+func isGitHubCopilotProvider(provider string) bool {
+	return providers.ResolveAlias(provider) == "github"
+}
+
+// wrapCopilotEmbeddingInput wraps a bare "input" string into an array of
+// strings ([input]), which Copilot requires. It leaves an existing array
+// untouched and leaves bodies without "input" alone.
+func wrapCopilotEmbeddingInput(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return body
+	}
+	input, ok := payload["input"]
+	if !ok {
+		return body
+	}
+	if _, isArray := input.([]any); isArray {
+		return body
+	}
+	payload["input"] = []any{input}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// isXAIVideoProvider reports whether the resolved provider is xAI or grok-cli.
+func isXAIVideoProvider(provider string) bool {
+	canon := providers.ResolveAlias(provider)
+	return canon == "xai" || canon == "grok-cli"
+}
+
+// formatXAIVideoPayload ensures the start frame is formatted as { "url": ... }
+// for xAI video generation and edits, and forwards reference_images when present.
+// xAI API fails with HTTP 422 if image is a bare string.
+func formatXAIVideoPayload(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return body
+	}
+
+	modified := false
+	if img, ok := payload["image"]; ok {
+		switch v := img.(type) {
+		case string:
+			payload["image"] = map[string]any{"url": v}
+			modified = true
+		case map[string]any:
+			// Already an object (e.g. {"url": ...} or {"file_id": ...}), keep untouched
+		default:
+			// If invalid type like number/boolean, delete it so xAI doesn't error on type
+			delete(payload, "image")
+			modified = true
+		}
+	}
+
+	if refImgs, ok := payload["reference_images"]; ok {
+		if _, isSlice := refImgs.([]any); !isSlice {
+			delete(payload, "reference_images")
+			modified = true
+		}
+	}
+
+	if !modified {
+		return body
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
 }

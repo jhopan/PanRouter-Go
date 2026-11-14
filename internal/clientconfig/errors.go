@@ -33,4 +33,11 @@ var (
 	// failed to re-parse. That is a bug in PanRouter, never a user error, and
 	// nothing is returned for writing.
 	ErrInternalInconsistency = errors.New("clientconfig: patch produced unparsable output")
+
+	// ErrOptionsRequired reports that an adapter cannot describe a write from
+	// the options it was given — the client's file names a model the request
+	// did not supply, as the upstream routes require for grok-build, openclaw
+	// and cowork. It is a caller error, not a broken file: the route answers it
+	// as a 400 on POST and as an empty preview on GET.
+	ErrOptionsRequired = errors.New("clientconfig: required option missing")
 )

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"panrouter/proxy/internal/envx"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +31,12 @@ const (
 	// TokenTTL is the session lifetime (upstream SESSION_MAX_AGE_SEC = 24h).
 	TokenTTL = 24 * time.Hour
 	// CLITokenHeader lets local CLI clients bypass the login gate, mirroring
-	// upstream's x-9r-cli-token bypass in dashboardGuard.
-	CLITokenHeader = "x-9r-cli-token"
+	// upstream's dashboardGuard bypass. The pre-rename spelling is still
+	// accepted: an installed CLI or another instance on this machine keeps
+	// sending it until it is upgraded.
+	CLITokenHeader = "x-panrouter-cli-token"
+	// LegacyCLITokenHeader is the same header under this product's former name.
+	LegacyCLITokenHeader = "x-9r-cli-token"
 )
 
 // Secret returns the HS256 signing secret: JWT_SECRET if set, otherwise the
@@ -65,6 +70,7 @@ func RequireLogin(repo *db.Repo) bool {
 type SessionClaims struct {
 	Authenticated bool   `json:"authenticated"`
 	Oidc          bool   `json:"oidc,omitempty"`
+	OidcSub       string `json:"oidcSub,omitempty"`
 	OidcName      string `json:"oidcName,omitempty"`
 	OidcEmail     string `json:"oidcEmail,omitempty"`
 	Saml          bool   `json:"saml,omitempty"`
@@ -89,6 +95,7 @@ func SignWith(secret string, now time.Time, extra SessionClaims) (string, error)
 	payload, err := json.Marshal(SessionClaims{
 		Authenticated: true,
 		Oidc:          extra.Oidc,
+		OidcSub:       extra.OidcSub,
 		OidcName:      extra.OidcName,
 		OidcEmail:     extra.OidcEmail,
 		Saml:          extra.Saml,
@@ -493,16 +500,16 @@ func ResolveClientIP(r *http.Request, trustedCIDRs []netip.Prefix, trustCloudfla
 	return remoteIP.String()
 }
 
-// LoginClientIP buckets login attempts. The stamped x-9r-real-ip is trusted
+// LoginClientIP buckets login attempts. The stamped x-panrouter-real-ip is trusted
 // only with the per-process peer proof (upstream trustedPeer); a TRUST_PROXY
 // or TRUSTED_PROXIES is honored with right-to-left multi-hop CIDR validation.
 func LoginClientIP(r *http.Request) string {
-	if token := os.Getenv("NINEROUTER_PEER_TOKEN"); token != "" {
+	if token := envx.Get("PEER_TOKEN"); token != "" {
 		if subtle.ConstantTimeCompare(
-			[]byte(r.Header.Get("x-9r-peer-token")),
+			[]byte(headerEither(r, "x-panrouter-peer-token", "x-9r-peer-token")),
 			[]byte(token),
 		) == 1 {
-			if ip := strings.TrimSpace(r.Header.Get("x-9r-real-ip")); ip != "" {
+			if ip := headerEither(r, "x-panrouter-real-ip", "x-9r-real-ip"); ip != "" {
 				return ip
 			}
 		}
@@ -524,4 +531,13 @@ func LoginClientIP(r *http.Request) string {
 		return "unknown"
 	}
 	return ip
+}
+
+// headerEither reads a request header under its current spelling, falling back to
+// the pre-rename spelling so an un-upgraded CLI or sibling instance keeps working.
+func headerEither(r *http.Request, current, legacy string) string {
+	if v := strings.TrimSpace(r.Header.Get(current)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.Header.Get(legacy))
 }

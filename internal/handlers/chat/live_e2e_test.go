@@ -13,11 +13,10 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/proxy/executor"
-	_ "modernc.org/sqlite"
 )
-
 
 // getRealUserDB returns a throwaway in-memory database seeded with the
 // operator's real connections and combos, so a live test exercises the same
@@ -33,7 +32,7 @@ func getRealUserDB(t *testing.T) (*db.Repo, func()) {
 	if err != nil {
 		t.Skip("cannot get user home dir")
 	}
-	dbPath := filepath.Join(home, ".9router", "db", "data.sqlite")
+	dbPath := filepath.Join(home, ".panrouter", "db", "data.sqlite")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Skipf("real db not found at %s", dbPath)
 	}

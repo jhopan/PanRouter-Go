@@ -1,17 +1,6 @@
 package chat
 
 import (
-	"panrouter/proxy/internal/changelogfrag"
-	json "panrouter/proxy/internal/fastjson"
-	"panrouter/proxy/internal/handlerutil"
-	"panrouter/proxy/internal/log"
-	"panrouter/proxy/internal/middleware"
-	"panrouter/proxy/internal/promptcache"
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/semanticcache"
-	"panrouter/proxy/internal/thinking"
-	"panrouter/proxy/internal/translator"
-	"panrouter/proxy/internal/updater"
 	"bytes"
 	"context"
 	"errors"
@@ -19,6 +8,19 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"panrouter/proxy/internal/changelogfrag"
+	json "panrouter/proxy/internal/fastjson"
+	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/jsonfence"
+	"panrouter/proxy/internal/log"
+	"panrouter/proxy/internal/middleware"
+	"panrouter/proxy/internal/promptcache"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/proxy/executor"
+	"panrouter/proxy/internal/semanticcache"
+	"panrouter/proxy/internal/thinking"
+	"panrouter/proxy/internal/translator"
+	"panrouter/proxy/internal/updater"
 	"sort"
 	"strings"
 	"time"
@@ -78,6 +80,20 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Pre-filter on raw body bytes: only decode/inspect conversation history
+	// for stalled tool loops when the request actually carries tool calls.
+	// Keeps every non-tool request zero-cost (per §4.A, §4.G).
+	if bytes.Contains(body, []byte(`"tool_calls"`)) || bytes.Contains(body, []byte(`"tool_use"`)) {
+		var msgBody struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &msgBody); err == nil {
+			if h.CheckStalledToolLoopOpenAI(w, msgBody.Messages, reqBody.Model, reqBody.Stream) {
+				return
+			}
+		}
+	}
+
 	// Per-key model policy runs after the bypass path — synthetic warmup and
 	// keepalive traffic never reaches a provider, so it is not an access
 	// request — and before resolveModel, so a denied model never reaches
@@ -87,6 +103,12 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := handlerutil.WithSessionID(r.Context(), handlerutil.ExtractSessionID(r))
+	ctx = executor.WithCodexLiteHeader(ctx, r.Header.Get(executor.CodexResponsesLiteHeader))
+	// X-PanRouter-Token-Saver: off|0|false|bypass opts the whole request out of
+	// every token saver; the flag travels on ctx to applyTokenSavers.
+	if isTokenSaverBypassValue(tokenSaverHeader(r)) {
+		ctx = WithTokenSaverBypass(ctx)
+	}
 	// Provider-scope limit state travels with the request: what one attempt
 	// learns (this provider is full) must steer the next one, and must not
 	// outlive the request (docs/provider-limits-plan.md D7).
@@ -100,6 +122,12 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	// Record the dispatching key so the outbound guardrail tap can resolve the
 	// right policy. A keyless caller leaves it unset and the tap stays inert.
 	ctx = withGuardrailKey(ctx, requestKeyID(r))
+	// Record that this client wants machine-readable JSON before the request
+	// fans out: the answer that has to be unwrapped is written several layers
+	// down, behind the combo fallback loop, so the intent has to travel.
+	if jsonfence.Wants(body) {
+		ctx = jsonfence.With(ctx)
+	}
 
 	// Check prompt/response cache for non-streaming requests before model
 	// resolution: a hit answers the turn without touching a provider, so it
@@ -171,6 +199,20 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// The caller's key may carry a context ceiling below the model's own
+	// window. It is applied here, once, so every attempt — single model, combo
+	// member, fusion leg — is trimmed by the same rule.
+	if limit := keyContextLimit(ctx); limit > 0 {
+		modelWindow, modelMaxOutput := modelContextLimits(modelInfo.Provider, modelInfo.Model)
+		trimmed, limitErr := applyKeyContextLimit(body, limit, modelWindow, modelMaxOutput)
+		if limitErr != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, limitErr.Error())
+			return
+		}
+		body = trimmed
+	}
+
 	requiredCaps := DetectRequiredCapabilities(body)
 
 	if len(modelInfo.ComboModels) > 0 {
@@ -187,6 +229,18 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		// let a text-only upstream reject the whole conversation on a block
 		// this turn does not need.
 		body = maybeStripLegacyMediaBytes(body, augmented)
+		if h.comboBudgetExhausted(reqBody.Model) {
+			// The combo spent its call ceiling inside this window, so it is
+			// withheld rather than reordered: a budget exists to stop the spend
+			// behind the combo, not to try a different model next. The first
+			// member is served as a plain single-model request, which is the
+			// same shape the request would have had without the combo.
+			log.Info("combo", "budget ceiling reached, combo withheld", "combo", reqBody.Model)
+			h.recordComboBudgetCall(reqBody.Model)
+			h.handleSingleModel(ctx, w, body, h.singleModelFromCombo(modelInfo, augmented), reqBody.Stream, false)
+			return
+		}
+		h.recordComboBudgetCall(reqBody.Model)
 		h.handleComboFallback(ctx, w, body, augmented, comboStrategy, reqBody.Stream, false, reqBody.Model, modelInfo.StickyLimit, injected...)
 		return
 	}
@@ -318,6 +372,20 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-filter on raw body bytes: only decode/inspect conversation history
+	// for stalled tool loops when the request actually carries tool calls.
+	// Keeps every non-tool request zero-cost (per §4.A, §4.G).
+	if bytes.Contains(body, []byte(`"tool_calls"`)) || bytes.Contains(body, []byte(`"tool_use"`)) {
+		var msgBody struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &msgBody); err == nil {
+			if h.CheckStalledToolLoopClaude(w, msgBody.Messages, reqBody.Model, reqBody.Stream) {
+				return
+			}
+		}
+	}
+
 	modelInfo, err := h.resolveModel(modelName)
 	if err != nil {
 		log.Error("chat", "resolve model failed", "error", err, "model", reqBody.Model)
@@ -340,13 +408,20 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 			claudeNative = cfg != nil && cfg.Format == providers.FormatClaude
 		}
 	}
+	// A multi-lane provider (opencode-zen, kimi, commandcode-goat, …) has no
+	// single Format, so the model's own declaration decides: converting this
+	// body to OpenAI here would hand a Messages-lane model a shape its endpoint
+	// rejects. Same rule tryForwardWithConnection applies below.
+	if !claudeNative {
+		claudeNative = executor.ServesMessagesEndpoint(modelInfo.Provider, modelInfo.Model)
+	}
 	if claudeNative {
 		translateResponse = false
 		body = translator.SanitizeClaudePassthrough(body, translator.ClaudeIntentionalPrefill(body))
 		if providerCfg != nil && providerCfg.RequireClaudeToolType {
 			body = translator.DefaultClaudeToolType(body)
 		}
-		body = translator.AnchorClaudeCache(body)
+		body = translator.AnchorClaudeCacheWithTTL(body, h.claudeCacheTTL())
 		if err := json.Unmarshal(body, &workingBody); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
@@ -378,6 +453,11 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := handlerutil.WithSessionID(r.Context(), handlerutil.ExtractSessionID(r))
+	// X-PanRouter-Token-Saver: off|0|false|bypass opts the whole request out of
+	// every token saver; the flag travels on ctx to applyTokenSavers.
+	if isTokenSaverBypassValue(tokenSaverHeader(r)) {
+		ctx = WithTokenSaverBypass(ctx)
+	}
 	ctx = withProviderLimitState(ctx)
 	ctx = translator.WithRequestedModel(ctx, stripModelContextMarker(modelName))
 	ctx = thinking.WithSuffixIntent(ctx, suffixIntent)
@@ -395,6 +475,21 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	// than wildly over.
 	if reqBody.Stream && !claudeNative && !bytes.Contains(body, []byte(";base64,")) {
 		ctx = translator.WithPromptEstimate(ctx, (len(body)+3)/4)
+	}
+
+	// The caller's key may carry a context ceiling below the model's own
+	// window. It is applied here, once, so every attempt — single model, combo
+	// member, fusion leg — is trimmed by the same rule.
+	if limit := keyContextLimit(ctx); limit > 0 {
+		modelWindow, modelMaxOutput := modelContextLimits(modelInfo.Provider, modelInfo.Model)
+		trimmed, limitErr := applyKeyContextLimitMap(workingBody, limit, modelWindow, modelMaxOutput)
+		if limitErr != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, limitErr.Error())
+			return
+		}
+		if trimmed != nil {
+			workingBody = trimmed
+		}
 	}
 
 	requiredCaps := DetectRequiredCapabilities(body)
@@ -417,6 +512,16 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		if cleaned, changed := maybeStripLegacyMedia(workingBody, augmented); changed {
 			workingBody = cleaned
 		}
+		if h.comboBudgetExhausted(reqBody.Model) {
+			// Same admission gate as the Chat Completions path: the combo spent
+			// its ceiling, so it is withheld rather than reordered, and the
+			// first member serves the turn as a plain single-model request.
+			log.Info("combo", "budget ceiling reached, combo withheld", "combo", reqBody.Model)
+			h.recordComboBudgetCall(reqBody.Model)
+			h.handleMessagesSingleModel(ctx, w, workingBody, h.singleModelFromCombo(modelInfo, augmented), reqBody.Stream, translateResponse)
+			return
+		}
+		h.recordComboBudgetCall(reqBody.Model)
 		h.handleMessagesComboFallback(ctx, w, workingBody, augmented, comboStrategy, reqBody.Stream, reqBody.Model, modelInfo.StickyLimit, injected...)
 		return
 	}
@@ -518,7 +623,7 @@ func (h *ChatHandler) HandleChangelog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	urls := []string{
-		"https://raw.githubusercontent.com/luqman-v1/panrouter-go/main/CHANGELOG.md",
+		"https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/CHANGELOG.md",
 		"https://raw.githubusercontent.com/decolua/9router/refs/heads/master/CHANGELOG.md",
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -1185,4 +1290,14 @@ func (h *ChatHandler) HandleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	newReq, _ := http.NewRequestWithContext(r.Context(), "POST", "/v1/chat/completions", bytes.NewReader(body))
 	newReq.Header = r.Header
 	h.HandleChatCompletions(w, newReq)
+}
+
+// tokenSaverHeader reads the per-request token-saver opt-out under either
+// spelling: the header was on the wire as X-9Router-Token-Saver before the rename,
+// and a client that has not been updated must not silently get compression again.
+func tokenSaverHeader(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-PanRouter-Token-Saver")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.Header.Get("X-9Router-Token-Saver"))
 }

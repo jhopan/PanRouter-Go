@@ -25,20 +25,20 @@ func TestClampMuseSparkOutputBudgetRaisesOnlyTinyCallerBudgets(t *testing.T) {
 			model:      "muse-spark-1.3-contributor-free",
 			body:       map[string]any{"max_tokens": int64(64)},
 			wantRaised: []string{"max_tokens"},
-			wantBody:   map[string]any{"max_tokens": museSparkMinOutputTokens},
+			wantBody:   map[string]any{"max_tokens": outputReasoningFloor},
 		},
 		{
 			name:       "one token below the floor is raised",
 			model:      "muse-spark-1.3",
 			body:       map[string]any{"max_output_tokens": int64(511)},
 			wantRaised: []string{"max_output_tokens"},
-			wantBody:   map[string]any{"max_output_tokens": museSparkMinOutputTokens},
+			wantBody:   map[string]any{"max_output_tokens": outputReasoningFloor},
 		},
 		{
 			name:     "a budget exactly at the floor is untouched",
 			model:    "muse-spark-1.3",
-			body:     map[string]any{"max_tokens": int64(512)},
-			wantBody: map[string]any{"max_tokens": int64(512)},
+			body:     map[string]any{"max_tokens": int64(outputReasoningFloor)},
+			wantBody: map[string]any{"max_tokens": int64(outputReasoningFloor)},
 		},
 		{
 			name:     "an explicit larger budget is untouched",
@@ -64,9 +64,9 @@ func TestClampMuseSparkOutputBudgetRaisesOnlyTinyCallerBudgets(t *testing.T) {
 			body:       map[string]any{"max_tokens": int64(10), "max_output_tokens": float64(20), "max_completion_tokens": int(30)},
 			wantRaised: []string{"max_tokens", "max_output_tokens", "max_completion_tokens"},
 			wantBody: map[string]any{
-				"max_tokens":            museSparkMinOutputTokens,
-				"max_output_tokens":     museSparkMinOutputTokens,
-				"max_completion_tokens": museSparkMinOutputTokens,
+				"max_tokens":            outputReasoningFloor,
+				"max_output_tokens":     outputReasoningFloor,
+				"max_completion_tokens": outputReasoningFloor,
 			},
 		},
 		{
@@ -166,15 +166,15 @@ func TestNormalizeMuseSparkResponsesBodyAppliesTheFloor(t *testing.T) {
 				}
 				return
 			}
-			if got != museSparkMinOutputTokens {
-				t.Errorf("%s = %d, want the %d floor", tt.wantKey, got, museSparkMinOutputTokens)
+			if got != outputReasoningFloor {
+				t.Errorf("%s = %d, want the %d floor", tt.wantKey, got, outputReasoningFloor)
 			}
 		})
 	}
 }
 
 // TestNormalizeMuseSparkResponsesBodyHonoursTheEffortSuffix covers the second
-// half of the port: the "(level)" the client appends to the model id is 9router
+// half of the port: the "(level)" the client appends to the model id is panrouter
 // request notation and never reaches the wire, but the intent must not be lost
 // with it. Fill-only precedence — an effort the body states explicitly is left
 // exactly as the caller wrote it.

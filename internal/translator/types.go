@@ -21,8 +21,20 @@ type StreamState struct {
 	ThinkingBlockIndex   int
 	ToolCalls            map[int]ToolCallState
 	ToolArgBuffers       map[int]string
-	FinishReason         string
-	Usage                *OpenAIUsage
+	// DSMLBuffer accumulates response content that may contain DeepSeek DSML
+	// tool invocation blocks across stream chunks.
+	DSMLBuffer string
+	// DSMLBuffered records that a DSML marker was seen and buffered content is
+	// being held back until finish rather than streamed as raw text.
+	DSMLBuffered bool
+	// DSMLEmitted is the number of DSML tool calls already emitted as tool_use
+	// blocks, so a re-parse of the growing buffer does not re-emit them.
+	DSMLEmitted int
+	// DSMLCleanedLen is how many bytes of the cleaned buffer have already been
+	// streamed as text, so cleaned text is never streamed twice.
+	DSMLCleanedLen int
+	FinishReason   string
+	Usage          *OpenAIUsage
 	// TerminalSent records that the terminal message_delta + message_stop
 	// pair actually went out. FinishReason alone does not imply it: with
 	// stream_options.include_usage the usage chunk arrives AFTER the finish
@@ -45,13 +57,36 @@ type ToolCallState struct {
 
 // OpenAIUsage tracks token counts.
 type OpenAIUsage struct {
-	PromptTokens             int                      `json:"prompt_tokens"`
-	CompletionTokens         int                      `json:"completion_tokens"`
-	CachedTokens             int                      `json:"cached_tokens"`
-	CacheCreationInputTokens int                      `json:"cache_creation_input_tokens"`
-	PromptTokensDetails      *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
-	CompletionTokensDetails  *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
-	PromptCacheIncluded      bool                     `json:"-"`
+	PromptTokens             int `json:"prompt_tokens"`
+	CompletionTokens         int `json:"completion_tokens"`
+	CachedTokens             int `json:"cached_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// Anthropic splits a cache write by the window it was billed at. They are
+	// kept apart because the two windows are priced differently (1.25x vs 2x)
+	// and an operator tuning the ttl needs to see which one traffic used.
+	CacheCreation5mInputTokens int                      `json:"cache_creation_5m_input_tokens,omitempty"`
+	CacheCreation1hInputTokens int                      `json:"cache_creation_1h_input_tokens,omitempty"`
+	PromptTokensDetails        *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails    *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptCacheIncluded        bool                     `json:"-"`
+}
+
+// claudeCacheCreation is Anthropic's per-window split of a cache write.
+// Older models and non-Anthropic upstreams omit it, so a nil pointer means
+// "not reported" rather than "no 5-minute write".
+type claudeCacheCreation struct {
+	Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+}
+
+// apply copies the split onto u. It is safe on a nil receiver so a caller can
+// chain it without a nil check.
+func (cc *claudeCacheCreation) apply(u *OpenAIUsage) {
+	if cc == nil || u == nil {
+		return
+	}
+	u.CacheCreation5mInputTokens = cc.Ephemeral5m
+	u.CacheCreation1hInputTokens = cc.Ephemeral1h
 }
 
 type PromptTokensDetails struct {
@@ -216,7 +251,7 @@ type ClaudeTool struct {
 	InputSchema jsontext.Value `json:"input_schema,omitempty"`
 	// Strict is not an Anthropic-native field; it is carried through translation
 	// so a client instruction survives a Claude<->OpenAI hop (parity with
-	// decolua/panrouter#4607). Pointer + omitempty keeps "unset" distinguishable
+	// decolua/9router#4607). Pointer + omitempty keeps "unset" distinguishable
 	// from an explicit false, which is a real client instruction. A non-boolean
 	// value is dropped rather than fatal — see UnmarshalStrict.
 	Strict *bool `json:"strict,omitempty"`
@@ -265,10 +300,10 @@ type ClaudeToolChoice struct {
 	Type string `json:"type"`
 	// DisableParallelToolUse is Claude's single-tool-call policy: the model may
 	// emit at most one tool call per turn. It is the counterpart of OpenAI's
-	// parallel_tool_calls:false (parity with decolua/panrouter#4581). Plain bool
+	// parallel_tool_calls:false (parity with decolua/9router#4581). Plain bool
 	// with omitempty: only an explicit true is worth putting on the wire.
-	DisableParallelToolUse bool `json:"disable_parallel_tool_use,omitempty"`
-	Name string `json:"name,omitempty"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
+	Name                   string `json:"name,omitempty"`
 }
 
 // ClaudeThinking represents the thinking configuration in a Claude request.
@@ -306,9 +341,9 @@ type OpenAIRequest struct {
 	ToolChoice          any             `json:"tool_choice,omitempty"`
 	// ParallelToolCalls carries OpenAI's single-tool-call policy. Pointer so an
 	// absent field stays absent while an explicit false still serialises.
-	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
-	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
-	Stream              bool            `json:"stream,omitempty"`
+	ParallelToolCalls *bool  `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort   string `json:"reasoning_effort,omitempty"`
+	Stream            bool   `json:"stream,omitempty"`
 }
 
 // OpenAIMessage is a single message in OpenAI format.
@@ -363,7 +398,7 @@ type OpenAIFunction struct {
 	Description string         `json:"description,omitempty"`
 	Parameters  jsontext.Value `json:"parameters,omitempty"`
 	// Strict preserves an explicit client strict mode in both directions
-	// (parity with decolua/panrouter#4607/#4543/#4573). Pointer + omitempty keeps
+	// (parity with decolua/9router#4607/#4543/#4573). Pointer + omitempty keeps
 	// "unset" distinguishable from an explicit false.
 	Strict *bool `json:"strict,omitempty"`
 }

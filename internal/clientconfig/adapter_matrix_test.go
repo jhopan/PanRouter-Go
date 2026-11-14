@@ -21,6 +21,14 @@ func fixtureFor(id string) string {
 		return "# user comment\nkeep_me = \"yes\"\n"
 	case "omp":
 		return "# user comment\nkeepMe: \"yes\"\n"
+	case "codewhale", "forge", "deepseek-tui", "grok-build", "jcode":
+		return "# user comment\nkeep_me = \"yes\"\n"
+	case "copilot":
+		// A root array with one entry this adapter does not own: it has to come
+		// back unchanged, name and all.
+		return "[{\"name\": \"keepMe\"}]\n"
+	case "openclaw", "smelt":
+		return "{\n  \"keepMe\": \"yes\"\n}\n"
 	}
 	return ""
 }
@@ -61,8 +69,8 @@ func TestAdapterS1RoundTrip(t *testing.T) {
 			}
 			for _, f := range paths.Files {
 				got := readFixture(t, f.Path)
-				if n := strings.Count(got, "9router"); n > 0 && id != "kilo" {
-					t.Errorf("%s: Reset left 9router behind:\n%s", f.Purpose, got)
+				if n := strings.Count(got, "panrouter"); n > 0 && id != "kilo" {
+					t.Errorf("%s: Reset left panrouter behind:\n%s", f.Purpose, got)
 				}
 			}
 		})
@@ -105,6 +113,10 @@ func TestAdapterS3RefusesMalformed(t *testing.T) {
 		"claude": "{\"a\": ", "opencode": "{\"a\": ", "droid": "{\"a\": ",
 		"crush": "{\"a\": ", "kilo": "{\"a\": ", "pi": "{\"a\": ",
 		"cline": "{\"a\": ", "codex": "model = \n[[[", "omp": "\t\tbad: [\n",
+		"codewhale": "a = \n[[[", "forge": "a = \n[[[", "deepseek-tui": "a = \n[[[",
+		"grok-build": "a = \n[[[", "jcode": "a = \n[[[",
+		"copilot": "[{\"name\": ", "openclaw": "{\"a\": ", "smelt": "{\"a\": ",
+		"cowork": "{\"a\": ",
 	}
 	opts := Options{BaseURL: "http://h:1", APIKey: "k", Model: "m"}
 	for _, id := range IDs() {
@@ -114,6 +126,11 @@ func TestAdapterS3RefusesMalformed(t *testing.T) {
 			paths, err := adapter.Paths(Options{Home: home})
 			if err != nil {
 				t.Fatalf("Paths: %v", err)
+			}
+			if len(paths.Files) == 0 {
+				// devin owns no file, so there is no malformed input it could
+				// refuse. The adapter is a detection-only client.
+				t.Skip("adapter owns no config file")
 			}
 			for _, f := range paths.Files {
 				writeFixture(t, f.Path, broken[id])
@@ -136,8 +153,8 @@ func TestAdapterS3RefusesMalformed(t *testing.T) {
 // aliases are checked rather than assumed.
 func TestRegistry(t *testing.T) {
 	ids := IDs()
-	if len(ids) != 9 {
-		t.Fatalf("got %d adapters, want 9 (matrix §1.1)", len(ids))
+	if len(ids) != 19 {
+		t.Fatalf("got %d adapters, want 19 (nine `connect` clients plus the ten dashboard-only clients)", len(ids))
 	}
 	for _, a := range []string{"claude-code", "claudecode", "factory", "kilocode", "pi-coding-agent", "oh-my-pi"} {
 		if _, err := Resolve(a); err != nil {
@@ -151,8 +168,8 @@ func TestRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAll(all): %v", err)
 	}
-	if len(all) != 9 {
-		t.Errorf(`"all" expanded to %d, want 9`, len(all))
+	if len(all) != len(ids) {
+		t.Errorf(`"all" expanded to %d, want %d`, len(all), len(ids))
 	}
 	dup, err := ResolveAll([]string{"claude", "claude-code", "claude"})
 	if err != nil {

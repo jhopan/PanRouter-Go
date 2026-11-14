@@ -57,8 +57,8 @@ func TestComboFallbackChain_Success(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "fallback answered") {
 		t.Errorf("unexpected body: %s", rec.Body.String())
 	}
-	if comboHeader := rec.Header().Get("x-9router-combo"); comboHeader != "fallback-combo" {
-		t.Errorf("expected x-9router-combo header to be fallback-combo, got %q", comboHeader)
+	if comboHeader := rec.Header().Get("x-panrouter-combo"); comboHeader != "fallback-combo" {
+		t.Errorf("expected x-panrouter-combo header to be fallback-combo, got %q", comboHeader)
 	}
 }
 
@@ -203,7 +203,7 @@ func TestComboFallbackChain_MultiFallback_A_to_B_to_C(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "answered by combo C") {
 		t.Errorf("unexpected body: %s", rec.Body.String())
 	}
-	if comboHeader := rec.Header().Get("x-9router-combo"); comboHeader != "combo-c" {
-		t.Errorf("expected x-9router-combo header to be combo-c, got %q", comboHeader)
+	if comboHeader := rec.Header().Get("x-panrouter-combo"); comboHeader != "combo-c" {
+		t.Errorf("expected x-panrouter-combo header to be combo-c, got %q", comboHeader)
 	}
 }

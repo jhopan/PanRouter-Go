@@ -62,8 +62,8 @@ web-build:
 
 ## build — compile binary with version embedding
 build: web-build
-	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/9router-go/
-	go build -ldflags="$(LDFLAGS)" -o opencode-go$(BINARY_SUFFIX) ./cmd/9router-go/
+	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/panrouter-go/
+	go build -ldflags="$(LDFLAGS)" -o opencode-go$(BINARY_SUFFIX) ./cmd/panrouter-go/
 
 # `PORT=20130 ./9router-go` is POSIX env-assignment prefix syntax. cmd.exe does
 # not parse it: it tried to execute a program literally named "PORT" and failed
@@ -97,7 +97,7 @@ run: build
 
 ## dev — start with go run (auto-rebuild)
 dev:
-	go run -ldflags="$(LDFLAGS)" ./cmd/9router-go/ $(if $(RTK),--rtk=$(RTK)) $(if $(CAVEMAN),--caveman=$(CAVEMAN)) $(if $(PONYTAIL),--ponytail=$(PONYTAIL)) --auto-update=$(AUTO_UPDATE)
+	go run -ldflags="$(LDFLAGS)" ./cmd/panrouter-go/ $(if $(RTK),--rtk=$(RTK)) $(if $(CAVEMAN),--caveman=$(CAVEMAN)) $(if $(PONYTAIL),--ponytail=$(PONYTAIL)) --auto-update=$(AUTO_UPDATE)
 
 ## web-dev — Vite dev server (HMR) on :5173, API proxied to Go :20130. FE changes hot-reload without rebuilding the binary.
 web-dev:
@@ -228,7 +228,7 @@ cross: web-build
 	@cat SHA256SUMS.txt
 .PHONY: cross-one $(CROSS_BUILD_TARGETS)
 cross-one:
-	go build -ldflags="$(LDFLAGS)" -o $(OUT) ./cmd/9router-go/
+	go build -ldflags="$(LDFLAGS)" -o $(OUT) ./cmd/panrouter-go/
 ## mitm-enable — start MITM proxy
 mitm-enable: build
 	$(BINARY) mitm enable

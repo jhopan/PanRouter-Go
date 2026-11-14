@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 
+	json "encoding/json/v2"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/log"
 	"panrouter/proxy/internal/providers"
@@ -39,15 +40,25 @@ func upgradeLegacyAdapterModel(m string) string {
 }
 
 // adapterEntry is a normalized capacity-adapter pool.
+//
+// ComboName is the newer half of upstream's entry shape: instead of listing the
+// models inline, a capability can point at a combo, which then holds the models,
+// their order and the fallback/round-robin strategy. Both shapes are accepted at
+// once — a stored row from before the combo reference existed still works, and a
+// row that carries both prefers the combo, exactly like upstream's
+// normalizeCapEntry.
 type adapterEntry struct {
 	Enabled    bool
 	RoundRobin bool
+	ComboName  string
 	Models     []string
 }
 
 // normalizeCapEntry coerces a stored capacity-adapter entry into
-// {enabled, roundRobin, models}. Backward compat: the legacy array form
-// [{model, enabled}] is accepted and treated as enabled with fallback strategy.
+// {enabled, roundRobin, comboName, models}. Backward compat: the legacy array
+// form [{model, enabled}] is accepted and treated as enabled with fallback
+// strategy, and `combo` is accepted as an alias for `comboName`
+// (open-sse/services/capacityAdapter.js:24-38).
 func normalizeCapEntry(raw any) adapterEntry {
 	switch v := raw.(type) {
 	case []any:
@@ -74,6 +85,13 @@ func normalizeCapEntry(raw any) adapterEntry {
 		if b, ok := v["roundRobin"].(bool); ok {
 			rr = b
 		}
+		// `combo` is the documented alias. Only a string is a name; anything
+		// else is a malformed row, and guessing at it would point the adapter
+		// at a combo the operator never chose.
+		comboName, _ := v["comboName"].(string)
+		if strings.TrimSpace(comboName) == "" {
+			comboName, _ = v["combo"].(string)
+		}
 		var models []string
 		if list, ok := v["models"].([]any); ok {
 			for _, m := range list {
@@ -83,7 +101,12 @@ func normalizeCapEntry(raw any) adapterEntry {
 				}
 			}
 		}
-		return adapterEntry{Enabled: enabled, RoundRobin: rr, Models: models}
+		return adapterEntry{
+			Enabled:    enabled,
+			RoundRobin: rr,
+			ComboName:  strings.TrimSpace(comboName),
+			Models:     models,
+		}
 	default:
 		return adapterEntry{}
 	}
@@ -124,22 +147,58 @@ func mergeAdapterDefaults(pools map[string]any) map[string]any {
 		out[cap] = map[string]any{
 			"enabled":    entry.Enabled,
 			"roundRobin": entry.RoundRobin,
+			"comboName":  "",
 			"models":     entry.Models,
 		}
 	}
 	return out
 }
 
-// adapterConfig resolves one capability's full config. An enabled pool with no
-// models falls back to defaultAdapterFallbackModel so the toggle is never a
-// no-op; a DISABLED pool stays empty, which is what keeps a turned-off adapter
-// from injecting anything.
+// adapterConfig resolves one capability's full config. A combo reference is
+// expanded to the combo's own models first, because the combo is where the
+// operator put them — upstream's getCapacityAdapterConfig does the same and
+// keeps the inline list only when the combo cannot be read. An enabled pool that
+// still has no models falls back to defaultAdapterFallbackModel so the toggle is
+// never a no-op; a DISABLED pool stays empty, which is what keeps a turned-off
+// adapter from injecting anything.
 func (h *ChatHandler) adapterConfig(cap string, pools map[string]any) adapterEntry {
 	entry := normalizeCapEntry(pools[cap])
+	if models := h.adapterComboModels(entry.ComboName); len(models) > 0 {
+		entry.Models = models
+	}
 	if entry.Enabled && len(entry.Models) == 0 {
 		entry.Models = []string{defaultAdapterFallbackModel}
 	}
 	return entry
+}
+
+// adapterComboModels expands a capability's combo reference into concrete
+// leaves. A missing combo, an unrunnable one, or a handler without a repository
+// yields nothing, and the caller keeps whatever the entry carried inline — the
+// same "combo if it reads, otherwise the pool" precedence upstream applies.
+func (h *ChatHandler) adapterComboModels(name string) []string {
+	if name == "" || h.Repo == nil {
+		return nil
+	}
+	combo, err := h.Repo.GetComboByName(name)
+	if err != nil || combo == nil || combo.Models == "" {
+		return nil
+	}
+	var leaves []string
+	if err := json.Unmarshal([]byte(combo.Models), &leaves); err != nil || len(leaves) == 0 {
+		return nil
+	}
+	flattened, err := h.flattenComboModels(leaves)
+	if err != nil {
+		return nil
+	}
+	models := make([]string, 0, len(flattened))
+	for _, m := range flattened {
+		if m = upgradeLegacyAdapterModel(m); m != "" {
+			models = append(models, m)
+		}
+	}
+	return models
 }
 
 // adapterModels flattens enabled models across all capability pools, in

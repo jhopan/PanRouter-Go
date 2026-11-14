@@ -1,15 +1,15 @@
 package executor
 
 import (
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/proxy"
-	"panrouter/proxy/internal/translator"
 	"context"
 	json "encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/proxy"
+	"panrouter/proxy/internal/translator"
 	"strings"
 	"testing"
 )

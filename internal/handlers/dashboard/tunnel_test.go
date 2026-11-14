@@ -24,6 +24,10 @@ func stubTailscaleHost(t *testing.T, bin string, exec func(ctx context.Context, 
 }
 
 func TestHandleTunnelEndpoints(t *testing.T) {
+	// The tunnel state file lives under DATA_DIR: a machine with a live
+	// cloudflared (or a leftover state file) would otherwise answer this suite
+	// from its own tunnel and report a stranger's URL.
+	t.Setenv("DATA_DIR", t.TempDir())
 	repo, cleanup := setupTestDB(t)
 	defer cleanup()
 

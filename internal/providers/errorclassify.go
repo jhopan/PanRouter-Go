@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ErrorRule classifies an upstream error by text match or status code.
@@ -38,8 +39,9 @@ const TransientCooldownMs = 30 * 1000 // 30 seconds
 
 // cooldown durations (ms) used by ERROR_RULES
 const (
-	cooldownLong  = 2 * 60 * 1000 // 2 minutes
-	cooldownShort = 5 * 1000      // 5 seconds
+	cooldownLong     = 2 * 60 * 1000  // 2 minutes
+	cooldownShort    = 5 * 1000       // 5 seconds
+	cooldownAuthDead = 60 * 60 * 1000 // 1 hour
 
 	// cooldownBannedAccount parks a deepseek-web account whose credential the
 	// site refuses (40012 USER_IS_BANNED). The ban names the account, not a
@@ -66,6 +68,14 @@ const (
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
 // Checked top-to-bottom: text rules first (by order), then status rules.
 var ErrorRules = []ErrorRule{
+	{Text: "11158", CooldownMs: cooldownLong},
+	{Text: "model_not_in_plan", CooldownMs: cooldownLong},
+	{Text: "当前账号类型暂不支持该模型", CooldownMs: cooldownLong},
+	{Text: "14018", CooldownMs: cooldownLong},
+	{Text: "额度已用尽", CooldownMs: cooldownLong},
+	{Text: "11140", CooldownMs: cooldownAddressRefused},
+	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
+	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
 	// --- Quota / credit exhaustion (checked before generic rules) ---
 	// A spent budget is not a transient throttle: give it the long cooldown
 	// instead of the 30s transient default. Without this, "insufficient
@@ -102,9 +112,24 @@ var ErrorRules = []ErrorRule{
 	// forever. The generic 403 rule cannot tell them apart.
 	{Provider: "deepseek-web", Text: "refused this account", CooldownMs: cooldownBannedAccount},
 	{Provider: "deepseek-web", Text: "refused this address", CooldownMs: cooldownAddressRefused},
+	// Google permanently disables Antigravity OAuth accounts for ToS
+	// violations; nothing clears until the operator wins an appeal.
+	{Provider: "antigravity", Text: "disabled in this account for violation", CooldownMs: cooldownBannedAccount},
+	// tos_violation is deliberately NOT a standalone 24h rule: a bare
+	// tos_violation (another provider's refusal, or a user prompt echoed
+	// into an error) must not park a healthy connection. The real Google
+	// ban carries the "disabled in this account" sentence above plus the
+	// cloudcode-pa domain, which is what parks the account for 24h.
+	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
+	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
+	{Text: "insufficient_quota", CooldownMs: cooldownLong},
+	{Text: "billing_error", CooldownMs: cooldownLong},
+	{Text: "budgetlimiterror", CooldownMs: cooldownLong},
+	{Text: "gousagelimiterror", CooldownMs: cooldownLong},
+	{Text: "free_pi_token_expired", CooldownMs: cooldownAuthDead},
+
 	{Text: "no credentials", CooldownMs: cooldownLong},
 	{Text: "request not allowed", CooldownMs: cooldownShort},
-	{Text: "improperly formed request", CooldownMs: cooldownLong},
 	{Text: "rate limit", Backoff: true},
 	{Text: "too many requests", Backoff: true},
 	// "credit balance is too low" stays here: it is Anthropic's wording for a
@@ -117,6 +142,15 @@ var ErrorRules = []ErrorRule{
 	{Text: "resource has been exhausted", Backoff: true},
 	{Text: "model_capacity_exhausted", Backoff: true},
 	{Text: "server is temporarily unavailable", Backoff: true},
+
+	{Text: "11158", CooldownMs: cooldownLong},
+	{Text: "model_not_in_plan", CooldownMs: cooldownLong},
+	{Text: "当前账号类型暂不支持该模型", CooldownMs: cooldownLong},
+	{Text: "14018", CooldownMs: cooldownLong},
+	{Text: "额度已用尽", CooldownMs: cooldownLong},
+	{Text: "11140", CooldownMs: cooldownAddressRefused},
+	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
+	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
 
 	// --- Status-based rules (fallback when text doesn't match) ---
 	{Status: 401, CooldownMs: cooldownLong},
@@ -225,6 +259,9 @@ var permanentFailurePatterns = []string{
 	"account suspended",
 	"account disabled",
 	"not found",
+	// Antigravity ToS bans never clear by waiting.
+	"this service has been disabled in this account",
+	"tos_violation",
 }
 
 // LooksLikePermanentFailure reports whether an error means the credential is
@@ -366,6 +403,36 @@ func GetQuotaCooldown(backoffLevel int) int {
 	level := max(backoffLevel-1, 0)
 	cooldown := int(float64(BackoffConfig.BaseMs) * math.Pow(2, float64(level)))
 	return min(cooldown, BackoffConfig.MaxMs)
+}
+
+// GetEscalatingLockoutCooldown returns the cooldown for the nth consecutive
+// account-level lockout (1-based, failureStreak >= 1):
+//
+//	streak 1 -> 24h, streak 2 -> 48h, streak 3 -> 96h (4 days),
+//	streak 4 -> 168h (7 days), streak 5+ -> 336h (14 days).
+//
+// A streak of 0 (or a reset after a successful probe / manual re-test) means no
+// lockout: returns 0.
+//
+// This replaces the flat cooldownBannedAccount for repeated account-level
+// failures: once 24 hours lapse without the operator resolving the account, the
+// next failure parks it longer instead of immediately re-dialling a dead
+// account and inviting another WAF flag.
+func GetEscalatingLockoutCooldown(failureStreak int) time.Duration {
+	switch {
+	case failureStreak <= 0:
+		return 0
+	case failureStreak == 1:
+		return 24 * time.Hour
+	case failureStreak == 2:
+		return 48 * time.Hour
+	case failureStreak == 3:
+		return 96 * time.Hour
+	case failureStreak == 4:
+		return 168 * time.Hour
+	default:
+		return 336 * time.Hour
+	}
 }
 
 // ErrorClassification holds the result of ClassifyError.

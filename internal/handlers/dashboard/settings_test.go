@@ -18,7 +18,7 @@ import (
 
 // setupSettingsTestDB extends the shared dashboard schema with the tables the
 // backup export walks (providerNodes/proxyPools are created elsewhere in prod).
-// DATA_DIR is isolated per test so the CLI-token files never touch ~/.9router.
+// DATA_DIR is isolated per test so the CLI-token files never touch ~/.panrouter.
 func setupSettingsTestDB(t *testing.T) (*db.Repo, func()) {
 	t.Helper()
 	t.Setenv("DATA_DIR", t.TempDir())
@@ -403,7 +403,7 @@ func TestHandleImportDatabase_LegacyZipArchive(t *testing.T) {
 	payload := `{"settings":{"requireLogin":true},"providerConnections":[{"id":"conn-zip","provider":"deepseek","authType":"apikey","isActive":true,"priority":1,"apiKey":"sk-zip"}],"customModels":[]}`
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	f, err := zw.Create("9router-backup.json")
+	f, err := zw.Create("panrouter-backup.json")
 	if err != nil {
 		t.Fatalf("create zip entry: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestHandleImportDatabase_LegacyBackupPasswordWins(t *testing.T) {
 
 // TestHandleImportDatabase_ClientContract pins the wire contract the Svelte
 // dashboard uses: a raw JSON body (never multipart/form-data) and the
-// x-9r-password header for re-auth, matching Next's settings/database route.
+// x-panrouter-password header for re-auth, matching Next's settings/database route.
 func TestHandleImportDatabase_ClientContract(t *testing.T) {
 	repo, cleanup := setupSettingsTestDB(t)
 	defer cleanup()
@@ -679,7 +679,7 @@ func TestHandleImportDatabase_ClientContract(t *testing.T) {
 		t.Fatalf("raw JSON import failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Once a password is set, the x-9r-password header must authorize too.
+	// Once a password is set, the x-panrouter-password header must authorize too.
 	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret-pass"), bcrypt.DefaultCost)
 	if err != nil {
 		t.Fatal(err)

@@ -22,22 +22,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samber/lo"
 	"panrouter/proxy/internal/daemon"
 	"panrouter/proxy/internal/log"
 	"panrouter/proxy/internal/shutdown"
-	"github.com/samber/lo"
 )
 
 // CurrentVersion is the active panrouter-go application version.
 // Can be overridden at build time via -ldflags "-X panrouter/proxy/internal/updater.CurrentVersion=1.8.8"
 // Default fallback is read from version.json at init if not overridden.
-var CurrentVersion = "1.9.16-exp.1"
+var CurrentVersion = "1.9.17-exp.2"
 
 // DefaultUpdateURL is the primary remote version manifest URL.
-var DefaultUpdateURL = "https://raw.githubusercontent.com/luqman-v1/panrouter-go/main/version.json"
+var DefaultUpdateURL = "https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/version.json"
 
 // DefaultGitHubRepo is the repository for GitHub Releases API fallback.
-var DefaultGitHubRepo = "luqman-v1/panrouter-go"
+var DefaultGitHubRepo = "jhopan/PanRouter-Go"
 
 // DefaultCheckInterval is the periodic background update check interval (6 hours).
 const DefaultCheckInterval = 6 * time.Hour
@@ -607,7 +607,8 @@ func scoreArchiveEntry(name string, content []byte) int {
 	low := strings.ToLower(name)
 
 	// Prefer entries containing the project name over generic files
-	if strings.Contains(low, "panrouter-go") || strings.Contains(low, "panrouter_go") {
+	if strings.Contains(low, "panrouter-go") || strings.Contains(low, "panrouter_go") ||
+		strings.Contains(low, "panrouter-go") || strings.Contains(low, "panrouter_go") {
 		score += 10
 	}
 
@@ -741,7 +742,7 @@ func runCheckCycle(ctx context.Context) {
 		return
 	}
 
-	log.Info("updater", "NEW 9ROUTER-GO VERSION AVAILABLE!",
+	log.Info("updater", "NEW PANROUTER-GO VERSION AVAILABLE!",
 		"current", info.CurrentVersion,
 		"latest", info.LatestVersion,
 		"downloadUrl", info.DownloadURL,

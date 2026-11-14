@@ -1,6 +1,7 @@
 package clientconfig
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,6 +36,10 @@ type Options struct {
 	APIKey string
 	// Model is the model id the client should default to.
 	Model string
+	// Models is the model list a client that stores an array of models can
+	// write (copilot, cowork, jcode, openclaw). Empty means "just Model", which is
+	// what the single-model clients have always sent.
+	Models []string
 	// Tiers carries per-tier model overrides for claude (fable, opus, sonnet,
 	// haiku). A tier absent from this map has no value from this source.
 	Tiers map[string]string
@@ -42,6 +47,8 @@ type Options struct {
 	// lower-precedence source. A tier present in neither map keeps whatever key
 	// the user already had — see claude.go.
 	ServerTiers map[string]string
+	// AutoCompactWindow is an optional override for Claude Code's autoCompactWindow.
+	AutoCompactWindow string
 	// ModelLimits carries the token capacity the gateway publishes for the
 	// models this connect names, keyed by the model id exactly as given in
 	// Model and in the Tiers values. It is how a client learns the real
@@ -85,6 +92,12 @@ type Adapter interface {
 	Reset(opts Options) (Result, error)
 }
 
+// CurrentConfigReader is an optional interface adapters implement to report
+// what is currently written in the client's configuration file.
+type CurrentConfigReader interface {
+	Current(opts Options) (map[string]any, error)
+}
+
 // FilePlan is one file's worth of edits, resolved but not yet applied.
 type FilePlan struct {
 	File TargetFile
@@ -95,6 +108,16 @@ type FilePlan struct {
 	// omp uses it, and only when what would be left is a bare `providers:`
 	// header (matrix §3.9).
 	RemoveFile bool
+	// Document, when non-nil, is the file's complete new content, already
+	// serialized in the file's own dialect. Edits are ignored.
+	//
+	// It exists for the clients whose upstream route replaces the whole file
+	// rather than patching keys — copilot's config is a root JSON array, which
+	// KeyPath cannot address at all, and cowork derives three documents from
+	// the same request. The bytes still go through BackupAndWrite, so the
+	// atomicity, backup and containment invariants are the same as for an
+	// edit-based plan.
+	Document []byte
 }
 
 // baseAdapter holds the helpers every client needs, so the nine files are key
@@ -161,6 +184,19 @@ func applyOnePlan(p FilePlan, now func() time.Time) (changed bool, backup string
 	}
 	if p.RemoveFile {
 		return removeThroughGuard(g, old != nil)
+	}
+	// A whole-document plan is computed by the adapter, so there is nothing to
+	// splice: compare and write. Byte equality is the idempotence rule here
+	// exactly as it is for an edit that lands on the same bytes.
+	if p.Document != nil {
+		if bytes.Equal(p.Document, old) {
+			return false, "", nil
+		}
+		wr, err := BackupAndWrite(g, old, p.Document, now, hooks{})
+		if err != nil {
+			return false, "", fmt.Errorf("%s: %w", p.File.Purpose, err)
+		}
+		return true, wr.Backup, nil
 	}
 	// A file that does not exist yet starts from the empty document for its
 	// format. Zero bytes is not valid JSONC ("empty document") and leaves the

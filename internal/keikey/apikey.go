@@ -15,8 +15,8 @@ import (
 	"fmt"
 	"strings"
 
-	"panrouter/proxy/internal/handlerutil"
 	"golang.org/x/crypto/argon2"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 // Frozen argon2id cost parameters (F-6). Changing any of these invalidates

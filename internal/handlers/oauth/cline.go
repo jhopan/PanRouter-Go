@@ -1,10 +1,6 @@
 package oauth
 
 import (
-	"panrouter/proxy/internal/handlerutil"
-	"panrouter/proxy/internal/log"
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/updater"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -13,6 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/log"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/updater"
 	"strings"
 	"time"
 )

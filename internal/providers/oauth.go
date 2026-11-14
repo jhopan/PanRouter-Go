@@ -91,7 +91,10 @@ var KnownOAuthConfigs = map[string]OAuthClientConfig{
 	"codebuddy-intl": {
 		ClientID:     envOr("CODEBUDDY_INTL_OAUTH_CLIENT_ID", ""),
 		ClientSecret: envOr("CODEBUDDY_INTL_OAUTH_CLIENT_SECRET", ""),
-		TokenURL:     "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
+		// The intl account lives on codebuddy.ai; copilot.tencent.com answers
+		// the CN accounts only. Upstream registry codebuddy-intl.js carries the
+		// same URL as its oauth.refreshUrl, and the CLI refresh posts there.
+		TokenURL: "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
 	},
 	"cline": {
 		ClientID:     envOr("CLINE_OAUTH_CLIENT_ID", ""),

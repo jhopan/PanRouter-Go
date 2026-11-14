@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	json "encoding/json/v2"
 	"errors"
@@ -9,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"panrouter/proxy/internal/constants"
@@ -20,6 +23,16 @@ import (
 )
 
 const codebuddySystemPrompt = "You are CodeBuddy Code."
+
+// codebuddyJSONOpts sorts JSON object members by name.
+//
+// The gzipped body skips proxy.canonicalChatBody (it cannot parse compressed
+// bytes), so the executor sorts the members itself. Without it the same logical
+// request would reach the upstream with its keys in Go's randomized map order,
+// and a prefix-based prompt cache upstream would miss on every turn after the
+// first — the property upstream's JS keeps by construction
+// (internal/proxy/deterministic_body.go).
+var codebuddyJSONOpts = json.Deterministic(true)
 
 var channelMarkers = []string{
 	"You are Claude Code, Anthropic's official CLI for Claude.",
@@ -44,6 +57,12 @@ var codebuddyRateLimitRegex = regexp.MustCompile(`(?i)超出频率限制|frequen
 //   - any other value → injects reasoning_summary="auto" so CodeBuddy
 //     surfaces the model's reasoning output.
 func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
+	// The entry point *is* the lane: a caller that reached this function wants
+	// the CN identity even when the request carries no provider name (the
+	// dashboard's own test dispatch does not set one).
+	if req != nil && req.Provider == "" {
+		req.Provider = "codebuddy-cn"
+	}
 	body, err := transformCodebuddyBody(req.Body)
 	if err != nil {
 		return fmt.Errorf("transform codebuddy body: %w", err)
@@ -51,6 +70,7 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 
 	ctx := req.Ctx
 	cfg := req.Config
+	encoded := body
 	if cfg != nil {
 		merged := make(map[string]string, len(cfg.StaticHeaders)+25)
 		for k, v := range cfg.StaticHeaders {
@@ -59,16 +79,28 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 		delete(merged, "x-requested-with")
 		delete(merged, "x-codebuddy-request")
 
+		// The header builder reads the opening user message to derive the
+		// conversation id, so it runs while the body is still JSON.
 		for k, v := range codebuddyHeaders(req, cfg, body) {
 			merged[k] = v
 		}
 		cfgCopy := *cfg
 		cfgCopy.StaticHeaders = merged
 		cfg = &cfgCopy
+
+		// The CLI gzips the chat body (upstream encodeRequestBody: body →
+		// gzipSync, Content-Encoding: gzip). Compressing here, once per outgoing
+		// request, also lets the transport derive Content-Length from the
+		// compressed byte count instead of the JSON length.
+		compressed, err := codebuddyGzipBody(body)
+		if err != nil {
+			return err
+		}
+		encoded = compressed
 	}
 
 	// Always forward as stream — CodeBuddy rejects stream=false
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, cfg, req.APIKey, body, true)
+	resp, err := proxy.ForwardOpenAI(ctx, req.Client, cfg, req.APIKey, encoded, true)
 	if err != nil {
 		var ue *proxy.UpstreamError
 		if errors.As(err, &ue) && isCodebuddyRateLimit(ue.Body) {
@@ -103,7 +135,7 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 				return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
 			}
 		}
-		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, req.Config.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), "codebuddy-cn")
+		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, proxy.ResolveStallBudgets(req.Config), "codebuddy-cn")
 		defer func() { _ = stallReader.Close() }() // stops the shutdown watcher + stall timer
 		return execSSEStream(w, stallReader, req)
 	}
@@ -233,6 +265,10 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 		if role == "user" {
 			if s, ok := m["content"].(string); ok {
 				cp := copyMap(m)
+				if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
+					cp["reasoning"] = rc
+					delete(cp, "reasoning_content")
+				}
 				cp["content"] = []any{map[string]any{"type": "text", "text": s}}
 				otherMessages = append(otherMessages, cp)
 				continue
@@ -240,6 +276,10 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 		}
 		if role == "assistant" {
 			cp := copyMap(m)
+			if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
+				cp["reasoning"] = rc
+				delete(cp, "reasoning_content")
+			}
 			switch v := cp["content"].(type) {
 			case string:
 				cp["content"] = sanitizeChannelMarkers(v)
@@ -273,21 +313,12 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 	messages = append(messages, otherMessages...)
 	reqMap["messages"] = messages
 
-	return json.Marshal(reqMap)
+	return json.Marshal(reqMap, codebuddyJSONOpts)
 }
 
 func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) map[string]string {
 	reqID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	convReqID := strings.ReplaceAll(uuid.NewString(), "-", "")
-
-	// The CN lane tracks the current Tencent CLI build (anti-ban: an outdated
-	// UA reads as a silent/bot client); the intl lane keeps its own identity,
-	// which is set where the provider is configured. Mirrors upstream registry
-	// #3257 (codebuddy-cn.js: CLI/2.133.1 + X-IDE-Version).
-	cliVersion := "2.108.1"
-	if req != nil && req.Provider == "codebuddy-cn" {
-		cliVersion = codebuddyCLIVersion
-	}
 
 	sessionKey := req.SessionID
 	if sessionKey == "" && req.ConnData != nil {
@@ -318,33 +349,132 @@ func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) 
 		domain = "www.codebuddy.cn"
 	}
 
-	return map[string]string{
-		"Content-Type":                "application/json; charset=utf-8",
-		"User-Agent":                  "CLI/" + cliVersion + " CodeBuddy/" + cliVersion,
+	// The intl fingerprint is opt-in by provider name; the helper is also used
+	// for conversation ids alone, where the classic (CN) shapes apply.
+	intl := req != nil && (req.Provider == "codebuddy-intl" || req.Provider == "codebuddy" || req.Provider == "cbai")
+	// One CLI build for both lanes: the gateway compares whatever the client
+	// reports against the build it currently serves, and a lane pinned to an
+	// older build reads as a parked client (AGENTS.md §1). Every version on the
+	// wire therefore comes from providers.CodeBuddy* — no literal here.
+	h := map[string]string{
+		"Content-Type": "application/json; charset=utf-8",
+		// The CLI asks for JSON, not an event stream, and still receives SSE
+		// back (upstream buildHeaders: "Accept: the CLI asks for JSON, not an
+		// event stream. The base executor sets text/event-stream for every
+		// streaming call.").
+		"Accept": "application/json",
+		// The CLI gzips the chat body. ForwardCodebuddyCN compresses it; the
+		// byte count of that payload is what the transport stamps as
+		// Content-Length.
+		"Content-Encoding":            "gzip",
+		"User-Agent":                  providers.CodeBuddyUserAgent,
 		"X-Product":                   "SaaS",
-		"X-App":                       "cli",
 		"X-IDE-Type":                  "CLI",
 		"X-IDE-Name":                  "CLI",
-		"X-IDE-Version":               cliVersion,
+		"X-IDE-Version":               providers.CodeBuddyCLIVersion,
 		"X-Private-Data":              "false",
 		"X-Requested-With":            "XMLHttpRequest",
 		"X-CodeBuddy-Request":         "1",
 		"X-Domain":                    domain,
-		"X-Stainless-Runtime":         "node",
-		"X-Stainless-Runtime-Version": "v24.11.1",
 		"X-Stainless-Lang":            "js",
-		"X-Stainless-Arch":            "x64",
-		"X-Stainless-Os":              "Windows",
-		"X-Stainless-Package-Version": "6.25.0",
-		"X-Stainless-Helper-Method":   "stream",
+		"X-Stainless-Package-Version": providers.CodeBuddySDKVersion,
+		"X-Stainless-OS":              codebuddyStainlessOS(),
+		"X-Stainless-Arch":            codebuddyStainlessArch(),
+		"X-Stainless-Runtime":         "node",
+		"X-Stainless-Runtime-Version": providers.CodeBuddyNodeVersion,
 		"X-Stainless-Retry-Count":     "0",
 		"X-Request-ID":                reqID,
 		"X-Conversation-ID":           convID,
 		"X-Conversation-Request-ID":   convReqID,
 		"X-Conversation-Message-ID":   reqID,
-		"X-Agent-Intent":              "craft",
-		"X-Agent-Purpose":             "conversation",
+		// Agent identity: the CLI describes every chat turn as a "craft" intent
+		// for a "conversation" purpose, attributed to the MAIN agent type, with
+		// a non-IDE runtime context.
+		"X-Agent-Intent":  "craft",
+		"X-Agent-Purpose": "conversation",
+		"X-Agent-Type":    "main",
+		"X-Agent-Runtime": "other",
 	}
+	// X-User-Id is the token's `sub` claim: the gateway uses it to tie the
+	// request to the account behind the bearer. Omitted when the token carries
+	// no account id (upstream userIdFromCredentials returns null there too).
+	if sub := codebuddyUserID(req); sub != "" {
+		h["X-User-Id"] = sub
+	}
+	if intl {
+		// The official intl CLI sends a uuid request id. X-App,
+		// X-Product-Version and X-Stainless-Helper-Method are never sent by the
+		// official client on either lane — sending a header the real CLI does
+		// not send is itself the tell.
+		h["X-Request-ID"] = uuid.NewString()
+		h["X-Conversation-Message-ID"] = h["X-Request-ID"]
+	}
+	if req != nil && strings.HasPrefix(req.APIKey, "ck_") {
+		h["Authorization"] = "Bearer " + req.APIKey
+		h["X-API-Key"] = req.APIKey
+		delete(h, "X-Domain")
+		h["X-User-Id"] = "anonymous_" + last8(req.APIKey)
+		h["X-IDE-Type"] = "WorkBuddy"
+		h["X-Agent-Runtime"] = "local-agent"
+	}
+	return h
+}
+
+// codebuddyUserID reads the account id X-User-Id carries: the `sub` claim of
+// the bearer token the request is sent with. The parse is memoized per token in
+// the providers package, so a turn does not decode its JWT again.
+func codebuddyUserID(req *Request) string {
+	if req == nil {
+		return ""
+	}
+	return providers.CodeBuddyUserIDFromToken(req.APIKey)
+}
+
+// codebuddyGzipScratch is one reusable compressor plus its output buffer.
+//
+// A fresh gzip.Writer allocates a 32 KiB deflate window and its own state; the
+// chat path compresses every CodeBuddy turn, so both are pooled rather than
+// re-allocated per request.
+type codebuddyGzipScratch struct {
+	w   *gzip.Writer
+	buf bytes.Buffer
+}
+
+var codebuddyGzipPool = sync.Pool{
+	New: func() any {
+		s := &codebuddyGzipScratch{}
+		s.w = gzip.NewWriter(&s.buf)
+		return s
+	},
+}
+
+// codebuddyGzipBody compresses the request body the way the official CLI does
+// (upstream `encodeRequestBody`: `gzipSync(Buffer.from(bodyStr, "utf8"))` with
+// `Content-Encoding: gzip`).
+//
+// The returned bytes do not alias the pooled buffer: the buffer is reused by
+// the next request, so the compressed payload is copied out before the scratch
+// struct goes back to the pool.
+func codebuddyGzipBody(body []byte) ([]byte, error) {
+	s := codebuddyGzipPool.Get().(*codebuddyGzipScratch)
+	defer codebuddyGzipPool.Put(s)
+
+	s.buf.Reset()
+	s.w.Reset(&s.buf)
+	if _, err := s.w.Write(body); err != nil {
+		return nil, fmt.Errorf("gzip codebuddy body: %w", err)
+	}
+	if err := s.w.Close(); err != nil {
+		return nil, fmt.Errorf("gzip codebuddy body: %w", err)
+	}
+	return bytes.Clone(s.buf.Bytes()), nil
+}
+
+func last8(s string) string {
+	if len(s) > 8 {
+		return s[len(s)-8:]
+	}
+	return s
 }
 
 func codebuddyConversationHeaders(req *Request, body []byte) map[string]string {
@@ -447,6 +577,15 @@ func sseToOpenAIJSON(raw []byte) ([]byte, bool) {
 		if first == nil {
 			first = chunk
 		}
+		// usage is read before the choices guard on purpose. An upstream told
+		// stream_options.include_usage sends a FINAL chunk carrying usage and an
+		// empty choices array; reading usage after the guard skipped exactly
+		// that chunk and threw the counts away, so a caller that asked for them
+		// still got none. Reading it first also keeps the last write winning,
+		// which is the trailing summary chunk when there is one.
+		if u, ok := chunk["usage"]; ok {
+			usage = u
+		}
 		choices, _ := chunk["choices"].([]any)
 		if len(choices) == 0 {
 			continue
@@ -464,9 +603,6 @@ func sseToOpenAIJSON(raw []byte) ([]byte, bool) {
 		}
 		if fr, ok := choice["finish_reason"].(string); ok {
 			finishReason = fr
-		}
-		if u, ok := chunk["usage"]; ok {
-			usage = u
 		}
 		if tcs, ok := delta["tool_calls"].([]any); ok {
 			for _, tcAny := range tcs {
@@ -557,4 +693,35 @@ func sseToOpenAIJSON(raw []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
+}
+
+// codebuddyStainlessArch maps the host architecture the way the official
+// CLI's Stainless runtime reports it (upstream mapStainlessArch).
+func codebuddyStainlessArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "x86"
+	default:
+		return "other::" + runtime.GOARCH
+	}
+}
+
+// codebuddyStainlessOS maps the host OS the way the CLI reports it.
+func codebuddyStainlessOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "MacOS"
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "freebsd":
+		return "FreeBSD"
+	default:
+		return "Other::" + runtime.GOOS
+	}
 }

@@ -154,7 +154,7 @@ func TestNousAttribution(t *testing.T) {
 			}
 		}
 
-		want := []string{"product=9router", "client=9router", "user=9router"}
+		want := []string{"product=panrouter", "client=panrouter", "user=panrouter"}
 		for _, w := range want {
 			if !slices.Contains(tags, w) {
 				t.Errorf("missing tag %q in %v", w, tags)
@@ -183,22 +183,22 @@ func TestNousAttribution(t *testing.T) {
 			}
 		}
 
-		// product=my-app must be preserved, not overwritten with product=9router
+		// product=my-app must be preserved, not overwritten with product=panrouter
 		if !slices.Contains(tags, "product=my-app") {
 			t.Errorf("expected caller product=my-app preserved, got %v", tags)
 		}
-		if slices.Contains(tags, "product=9router") {
-			t.Errorf("product=9router should not overwrite product=my-app: %v", tags)
+		if slices.Contains(tags, "product=panrouter") {
+			t.Errorf("product=panrouter should not overwrite product=my-app: %v", tags)
 		}
 		if !slices.Contains(tags, "custom=value") {
 			t.Errorf("expected custom=value preserved: %v", tags)
 		}
-		// Empty user= and client= should be cleaned up and filled with 9router defaults
-		if !slices.Contains(tags, "client=9router") {
-			t.Errorf("expected client=9router in %v", tags)
+		// Empty user= and client= should be cleaned up and filled with panrouter defaults
+		if !slices.Contains(tags, "client=panrouter") {
+			t.Errorf("expected client=panrouter in %v", tags)
 		}
-		if !slices.Contains(tags, "user=9router") {
-			t.Errorf("expected user=9router in %v", tags)
+		if !slices.Contains(tags, "user=panrouter") {
+			t.Errorf("expected user=panrouter in %v", tags)
 		}
 		if slices.Contains(tags, "user=") || slices.Contains(tags, "client= ") {
 			t.Errorf("empty tags not removed: %v", tags)

@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"panrouter/proxy/internal/db"
-	"panrouter/proxy/internal/handlerutil"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 // Pi settings API. Port of upstream
@@ -134,10 +134,10 @@ func (h *PiHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	config := readPiConfig()
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"installed":  true,
-		"config":     config,
+		"installed":    true,
+		"config":       config,
 		"hasPanRouter": piHasPanRouterConfig(config),
-		"configPath": resolvePiModelsPath(),
+		"configPath":   resolvePiModelsPath(),
 	})
 }
 

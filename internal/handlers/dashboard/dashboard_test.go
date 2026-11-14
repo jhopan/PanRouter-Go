@@ -76,6 +76,16 @@ func setupTestDB(t *testing.T) (*db.Repo, func()) {
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			data TEXT NOT NULL
 		);`,
+		`CREATE TABLE backupTokens (
+			id TEXT PRIMARY KEY,
+			keyId TEXT UNIQUE NOT NULL,
+			name TEXT,
+			machineId TEXT,
+			crc TEXT NOT NULL,
+			isActive INTEGER DEFAULT 1,
+			lastUsedAt TEXT,
+			createdAt TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS providerNodes (
 			id TEXT PRIMARY KEY,
 			type TEXT,

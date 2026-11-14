@@ -1,13 +1,13 @@
 package chat
 
 import (
-	"panrouter/proxy/internal/log"
 	"bytes"
 	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
+	"panrouter/proxy/internal/log"
 	"strings"
 	"time"
 
@@ -122,7 +122,24 @@ func (h *ChatHandler) forwardGeminiNativeRequest(
 		return h.forwardRequest(ctx, w, cfg, apiKey, body, isStream, translateResponse, metrics, httpClient, provider, false, false)
 	}
 
+	// Fallback session to connectionID when caller provides no session header
+	if handlerutil.GetSessionID(ctx) == "" && connectionID != "" {
+		ctx = handlerutil.WithSessionID(ctx, connectionID)
+	}
+
 	upstreamStarted := time.Now()
+
+	// Per-connection admission: concurrency bound, backoff, circuit breaker.
+	// A 403 TOS_VIOLATION bypasses both backoff and breaker (#996 regression
+	// pin) — RecordFailure returns early for it.
+	release, admErr := admitAntigravity(ctx, connectionID)
+	if admErr != nil {
+		return admErr
+	}
+	if release != nil {
+		defer release()
+	}
+
 	resp, err := proxy.ForwardGemini(ctx, httpClient, cfg, apiKey, string(body), isStream, projectID, modelName)
 	// The one number that separates "the model was thinking" from "the
 	// gateway was slow": everything this handler does before dialing is
@@ -132,6 +149,7 @@ func (h *ChatHandler) forwardGeminiNativeRequest(
 		"ms", time.Since(upstreamStarted).Milliseconds(), "provider", provider, "model", modelName)
 	if err != nil {
 		if uErr, ok := err.(*proxy.UpstreamError); ok {
+			recordAntigravityOutcome(connectionID, uErr.StatusCode, uErr.Body)
 			if uErr.StatusCode == http.StatusConflict || uErr.StatusCode == http.StatusTooManyRequests {
 				if dur, ok := extractResetDuration(uErr.Body); ok {
 					BlockAntigravityModelUntil(connectionID, modelName, time.Now().UTC().Add(dur))
@@ -145,6 +163,7 @@ func (h *ChatHandler) forwardGeminiNativeRequest(
 		}
 		return fmt.Errorf("ForwardGemini (%s/%s): %w", provider, modelName, err)
 	}
+	recordAntigravityOutcome(connectionID, resp.StatusCode, nil)
 
 	var bodyCloser io.Closer = resp.Body
 	defer func() {
@@ -169,7 +188,15 @@ func (h *ChatHandler) forwardGeminiNativeRequest(
 		if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
 			return h.handleGeminiNonStream(ctx, w, resp.Body, translateResponse, metrics)
 		}
-		stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, cfg.ResolveStallTimeout(proxy.ResolveDefaultStallTimeout()), provider)
+		// First-event watchdog (OMP GOOGLE_GEMINI_CLI_STREAM_LIMITS): Flash
+		// gets a 60s budget, everything else 5m — headers without an SSE
+		// event fail over fast instead of holding the client until stall.
+		budgets := proxy.ResolveStallBudgets(cfg)
+		budgets.FirstChunk = proxy.DefaultFirstEventTimeout
+		if strings.Contains(modelName, "flash") {
+			budgets.FirstChunk = proxy.FlashFirstEventTimeout
+		}
+		stallReader := proxy.NewStallReaderWithContext(ctx, resp.Body, budgets, provider)
 		bodyCloser = stallReader
 		return h.handleGeminiStream(ctx, w, stallReader, translateResponse, metrics)
 	}
@@ -417,6 +444,7 @@ func (h *ChatHandler) refreshOAuthLocked(connectionID, currentToken string) (oau
 	}
 	log.Info("oauth", "token refreshed", "provider", provider, "project", newPID)
 	h.clearOAuthAccountPark(connectionID)
+	closeAntigravityState(connectionID)
 	return oauthTokenResult{token: refreshResult.AccessToken, projectID: newPID}, nil
 }
 

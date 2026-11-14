@@ -238,6 +238,59 @@ func (r *Repo) UnlockConnectionModel(connID, model string) error {
 	return nil
 }
 
+// ReleaseConnectionBlocks lifts every block a provider-side quota read has
+// disproved: the per-model locks, the ban fields, the account cooldown, the
+// error code and the backoff counter. It is the writer behind
+// POST /api/usage/{connectionId}/check-release, which exists because a plan
+// block (a MiniMax plan holds for 24 hours) outlives a top-up or a daily
+// check-in: the provider is serving the account again while every local flag
+// still says exhausted.
+//
+// It is deliberately not "unblock on demand" — the caller verifies the quota
+// with the provider first.
+//
+// testStatus is set to "active" rather than removed, matching upstream's
+// clearAccountError path: the dashboard reads it as the account's health.
+func (r *Repo) ReleaseConnectionBlocks(connID string) error {
+	var rawData string
+	if err := r.db.QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&rawData); err != nil {
+		return fmt.Errorf("release connection blocks %s: %w", connID, err)
+	}
+	dataMap := map[string]any{}
+	if strings.TrimSpace(rawData) != "" {
+		if err := json.Unmarshal([]byte(rawData), &dataMap); err != nil {
+			return fmt.Errorf("release connection blocks %s: %w", connID, err)
+		}
+	}
+	for k := range dataMap {
+		if strings.HasPrefix(k, modelLockPrefix) {
+			dataMap[k] = nil
+		}
+	}
+	dataMap["bannedUntil"] = nil
+	dataMap["banReason"] = nil
+	dataMap["rateLimitedUntil"] = nil
+	dataMap["oauthLockedUntil"] = nil
+	dataMap["quotaExhaustedUntil"] = nil
+	dataMap["errorCode"] = nil
+	dataMap["lastError"] = nil
+	dataMap["lastErrorAt"] = nil
+	dataMap["testStatus"] = "active"
+	dataMap["backoffLevel"] = 0
+
+	encoded, err := json.Marshal(dataMap)
+	if err != nil {
+		return fmt.Errorf("release connection blocks %s: %w", connID, err)
+	}
+	if _, err := r.db.Exec(
+		"UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
+		string(encoded), nowUTC(), connID,
+	); err != nil {
+		return fmt.Errorf("release connection blocks %s: %w", connID, err)
+	}
+	return nil
+}
+
 // ResetConnectionHealthState clears model locks, error codes, rate limits, and resets backoff
 // on a connection when activated or re-validated (parity with #3830 / #7fee56ba).
 func (r *Repo) ResetConnectionHealthState(connID string) error {
@@ -382,7 +435,7 @@ func (r *Repo) clearProviderModelLocks(provider string) error {
 }
 
 func (r *Repo) clearSpecificModelLock(provider, model string) error {
-	key := "$." + modelLockPrefix + model
+	key := modelLockDataKey(model)
 	pairs, err := r.listConnectionData("SELECT id, data FROM providerConnections WHERE provider = ?", provider)
 	if err != nil {
 		return err
@@ -411,7 +464,7 @@ func (r *Repo) clearConnectionModelLocks(id, data string) error {
 	args := make([]any, 0, len(fields)*2+2)
 	for _, f := range fields {
 		q += ", ?, json('null')"
-		args = append(args, "$."+f)
+		args = append(args, "$.\""+f+"\"")
 	}
 	q += ", '$.backoffLevel', 0), updatedAt = datetime('now') WHERE id = ?"
 	args = append(args, id)

@@ -15,7 +15,7 @@ import (
 	"panrouter/proxy/internal/handlerutil"
 )
 
-// Handler for the nine CLI-client config adapters.
+// Handler for the CLI-client config adapters.
 //
 // Upstream serves one Next route per client (`src/app/api/cli-tools/<tool>-settings`),
 // each of which is the same three verbs over the same shape. The adapters in
@@ -30,10 +30,15 @@ import (
 // the per-tier model overrides only claude uses; an adapter that has no tiers
 // ignores it.
 type cliToolSettingsRequest struct {
-	BaseURL string            `json:"baseUrl"`
-	APIKey  string            `json:"apiKey"`
-	Model   string            `json:"model"`
-	Tiers   map[string]string `json:"tiers"`
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+	Model   string `json:"model"`
+	// Models is the model list the upstream copilot/cowork/jcode/openclaw
+	// routes accept. Clients that store a single model ignore it; the ones that
+	// store an array write every id it names.
+	Models            []string          `json:"models"`
+	Tiers             map[string]string `json:"tiers"`
+	AutoCompactWindow string            `json:"autoCompactWindow"`
 }
 
 // CLIToolHandler serves the per-client settings routes.
@@ -145,16 +150,39 @@ func (h *CLIToolHandler) HandleCLIToolGet(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
+		// A preview without the options the write needs (groK-build, openclaw
+		// and cowork name the model in the file) is still a successful read of
+		// the client's state: upstream's GET returns its parsed config, which is
+		// null/empty when the file is absent. Answering 500 here made the
+		// dashboard's first paint look like a broken route.
+		if errors.Is(err, clientconfig.ErrOptionsRequired) {
+			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+				"tool":      adapter.ID(),
+				"installed": installedFor(adapter),
+				"files":     files,
+				"plan":      []any{},
+				"message":   err.Error(),
+			})
+			return
+		}
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"tool":       adapter.ID(),
-		"installed":  installedFor(adapter),
+	var current map[string]any
+	if reader, ok := adapter.(clientconfig.CurrentConfigReader); ok {
+		current, _ = reader.Current(opts)
+	}
+	resp := map[string]any{
+		"tool":         adapter.ID(),
+		"installed":    installedFor(adapter),
 		"hasPanRouter": ToolHasPanRouter(adapter.ID()),
-		"files":      files,
-		"plan":       planFiles(plan),
-	})
+		"files":        files,
+		"plan":         planFiles(plan),
+	}
+	if len(current) > 0 {
+		resp["currentConfig"] = current
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, resp)
 }
 
 // planFiles serializes the plan's edits without leaking the credential: the
@@ -194,14 +222,22 @@ func (h *CLIToolHandler) HandleCLIToolPost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	opts := clientconfig.Options{
-		BaseURL: baseURL,
-		APIKey:  strings.TrimSpace(req.APIKey),
-		Model:   strings.TrimSpace(req.Model),
-		Tiers:   req.Tiers,
+		BaseURL:           baseURL,
+		APIKey:            strings.TrimSpace(req.APIKey),
+		Model:             strings.TrimSpace(req.Model),
+		Models:            req.Models,
+		Tiers:             req.Tiers,
+		AutoCompactWindow: strings.TrimSpace(req.AutoCompactWindow),
 	}
 	h.attachModelLimits(r.Context(), &opts, opts.Model, req.Tiers["fable"], req.Tiers["opus"], req.Tiers["sonnet"], req.Tiers["haiku"])
 	result, err := adapter.Apply(opts)
 	if err != nil {
+		// A client whose file names the selected model cannot be written from a
+		// request that names none; upstream answers that as a 400.
+		if errors.Is(err, clientconfig.ErrOptionsRequired) {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -220,7 +256,25 @@ func (h *CLIToolHandler) HandleCLIToolDelete(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	result, err := adapter.Reset(clientconfig.Options{})
+	opts := optionsFromQuery(r)
+	if opts.BaseURL == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		} else if proto := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
+			scheme = "https"
+		}
+		host := r.Host
+		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
+			if first := strings.TrimSpace(strings.Split(fwd, ",")[0]); first != "" {
+				host = first
+			}
+		}
+		if host != "" {
+			opts.BaseURL = scheme + "://" + host
+		}
+	}
+	result, err := adapter.Reset(opts)
 	if err != nil {
 		if errors.Is(err, clientconfig.ErrUnsupportedStructure) {
 			handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())

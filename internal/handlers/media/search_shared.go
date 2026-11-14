@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"panrouter/proxy/internal/handlerutil"
 	"golang.org/x/text/unicode/norm"
+	"panrouter/proxy/internal/handlerutil"
 )
 
 // Search error envelope shared by handleAntigravitySearch and handleXquikSearch,

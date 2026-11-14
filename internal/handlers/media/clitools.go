@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"panrouter/proxy/internal/envx"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,8 +19,8 @@ import (
 // cliStatus is the per-tool installed/version shape the dashboard expects
 // (port of each Next <tool>-settings GET, trimmed to just install + version).
 type cliStatus struct {
-	Installed  bool    `json:"installed"`
-	Version    *string `json:"version"`
+	Installed    bool    `json:"installed"`
+	Version      *string `json:"version"`
 	HasPanRouter bool    `json:"hasPanRouter"`
 }
 
@@ -36,11 +37,11 @@ type toolDetector func(context.Context) (*cliStatus, error)
 // `cowork` checks Claude Desktop config dirs; `copilot` has no binary check
 // (reference hardcodes installed:true).
 type toolDef struct {
-	id         string
-	bin        string
-	hasVer     bool
-	dirCheck   func() bool
-	alwaysOn   bool
+	id           string
+	bin          string
+	hasVer       bool
+	dirCheck     func() bool
+	alwaysOn     bool
 	hasPanRouter func() bool
 }
 
@@ -203,7 +204,7 @@ func coworkDirOK() bool {
 	return false
 }
 
-var claudeREHasBaseURL = regexp.MustCompile(`"(ANTHROPIC_BASE_URL|NINEROUTER_URL)"\s*:\s*"[^"]+"`)
+var claudeREHasBaseURL = regexp.MustCompile(`"(ANTHROPIC_BASE_URL|PANROUTER_URL)"\s*:\s*"[^"]+"`)
 
 // ToolHasPanRouter reports whether the named tool has panrouter configured.
 func ToolHasPanRouter(id string) bool {
@@ -223,7 +224,7 @@ func claudeHasPanRouter() bool {
 	if u := os.Getenv("ANTHROPIC_BASE_URL"); strings.TrimSpace(u) != "" {
 		return true
 	}
-	if u := os.Getenv("NINEROUTER_URL"); strings.TrimSpace(u) != "" {
+	if u := envx.Get("URL"); strings.TrimSpace(u) != "" {
 		return true
 	}
 	home, err := os.UserHomeDir()
@@ -254,7 +255,7 @@ func claudeConfigBytesHasPanRouter(raw []byte) bool {
 		if v, ok := cfg.Env["ANTHROPIC_BASE_URL"].(string); ok && strings.TrimSpace(v) != "" {
 			return true
 		}
-		if v, ok := cfg.Env["NINEROUTER_URL"].(string); ok && strings.TrimSpace(v) != "" {
+		if v, ok := cfg.Env["PANROUTER_URL"].(string); ok && strings.TrimSpace(v) != "" {
 			return true
 		}
 	}

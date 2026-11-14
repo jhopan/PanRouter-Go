@@ -65,11 +65,14 @@ func (e *UpstreamError) Error() string {
 // ErrStrictProxyRequired reports a request that was told never to leave over
 // the direct IP and could not honour that. Mirrors upstream's
 // "[ProxyFetch] Proxy required but failed (strictProxy=true)" refusal
-// (decolua/panrouter#4333).
+// (decolua/9router#4333).
 var ErrStrictProxyRequired = errors.New("proxy required but failed (strictProxy=true)")
 
 var directProxyClient = &http.Client{
-	Transport: NewSafeTransport(),
+	// Truly direct: this client exists to replay a failed proxied attempt from
+	// the host's own address, so it must never route through the ambient proxy
+	// NewSafeTransport would install.
+	Transport: NewDirectSafeTransport(),
 }
 
 // insecureClientCache memoises one InsecureSkipVerify client per proxy URL,
@@ -134,7 +137,7 @@ func isProxyFailure(err error, resp *http.Response) bool {
 type strictProxyCtxKey struct{}
 
 // WithStrictProxy marks ctx so DoRequest refuses to replay a failed proxy
-// attempt directly (decolua/panrouter#4333). intended says whether a proxy was
+// attempt directly (decolua/9router#4333). intended says whether a proxy was
 // configured at all, and it is load-bearing: callers such as the Qoder
 // executor set strictProxy to mean "do not replay this request directly if the
 // proxy fails" — a replayed COSY signature answers 403 — not "a proxy must
@@ -168,6 +171,12 @@ func newJSONRequest(ctx context.Context, method, url string, headers map[string]
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	// A streaming lane asks for an event stream. Pin identity so an edge or
+	// provider cannot answer with a buffered gzip stream that arrives as one
+	// burst instead of token by token. An explicit encoding always wins.
+	if req.Header.Get("Accept-Encoding") == "" && strings.Contains(strings.ToLower(req.Header.Get("Accept")), "text/event-stream") {
+		req.Header.Set("Accept-Encoding", "identity")
 	}
 	return req, nil
 }
@@ -263,7 +272,7 @@ func (t forbidDirectReplayTransport) RoundTrip(req *http.Request) (*http.Respons
 func (forbidDirectReplayTransport) forbidsDirectReplay() bool { return true }
 
 // ForbidDirectReplay returns a client whose requests may never be replayed
-// from the operator's real IP after a proxy refusal (decolua/panrouter#4333).
+// from the operator's real IP after a proxy refusal (decolua/9router#4333).
 func ForbidDirectReplay(client *http.Client) *http.Client {
 	clone := *client
 	clone.Transport = forbidDirectReplayTransport{base: client.Transport}
@@ -291,14 +300,33 @@ func ForbidsDirectReplay(client *http.Client) bool {
 // A proxy refusal is replayed through the direct client so one dead proxy does
 // not take the provider down with it — unless the proxy is one the operator
 // assigned, or ctx carries WithStrictProxy. Both turn that replay into an error
-// instead of publishing the operator's egress IP (decolua/panrouter#4333). A
+// instead of publishing the operator's egress IP (decolua/9router#4333). A
 // certificate verification failure gets its own single replay with verification
 // disabled, for the corporate proxies and antivirus middleboxes that re-sign
 // TLS, unless STRICT_SSL forbids it.
 func DoRequest(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
-	return retryTransientUpstream(ctx, func() (*http.Response, error) {
-		return doRequestOnce(ctx, client, method, url, headers, body)
+	return retryTransientUpstream(ctx, func(c context.Context) (*http.Response, error) {
+		return doRequestOnce(c, client, method, url, headers, body)
 	})
+}
+
+// SendOnce sends one JSON request through client and returns whatever answer
+// arrives, whatever its status. Unlike DoRequest it never replays: no
+// transient-status retry, no direct replay after an apparent proxy failure (a
+// text/plain 403 from the endpoint itself looks like one), and no insecure-TLS
+// retry. It is for requests the router must not repeat on its own initiative,
+// such as a custom JSON business endpoint whose operation may already have
+// run. The caller owns resp.Body and decides which statuses are errors.
+func SendOnce(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	req, err := newJSONRequest(ctx, method, url, headers, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := send(client, req)
+	if err != nil {
+		return nil, fmt.Errorf("upstream request: %w", err)
+	}
+	return resp, nil
 }
 
 // doRequestOnce performs a single attempt.
@@ -341,6 +369,7 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 	if err != nil {
 		return nil, fmt.Errorf("upstream request: %w", err)
 	}
+	UnwrapIdentityGzip(req, resp)
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		resp.Body.Close()

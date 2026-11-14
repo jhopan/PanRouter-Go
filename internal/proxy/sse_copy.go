@@ -372,7 +372,7 @@ func (c *sseCopier) finish() error {
 // finish_reason is worse than nothing: OpenAI clients treat both as a normal
 // completion and keep the truncated text, so a stall timeout and a dropped
 // socket are indistinguishable from a finished answer. The error frame is
-// what makes the difference visible (upstream decolua/panrouter 93001213).
+// what makes the difference visible (upstream decolua/9router 93001213).
 func (c *sseCopier) abort(cause error) {
 	if len(c.pending) > 0 {
 		frag := c.pending
@@ -503,7 +503,17 @@ func sseHasTerminalToken(p []byte) bool {
 	if bytes.Contains(p, []byte(`"message_stop"`)) {
 		return true
 	}
+	if sseHasResponsesTerminal(p) {
+		return true
+	}
 	return sseHasNonNullValue(p, `"stop_reason"`) || sseHasNonNullValue(p, `"finish_reason"`)
+}
+
+// sseHasResponsesTerminal reports a Responses API turn-end event (#1073).
+func sseHasResponsesTerminal(p []byte) bool {
+	return bytes.Contains(p, []byte(`"type":"response.completed"`)) ||
+		bytes.Contains(p, []byte(`"type":"response.done"`)) ||
+		bytes.Contains(p, []byte(`"type":"response.incomplete"`))
 }
 
 // sseHasNonNullValue reports whether key (with quotes, e.g. `"finish_reason"`)

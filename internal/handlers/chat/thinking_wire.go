@@ -3,10 +3,10 @@ package chat
 import (
 	"context"
 
+	json "encoding/json/v2"
 	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/thinking"
 	"panrouter/proxy/internal/translator"
-	json "encoding/json/v2"
 	"strings"
 )
 

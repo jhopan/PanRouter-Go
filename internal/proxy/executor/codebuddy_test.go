@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	json "encoding/json/v2"
 	"errors"
@@ -400,7 +402,7 @@ func TestForwardCodebuddyCN_WireHeadersAndBody(t *testing.T) {
 	cfg := &providers.ProviderConfig{
 		BaseURL: ts.URL,
 		StaticHeaders: map[string]string{
-			"User-Agent":          "CLI/2.108.1 CodeBuddy/2.108.1",
+			"User-Agent":          "CLI/2.178.0 CodeBuddy/2.178.0",
 			"X-Product":           "SaaS",
 			"X-IDE-Type":          "CLI",
 			"X-IDE-Name":          "CLI",
@@ -435,13 +437,13 @@ func TestForwardCodebuddyCN_WireHeadersAndBody(t *testing.T) {
 	}
 
 	// Verify headers
-	if capturedReq.Header.Get("User-Agent") != "CLI/2.108.1 CodeBuddy/2.108.1" {
+	if capturedReq.Header.Get("User-Agent") != "CLI/2.178.0 CodeBuddy/2.178.0" {
 		t.Errorf("User-Agent = %q", capturedReq.Header.Get("User-Agent"))
 	}
-	if capturedReq.Header.Get("X-App") != "cli" {
-		t.Errorf("X-App = %q", capturedReq.Header.Get("X-App"))
+	if v, ok := capturedReq.Header["X-App"]; ok {
+		t.Errorf("X-App = %q, want the header absent", v)
 	}
-	if capturedReq.Header.Get("X-IDE-Type") != "CLI" || capturedReq.Header.Get("X-IDE-Name") != "CLI" || capturedReq.Header.Get("X-IDE-Version") != "2.108.1" {
+	if capturedReq.Header.Get("X-IDE-Type") != "CLI" || capturedReq.Header.Get("X-IDE-Name") != "CLI" || capturedReq.Header.Get("X-IDE-Version") != "2.178.0" {
 		t.Errorf("X-IDE-* mismatch")
 	}
 	if capturedReq.Header.Get("X-Private-Data") != "false" {
@@ -471,6 +473,17 @@ func TestForwardCodebuddyCN_WireHeadersAndBody(t *testing.T) {
 	}
 
 	// Verify body
+	if got := capturedReq.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	gz, gzErr := gzip.NewReader(bytes.NewReader(capturedBody))
+	if gzErr != nil {
+		t.Fatalf("wire body is not gzip: %v", gzErr)
+	}
+	plain, gzErr := io.ReadAll(gz)
+	if gzErr != nil {
+		t.Fatalf("decompress wire body: %v", gzErr)
+	}
 	var parsedBody struct {
 		Stream   bool `json:"stream"`
 		Messages []struct {
@@ -478,7 +491,7 @@ func TestForwardCodebuddyCN_WireHeadersAndBody(t *testing.T) {
 			Content any    `json:"content"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal(capturedBody, &parsedBody); err != nil {
+	if err := json.Unmarshal(plain, &parsedBody); err != nil {
 		t.Fatalf("unmarshal captured body: %v", err)
 	}
 	if !parsedBody.Stream {
@@ -546,7 +559,7 @@ func TestForwardCodebuddyCN_OperatorOverridesWin(t *testing.T) {
 	cfg := &providers.ProviderConfig{
 		BaseURL: ts.URL,
 		StaticHeaders: map[string]string{
-			"User-Agent": "CLI/2.108.1 CodeBuddy/2.108.1",
+			"User-Agent": "CLI/2.133.1 CodeBuddy/2.133.1",
 			"X-IDE-Type": "CLI",
 		},
 		HeaderOverrides: map[string]string{
@@ -619,5 +632,67 @@ func TestForwardCodebuddyCN_OverrideCaseInsensitive(t *testing.T) {
 	}
 	if n := len(got.Values("X-IDE-Type")); n != 1 {
 		t.Errorf("X-IDE-Type sent %d times, want exactly 1", n)
+	}
+}
+
+func TestCodebuddyHeaders_CKAPIKey(t *testing.T) {
+	key := "ck_testkey12345678"
+	req := &Request{
+		APIKey: key,
+		Body:   []byte(`{}`),
+	}
+	cfg := &providers.ProviderConfig{
+		BaseURL: "https://www.codebuddy.ai/v2/chat/completions",
+	}
+	h := codebuddyHeaders(req, cfg, req.Body)
+	if h["Authorization"] != "Bearer "+key {
+		t.Errorf("Authorization = %q, want Bearer %s", h["Authorization"], key)
+	}
+	if h["X-API-Key"] != key {
+		t.Errorf("X-API-Key = %q, want %s", h["X-API-Key"], key)
+	}
+	if _, ok := h["X-Domain"]; ok {
+		t.Error("X-Domain should be omitted for ck_ keys")
+	}
+	if h["X-User-Id"] != "anonymous_12345678" {
+		t.Errorf("X-User-Id = %q, want anonymous_12345678", h["X-User-Id"])
+	}
+	if h["X-IDE-Type"] != "WorkBuddy" {
+		t.Errorf("X-IDE-Type = %q, want WorkBuddy", h["X-IDE-Type"])
+	}
+	if h["X-Agent-Runtime"] != "local-agent" {
+		t.Errorf("X-Agent-Runtime = %q, want local-agent", h["X-Agent-Runtime"])
+	}
+}
+
+func TestTransformCodebuddyBody_ReasoningMapping(t *testing.T) {
+	input := `{"model":"glm-5.2","messages":[{"role":"assistant","content":"hello","reasoning_content":"my reasoning"}]}`
+	out, err := transformCodebuddyBody([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var m struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			Content          any    `json:"content"`
+			Reasoning        string `json:"reasoning"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(m.Messages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(m.Messages))
+	}
+	asst := m.Messages[1]
+	if asst.Role != "assistant" {
+		t.Fatalf("expected assistant role, got %q", asst.Role)
+	}
+	if asst.Reasoning != "my reasoning" {
+		t.Errorf("expected reasoning = 'my reasoning', got %q", asst.Reasoning)
+	}
+	if asst.ReasoningContent != "" {
+		t.Errorf("reasoning_content should be deleted/mapped, got %q", asst.ReasoningContent)
 	}
 }

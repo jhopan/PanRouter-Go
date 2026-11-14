@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"go.uber.org/fx"
 	"panrouter/proxy/internal/app"
 	"panrouter/proxy/internal/config"
 	"panrouter/proxy/internal/db"
-	"github.com/go-chi/chi/v5"
-	"go.uber.org/fx"
 )
 
 // newTestServer boots ServerModule the way production does — through fx, so

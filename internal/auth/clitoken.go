@@ -18,12 +18,20 @@ import (
 // sha256(rawMachineID + salt + cliSecret).hex[:16].
 const cliAuthSalt = "9r-cli-auth"
 
+// MachineID returns the persistent machine id under DATA_DIR, creating it on
+// first use. It is the same value the CLI token is derived from and the value a
+// backup download token embeds by default, so both credentials name the same
+// machine.
+func MachineID() string {
+	return readOrCreateHexFile(filepath.Join(config.ResolveDataDir(), "machine-id"), 16)
+}
+
 // CLIToken returns the local CLI token, deriving it exactly like upstream
 // Next (machine-id + cli-secret files under DATA_DIR) so the Go server
-// accepts the same x-9r-cli-token the CLI and the Next dashboard use.
+// accepts the same x-panrouter-cli-token the CLI and the Next dashboard use.
 func CLIToken() string {
 	dir := config.ResolveDataDir()
-	raw := readOrCreateHexFile(filepath.Join(dir, "machine-id"), 16)
+	raw := MachineID()
 	secret := readOrCreateHexFile(filepath.Join(dir, "auth", "cli-secret"), 32)
 	sum := sha256.Sum256([]byte(raw + cliAuthSalt + secret))
 	return hex.EncodeToString(sum[:])[:16]

@@ -56,12 +56,21 @@ const comboRetryWaitCap = 8 * time.Second
 const deepSeekWebMaxMuteCooldown = 7 * 24 * time.Hour
 
 // maxCooldownFor returns the ceiling for an announced wait on one provider.
-// Every provider shares maxResetCooldown; deepseek-web is the exception because
-// its enforcement payload carries the actual release time and clamping it
-// defeats the purpose of reporting it.
+//
+// Most providers state a wait in minutes, and the generic two-hour ceiling is
+// generous for them. Two exceptions, both because the provider names the real
+// release time:
+//   - deepseek-web announces a mute end (up to a week).
+//   - CodeBuddy Intl/CN run on MONTHLY quotas (upstream quotaWindows.js
+//     registers both as QUOTA_SCOPES.MONTHLY), so a frequency limit can name a
+//     reset days away. Clamping that to two hours is what puts an exhausted
+//     account back into rotation while it is still out of quota.
 func maxCooldownFor(provider string) time.Duration {
 	if provider == "deepseek-web" {
 		return deepSeekWebMaxMuteCooldown
+	}
+	if monthlyCooldownProviders[provider] {
+		return maxMonthlyResetCooldown
 	}
 	return maxResetCooldown
 }

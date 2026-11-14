@@ -1,9 +1,9 @@
 package mitm
 
 import (
-	"panrouter/proxy/internal/log"
 	"fmt"
 	"os"
+	"panrouter/proxy/internal/log"
 	"path/filepath"
 )
 

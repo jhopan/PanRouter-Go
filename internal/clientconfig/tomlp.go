@@ -108,17 +108,25 @@ func scanTOML(buf, src []byte) (*tomlDoc, error) {
 			}
 			doc.sections = append(doc.sections, s)
 		case unstable.KeyValue:
-			parts, _, _ := tomlKeyParts(n)
+			parts, _, lastKey := tomlKeyParts(n)
 			if len(parts) == 0 {
 				return nil, fmt.Errorf("%w: key without a name", ErrParseFailure)
 			}
 			v := n.Value()
+			valStart := int(v.Raw.Offset)
+			valEnd := valStart + int(v.Raw.Length)
+			if v.Raw.Length == 0 {
+				// Booleans (and dates) are reported without a byte range. The
+				// literal is still in the document, and a caller that writes or
+				// reads one needs its span, so it is located from the key.
+				valStart, valEnd = tomlBareValueRange(src, lastKey)
+			}
 			kv := tomlKeyValue{
 				tablePath: append([]string(nil), cur...),
 				fullPath:  append(append([]string(nil), cur...), parts...),
 				key:       parts[len(parts)-1],
-				valStart:  int(v.Raw.Offset),
-				valEnd:    int(v.Raw.Offset + v.Raw.Length),
+				valStart:  valStart,
+				valEnd:    valEnd,
 				valKind:   v.Kind,
 			}
 			if v.Kind == unstable.String {
@@ -131,6 +139,33 @@ func scanTOML(buf, src []byte) (*tomlDoc, error) {
 		return nil, fmt.Errorf("%w: %w", ErrParseFailure, err)
 	}
 	return doc, nil
+}
+
+// tomlBareValueRange locates the literal of a value the parser reports without
+// a byte range — booleans, and the date/time forms. The span starts after the
+// '=' that follows the key and ends at the first space, tab, comment or line
+// break, which is the whole grammar a bare literal has.
+func tomlBareValueRange(src []byte, keyEnd int) (int, int) {
+	i := keyEnd
+	for i < len(src) && src[i] != '=' && src[i] != '\n' {
+		i++
+	}
+	if i >= len(src) || src[i] != '=' {
+		return -1, -1
+	}
+	i++
+	for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+		i++
+	}
+	start := i
+	for i < len(src) {
+		switch src[i] {
+		case ' ', '\t', '\r', '\n', '#':
+			return start, i
+		}
+		i++
+	}
+	return start, i
 }
 
 // tomlKeyParts copies every key component out of the node before the parser

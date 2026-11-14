@@ -48,6 +48,17 @@ func TestDashboardCatalogListsEveryRoutedModel(t *testing.T) {
 		"gemini-cli":   "gc",
 		"ocg":          "opencode-go",
 		"codebuddy-cn": "cbcn",
+		// Registry-only providers ported in the 2026-11 batch: models.ts keys a
+		// block by the alias upstream publishes, so the id resolves through the
+		// same mapping PROVIDER_ID_TO_ALIAS carries in the dashboard.
+		"agentrouter":   "AR",
+		"apmix":         "am",
+		"freemodel-dev": "fmd",
+		"justdowork":    "jd",
+		"orcarouter":    "orca",
+		"vyceai":        "vy",
+		"freeai":        "fai",
+		"freeai-vl":     "fai-vl",
 	}
 	checked := 0
 	for pid, models := range ProviderModels {

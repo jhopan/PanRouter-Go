@@ -77,7 +77,7 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(dataDir)
 
 	// These keep config.LoadConfigFromViper and auth.CLIToken's file
-	// derivation off the developer's real ~/.9router.
+	// derivation off the developer's real ~/.panrouter.
 	env := map[string]string{
 		"DATA_DIR":         dataDir,
 		"JWT_SECRET":       "bootfx-jwt-secret",

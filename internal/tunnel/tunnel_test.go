@@ -20,7 +20,7 @@ import (
 
 // isolateDataDir points the package's data dir at a temp directory for the
 // duration of the test. Without it these tests read and write the developer's
-// real ~/.9router/tunnel, and a state.json written here would make the next
+// real ~/.panrouter/tunnel, and a state.json written here would make the next
 // dashboard start believe a tunnel exists.
 //
 // Only DATA_DIR is pinned. The paths inside the package resolve from it on

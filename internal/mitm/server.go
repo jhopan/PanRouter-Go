@@ -1,7 +1,6 @@
 package mitm
 
 import (
-	"panrouter/proxy/internal/log"
 	"bufio"
 	"crypto"
 	"crypto/tls"
@@ -11,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"panrouter/proxy/internal/log"
 	"strings"
 	"sync"
 

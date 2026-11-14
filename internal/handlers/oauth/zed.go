@@ -8,12 +8,12 @@ import (
 	"encoding/base64"
 	json "encoding/json/v2"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"panrouter/proxy/internal/handlerutil"
 )
@@ -179,28 +179,15 @@ func (h *OAuthHandler) HandleZedExchange(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Best-effort userinfo + organization.
-	email, name, orgID := "", "", ""
-	ureq, _ := http.NewRequest(http.MethodGet, zedCloudBase+zedMePath, nil)
-	ureq.Header.Set("Accept", "application/json")
-	ureq.Header.Set("Authorization", userID+" "+accessToken)
+	// Best-effort userinfo + organization: a callback that decrypts is a signed-in
+	// session even when the profile lookup fails, so the ephemeral failure of the
+	// lookup never refuses the login.
 	systemID := body.SystemID
-	if systemID != "" {
-		ureq.Header.Set(zedSystemHeader, systemID)
-	}
-	if client, derr := (&http.Client{Timeout: 10 * time.Second}).Do(ureq); derr == nil {
-		defer client.Body.Close()
-		if raw, rerr := io.ReadAll(io.LimitReader(client.Body, 1<<20)); rerr == nil && client.StatusCode == http.StatusOK {
-			var u map[string]any
-			if json.Unmarshal(raw, &u) == nil {
-				email, _ = u["email"].(string)
-				name, _ = u["name"].(string)
-				if name == "" {
-					name, _ = u["display_name"].(string)
-				}
-				orgID = zedOrgID(u)
-			}
-		}
+	email, name, orgID := "", "", ""
+	if user, uerr := h.fetchZedUser(r.Context(), userID, accessToken, systemID); uerr == nil {
+		email = user.Email
+		name = firstNonEmpty(user.Name, user.DisplayName)
+		orgID = user.organizationID()
 	}
 
 	connName := connectionDisplayName("zed", body.Name, email, name)
@@ -208,7 +195,6 @@ func (h *OAuthHandler) HandleZedExchange(w http.ResponseWriter, r *http.Request)
 		connName = "Zed"
 	}
 	connID := "zed-" + shortHash(accessToken)
-	now := currentTimestamp()
 	psd := map[string]any{"authMethod": "oauth", "userId": userID}
 	if systemID != "" {
 		psd["systemId"] = systemID
@@ -221,62 +207,17 @@ func (h *OAuthHandler) HandleZedExchange(w http.ResponseWriter, r *http.Request)
 		dataMap["email"] = email
 	}
 	dataMap["providerSpecificData"] = psd
-	dataBytes, err := json.Marshal(dataMap)
-	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to marshal connection data")
-		return
-	}
-	if h.Repo != nil && h.Repo.RawDB() != nil {
-		var existing string
-		err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&existing)
-		if err == nil && existing != "" {
-			_, err = h.Repo.RawDB().Exec(
-				"UPDATE providerConnections SET name = ?, data = ?, updatedAt = ? WHERE id = ?",
-				connName, string(dataBytes), now, connID,
-			)
-		} else {
-			_, err = h.Repo.RawDB().Exec(
-				"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)",
-				connID, "zed", connName, string(dataBytes), now, now,
-			)
-		}
-		if err != nil {
-			handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save connection: %v", err))
+	if err := h.upsertOAuthConnection(connID, "zed", connName, dataMap); err != nil {
+		if errors.Is(err, errConnectionDataMarshal) {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to marshal connection data")
 			return
 		}
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save connection: %v", err))
+		return
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "authorized", "id": connID, "connectionId": connID,
 		"provider": "zed", "name": connName, "email": email,
 		"userId": userID, "organizationId": orgID,
 	})
-}
-
-func zedOrgID(u map[string]any) string {
-	if v, ok := u["default_organization_id"].(string); ok && v != "" {
-		return v
-	}
-	if v, ok := u["defaultOrganizationId"].(string); ok && v != "" {
-		return v
-	}
-	var orgs []any
-	if o, ok := u["organizations"].([]any); ok {
-		orgs = o
-	}
-	pick := ""
-	for _, o := range orgs {
-		m, ok := o.(map[string]any)
-		if !ok {
-			continue
-		}
-		if id, _ := m["id"].(string); id != "" {
-			if pick == "" {
-				pick = id
-			}
-			if personal, _ := m["is_personal"].(bool); personal {
-				return id
-			}
-		}
-	}
-	return pick
 }

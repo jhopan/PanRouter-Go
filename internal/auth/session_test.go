@@ -109,7 +109,7 @@ func TestLoginClientIPIgnoresSpoofedHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	req.RemoteAddr = "203.0.113.50:12345"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
-	req.Header.Set("x-9r-real-ip", "203.0.113.9")
+	req.Header.Set("x-panrouter-real-ip", "203.0.113.9")
 	if got := LoginClientIP(req); got != "203.0.113.50" {
 		t.Errorf("untrusted peer must use socket IP, got %q", got)
 	}

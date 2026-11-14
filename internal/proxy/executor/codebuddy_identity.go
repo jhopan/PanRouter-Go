@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"panrouter/proxy/internal/providers"
 )
 
 // CodeBuddy CN anti-ban identity.
@@ -20,9 +22,12 @@ import (
 // All functions are fail-open: they never panic, and always return a usable
 // fingerprint. The raw secret is never stored, logged, or sent.
 
-// codebuddyCLIVersion is the official CLI build this identity mimics.
-// Source: @tencent-ai/codebuddy-code product.json (CLI 2.133.1).
-const codebuddyCLIVersion = "2.133.1"
+// codebuddyCLIVersion is the official CLI build this identity reports. It is
+// aliased from the providers package rather than repeated here: the registry,
+// the chat executor and this telemetry all have to advertise one build, and a
+// second literal is how a lane silently drifts back to a version the gateway
+// no longer serves (which it reads as a parked client).
+const codebuddyCLIVersion = providers.CodeBuddyCLIVersion
 
 type codebuddyBuildInfo struct {
 	ReleaseDate int64

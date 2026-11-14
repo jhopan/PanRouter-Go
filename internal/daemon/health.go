@@ -23,7 +23,7 @@ const (
 	// BackgroundAlias is the short form as it appears in argv.
 	BackgroundAlias = "-d"
 	// EnvBackground marks a process started as a background daemon.
-	EnvBackground = "9ROUTER_BACKGROUND"
+	EnvBackground = "PANROUTER_BACKGROUND"
 )
 
 // HealthPath is the endpoint Start polls; it is public and answers without a

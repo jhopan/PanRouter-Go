@@ -1,16 +1,18 @@
 package dashboard
 
 import (
-	"panrouter/proxy/internal/handlerutil"
-	"panrouter/proxy/internal/models"
-	"panrouter/proxy/internal/providers"
-	"panrouter/proxy/internal/updater"
 	"context"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"panrouter/proxy/internal/connlimit"
+	"panrouter/proxy/internal/handlers/chat"
+	"panrouter/proxy/internal/handlerutil"
+	"panrouter/proxy/internal/models"
+	"panrouter/proxy/internal/providers"
+	"panrouter/proxy/internal/updater"
 	"regexp"
 	"sort"
 	"strconv"
@@ -143,10 +145,10 @@ const (
 // (registry features.usage).
 var usageSupportedProviders = []string{
 	"antigravity", "claude", "codebuddy-cn", "codebuddy-intl", "codex",
-	"commandcode", "deepseek", "gemini-cli", "gemini-web", "github", "glm", "glm-cn",
+	"commandcode", "commandcode-goat", "deepseek", "gemini-cli", "gemini-web", "github", "glm", "glm-cn",
 	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "minimax-code",
 	"minimax-code-global", "ollama",
-	"opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
+	"free-pi", "freebuff", "opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
 	"vercel-ai-gateway", "xiaomi-mimo", "zed",
 	"zcode",
 }
@@ -154,10 +156,10 @@ var usageSupportedProviders = []string{
 // usageApikeyProviders mirrors upstream USAGE_APIKEY_PROVIDERS
 // (registry features.usageApikey).
 var usageApikeyProviders = []string{
-	"codebuddy-cn", "codebuddy-intl", "commandcode", "deepseek", "gemini-web", "glm",
+	"codebuddy-cn", "codebuddy-intl", "commandcode", "commandcode-goat", "deepseek", "gemini-web", "glm",
 	"glm-cn", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
-	"opencode-go", "opencode-zen", "qoder", "qoder-cn", "vercel-ai-gateway",
-	"xiaomi-mimo",
+	"free-pi", "freebuff", "opencode-go", "opencode-zen", "qoder", "qoder-cn",
+	"vercel-ai-gateway", "xiaomi-mimo",
 }
 
 func strSliceContains(list []string, v string) bool {
@@ -170,10 +172,11 @@ func strSliceContains(list []string, v string) bool {
 }
 
 func isUsageEligibleConnection(c *models.ProviderConnection) bool {
-	if !strSliceContains(usageSupportedProviders, c.Provider) {
+	p := providers.ResolveAlias(c.Provider)
+	if !strSliceContains(usageSupportedProviders, c.Provider) && !strSliceContains(usageSupportedProviders, p) {
 		return false
 	}
-	return c.AuthType == "oauth" || strSliceContains(usageApikeyProviders, c.Provider)
+	return c.AuthType == "oauth" || strSliceContains(usageApikeyProviders, c.Provider) || strSliceContains(usageApikeyProviders, p)
 }
 
 func uniqueSortedProviders(conns []*models.ProviderConnection) []string {
@@ -328,7 +331,7 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 		// badges (⏱), quota/rate-limit panels, model assignment. Secret
 		// keys (apiKey/accessToken/refreshToken/authToken/...) stay dropped.
 		"backoffLevel", "rateLimitedUntil", "rateLimit", "rateLimitsByModel",
-		"freebuffModel", "assignedModel", "freebucks",
+		"freebuffModel", "assignedModel", "freebucks", "allowPrivateNetworking",
 	} {
 		if v, ok := data[f]; ok && v != nil {
 			if f == "lastError" {
@@ -372,6 +375,11 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 			"githubLogin", "githubName", "githubEmail", "githubUserId",
 			"username", "firstName", "lastName", "authMethod", "authKind",
 			"profileArn", "accessKeyId", "profile",
+			"disabledKinds", "mediaEnabled", "isMediaActive",
+			// The edit form's per-account model allowlist. Model ids are not
+			// secret, and without them the Codex model-scope editor reopens with
+			// every box unchecked even though the pin was saved.
+			"enabledModels",
 		} {
 			if v, ok := psd[f]; ok && v != nil {
 				out[f] = v
@@ -381,6 +389,8 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 			safe["providerSpecificData"] = out
 		}
 	}
+	safe["mediaEnabled"] = models.IsConnectionMediaActive(c.Data)
+	safe["isMediaActive"] = models.IsConnectionMediaActive(c.Data)
 	// Effective status: the toggle being on is not evidence the account
 	// works. Derived from testStatus + live cooldown + stored lastError with
 	// the same vocabulary the request path uses, so the dashboard stops
@@ -418,7 +428,8 @@ type createConnectionRequest struct {
 	// Replace states that a duplicate-account collision is intended: the
 	// existing connection is refreshed in place instead of a second row being
 	// inserted for the same account.
-	Replace bool `json:"replace"`
+	Replace                bool `json:"replace"`
+	AllowPrivateNetworking bool `json:"allowPrivateNetworking"`
 }
 
 // isCompatibleNodeProviderID reports whether providerID names a custom
@@ -495,6 +506,9 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 	if req.DefaultModel != "" {
 		dataMap["defaultModel"] = req.DefaultModel
 	}
+	if req.AllowPrivateNetworking {
+		dataMap["allowPrivateNetworking"] = true
+	}
 
 	// Upstream POST /api/providers rebuilds providerSpecificData from the node
 	// row for compatible providers: the node owns the public prefix, endpoint
@@ -534,6 +548,10 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 		if node.Name != nil {
 			psd["nodeName"] = *node.Name
 		}
+		// Switching a node back to Chat Completions or Responses removes the
+		// business template from the connection; a custom JSON node's template
+		// is copied in from the node row, not taken from what the client sent.
+		setConnCustomJSON(psd, storedCustomJSON(nodeData.APIType, nodeData.CustomJSON))
 		dataMap["providerSpecificData"] = psd
 	}
 
@@ -708,6 +726,32 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	_, hasPSD := rawBody["providerSpecificData"]
 	_, hasAssignedModel := rawBody["assignedModel"]
 	_, hasProxyPool := rawBody["proxyPoolId"]
+	_, hasAllowPrivate := rawBody["allowPrivateNetworking"]
+	hasMediaEnabled := false
+	var mediaEnabledVal bool
+	if v, ok := rawBody["mediaEnabled"].(bool); ok {
+		hasMediaEnabled = true
+		mediaEnabledVal = v
+	}
+	hasIsMediaActive := false
+	var isMediaActiveVal bool
+	if v, ok := rawBody["isMediaActive"].(bool); ok {
+		hasIsMediaActive = true
+		isMediaActiveVal = v
+	}
+	hasDisabledKinds := false
+	var disabledKindsVal []string
+	if dk, ok := rawBody["disabledKinds"].([]any); ok {
+		hasDisabledKinds = true
+		for _, item := range dk {
+			if s, ok := item.(string); ok {
+				disabledKindsVal = append(disabledKindsVal, s)
+			}
+		}
+	} else if dk, ok := rawBody["disabledKinds"].([]string); ok {
+		hasDisabledKinds = true
+		disabledKindsVal = dk
+	}
 	// Issue #154: rotating the credential from the edit modal. Blank (or
 	// whitespace-only) means "keep the stored key" — the modal shows it as a
 	// mask and sends nothing when the user did not type one.
@@ -746,10 +790,13 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	// Fast path: if only updating active status
-	if hasIsActive && !hasName && !hasPriority && !hasData && !hasPSD && !hasAssignedModel && !hasProxyPool && !hasAPIKey {
+	if hasIsActive && !hasName && !hasPriority && !hasData && !hasPSD && !hasAssignedModel && !hasProxyPool && !hasAPIKey && !hasAllowPrivate && !hasMediaEnabled && !hasIsMediaActive && !hasDisabledKinds {
 		if err := h.Repo.SetConnectionStatus(id, a); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if a {
+			chat.ClearCodexQuotaBlock(id)
 		}
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id, "isActive": a})
 		return
@@ -775,7 +822,7 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	dataStr := existing.Data
-	if hasData || hasPSD || hasAssignedModel || hasProxyPool || hasAPIKey {
+	if hasData || hasPSD || hasAssignedModel || hasProxyPool || hasAPIKey || hasAllowPrivate || hasMediaEnabled || hasIsMediaActive || hasDisabledKinds {
 		dataMap := make(map[string]any)
 		if existing.Data != "" {
 			_ = json.Unmarshal([]byte(existing.Data), &dataMap)
@@ -849,6 +896,35 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 			}
 		}
 
+		if hasAllowPrivate {
+			if v, ok := rawBody["allowPrivateNetworking"].(bool); ok && v {
+				dataMap["allowPrivateNetworking"] = true
+			} else {
+				delete(dataMap, "allowPrivateNetworking")
+			}
+		}
+
+		if hasMediaEnabled {
+			dataMap["mediaEnabled"] = mediaEnabledVal
+			if psd, ok := dataMap["providerSpecificData"].(map[string]any); ok && psd != nil {
+				psd["mediaEnabled"] = mediaEnabledVal
+			}
+		}
+
+		if hasIsMediaActive {
+			dataMap["isMediaActive"] = isMediaActiveVal
+			if psd, ok := dataMap["providerSpecificData"].(map[string]any); ok && psd != nil {
+				psd["isMediaActive"] = isMediaActiveVal
+			}
+		}
+
+		if hasDisabledKinds {
+			dataMap["disabledKinds"] = disabledKindsVal
+			if psd, ok := dataMap["providerSpecificData"].(map[string]any); ok && psd != nil {
+				psd["disabledKinds"] = disabledKindsVal
+			}
+		}
+
 		if b, err := json.Marshal(dataMap); err == nil {
 			dataStr = string(b)
 		}
@@ -858,8 +934,17 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if hasIsActive && a {
+		chat.ClearCodexQuotaBlock(id)
+	}
 
-	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"id":            id,
+		"isActive":      isActive,
+		"mediaEnabled":  models.IsConnectionMediaActive(dataStr),
+		"isMediaActive": models.IsConnectionMediaActive(dataStr),
+	})
 }
 
 // HandleReorderConnection handles POST /api/connections/{id}/reorder.
@@ -936,7 +1021,7 @@ func mergeMapField(target map[string]any, key string, source map[string]any) {
 
 // HandleExportProviderKeys handles GET /api/providers/{id}/export-keys.
 // Returns all stored connections for a given provider with unmasked raw credentials.
-// Matches upstream decolua/panrouter#4889 exportProviderKeys contract.
+// Matches upstream decolua/9router#4889 exportProviderKeys contract.
 func (h *DashboardHandler) HandleExportProviderKeys(w http.ResponseWriter, r *http.Request) {
 	providerID := getURLParam(r, "id")
 	if providerID == "" {
@@ -1010,6 +1095,7 @@ func (h *DashboardHandler) HandleDeleteConnection(w http.ResponseWriter, r *http
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	connlimit.Close(id) // release breaker/backoff state so nothing leaks
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
 }
@@ -1438,6 +1524,124 @@ func (h *DashboardHandler) writeConnectionModels(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Free-pi's catalogue lives at GET /client-version (unauthenticated,
+	// account-independent) rather than the standard /v1/models shape. The models
+	// array's `id` is the value a request must send as `model`.
+	if conn.Provider == providers.FreePiProviderID {
+		cv, err := freePiFetchModelsFromClientVersion(r.Context(), connData.APIKey, connData.ProviderSpecificData)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       cv,
+		})
+		return
+	}
+
+	if conn.Provider == "claude" {
+		token := connData.AccessToken
+		if token == "" {
+			token = connData.APIKey
+		}
+		if token == "" {
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no valid token found")
+			return
+		}
+		headers := map[string]string{
+			"Authorization":     "Bearer " + token,
+			"Anthropic-Version": "2023-06-01",
+			"Anthropic-Beta":    "oauth-2025-04-20",
+			"Content-Type":      "application/json",
+		}
+		status, body, err := validateProbeDo(r.Context(), http.MethodGet, "https://api.anthropic.com/v1/models?limit=1000", headers, nil)
+		if err != nil {
+			statusCode, _, errMsg := ClassifyUpstreamNetworkError(err)
+			handlerutil.WriteJSONError(w, statusCode, "failed to fetch models: "+errMsg)
+			return
+		}
+		if status != http.StatusOK {
+			handlerutil.WriteJSONError(w, status, fmt.Sprintf("failed to fetch models: %d", status))
+			return
+		}
+		var listResp struct {
+			Data []struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"display_name"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &listResp)
+		models := make([]map[string]string, 0, len(listResp.Data))
+		for _, m := range listResp.Data {
+			name := m.DisplayName
+			if name == "" {
+				name = m.ID
+			}
+			models = append(models, map[string]string{
+				"id":   m.ID,
+				"name": name,
+			})
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       models,
+		})
+		return
+	}
+
+	if conn.Provider == "anthropic" {
+		token := connData.APIKey
+		if token == "" {
+			token = connData.AccessToken
+		}
+		if token == "" {
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key configured")
+			return
+		}
+		headers := map[string]string{
+			"x-api-key":         token,
+			"Anthropic-Version": "2023-06-01",
+			"Content-Type":      "application/json",
+		}
+		status, body, err := validateProbeDo(r.Context(), http.MethodGet, "https://api.anthropic.com/v1/models", headers, nil)
+		if err != nil {
+			statusCode, _, errMsg := ClassifyUpstreamNetworkError(err)
+			handlerutil.WriteJSONError(w, statusCode, "failed to fetch models: "+errMsg)
+			return
+		}
+		if status != http.StatusOK {
+			handlerutil.WriteJSONError(w, status, fmt.Sprintf("failed to fetch models: %d", status))
+			return
+		}
+		var listResp struct {
+			Data []struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"display_name"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &listResp)
+		models := make([]map[string]string, 0, len(listResp.Data))
+		for _, m := range listResp.Data {
+			name := m.DisplayName
+			if name == "" {
+				name = m.ID
+			}
+			models = append(models, map[string]string{
+				"id":   m.ID,
+				"name": name,
+			})
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       models,
+		})
+		return
+	}
+
 	isOpenAI := strings.HasPrefix(conn.Provider, "openai-compatible-")
 	isAnthropic := strings.HasPrefix(conn.Provider, "anthropic-compatible-")
 	if !isOpenAI && !isAnthropic {
@@ -1461,15 +1665,21 @@ func (h *DashboardHandler) writeConnectionModels(w http.ResponseWriter, r *http.
 	}
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	headers := map[string]string{"Content-Type": "application/json"}
+	// The OpenAI-compatible branch asks the same question the chat path asks:
+	// where is this node's `/models` route? It is derived from the completed
+	// chat route so both agree, including a bare host that gains `/v1`.
+	var listURL string
 	if isAnthropic {
 		baseURL = strings.TrimSuffix(baseURL, "/messages")
+		listURL = baseURL + "/models"
 		headers["x-api-key"] = connData.APIKey
 		headers["anthropic-version"] = "2023-06-01"
 		headers["Authorization"] = "Bearer " + connData.APIKey
 	} else {
 		headers["Authorization"] = "Bearer " + connData.APIKey
+		listURL = chat.CompatibleNodeModelsURL(baseURL)
 	}
-	status, body, err := validateProbeDo(r.Context(), http.MethodGet, baseURL+"/models", headers, nil)
+	status, body, err := validateProbeDo(r.Context(), http.MethodGet, listURL, headers, nil)
 	if err != nil {
 		statusCode, _, errMsg := ClassifyUpstreamNetworkError(err)
 		handlerutil.WriteJSONError(w, statusCode, "failed to fetch models: "+errMsg)

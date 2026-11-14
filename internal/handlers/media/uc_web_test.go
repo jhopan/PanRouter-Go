@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	json "encoding/json/v2"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlers/chat"
-	json "encoding/json/v2"
 )
 
 // ucTestEnv points every persona endpoint at fakes and shortens the poll

@@ -23,11 +23,16 @@ import (
 type Controller struct {
 	Breaker   BreakerOptions
 	Semaphore SemaphoreOptions
+	ToolLoop  *StalledToolLoopDetector
 }
 
 // NewController returns a Controller with the given options.
 func NewController(breaker BreakerOptions, semaphore SemaphoreOptions) *Controller {
-	return &Controller{Breaker: breaker, Semaphore: semaphore}
+	return &Controller{
+		Breaker:   breaker,
+		Semaphore: semaphore,
+		ToolLoop:  NewStalledToolLoopDetector(StalledToolLoopOptions{}),
+	}
 }
 
 // DefaultController returns a Controller with the package defaults.
@@ -48,8 +53,13 @@ type Decision struct {
 
 // Admit reports whether a request to this provider/account may proceed, without
 // reserving anything. Use Reserve to actually take a slot.
+//
+// The breaker is keyed on provider plus egress, not provider alone: a dead
+// proxy pool must not open the breaker for the provider's direct path or for
+// its other pools, or one broken pool takes the whole provider out of
+// rotation.
 func (c *Controller) Admit(provider, accountKey, proxyHash string) Decision {
-	b := BreakerFor(provider, c.Breaker)
+	b := BreakerForKey(provider, proxyHash, c.Breaker)
 	if !b.Allow() {
 		return Decision{RetryAfter: b.RetryAfter(), Reason: "breaker"}
 	}
@@ -85,7 +95,7 @@ func (c *Controller) ReportSuccess(provider, accountKey, proxyHash string, relea
 	if release != nil {
 		release()
 	}
-	BreakerFor(provider, c.Breaker).RecordSuccess()
+	BreakerForKey(provider, proxyHash, c.Breaker).RecordSuccess()
 }
 
 // ReportFailure records a failed upstream call against the provider breaker and
@@ -103,7 +113,7 @@ func (c *Controller) ReportFailure(provider, accountKey, proxyHash string, relea
 	if status != 0 && !IsProviderFailureStatus(status) {
 		return
 	}
-	BreakerFor(provider, c.Breaker).RecordFailure()
+	BreakerForKey(provider, proxyHash, c.Breaker).RecordFailure()
 }
 
 // BlockAccount holds an account's gate for the given duration, used when the
@@ -112,9 +122,11 @@ func (c *Controller) BlockAccount(provider, accountKey, proxyHash string, d time
 	Block(SemaphoreKey(provider, accountKey, proxyHash), d)
 }
 
-// BreakerStatus returns the provider's breaker snapshot.
+// BreakerStatus returns the provider's direct-path breaker snapshot. A
+// provider that also routes through pools has one breaker per egress; use
+// Statuses for the full set.
 func (c *Controller) BreakerStatus(provider string) BreakerStatus {
-	return BreakerFor(provider, c.Breaker).Status()
+	return BreakerForKey(provider, "", c.Breaker).Status()
 }
 
 // Reset closes every breaker and clears every gate. Used by the dashboard and
@@ -122,6 +134,9 @@ func (c *Controller) BreakerStatus(provider string) BreakerStatus {
 func (c *Controller) Reset() {
 	ResetAllBreakers()
 	ResetSemaphores()
+	if c.ToolLoop != nil {
+		c.ToolLoop = NewStalledToolLoopDetector(StalledToolLoopOptions{})
+	}
 }
 
 // Statuses returns every breaker snapshot plus every semaphore gate, for the

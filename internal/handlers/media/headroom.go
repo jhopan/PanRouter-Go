@@ -32,11 +32,20 @@ var hopByHopHeaders = map[string]bool{
 var proxyLoopbackHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
 
 // HeadroomHandler manages the external Headroom (token compression) proxy
-// process and reverse-proxies its dashboard.
+// process and reverse-proxies its dashboard. It also serves the MCP endpoint
+// for the built-in engine (POST /mcp), which needs no external process.
 type HeadroomHandler struct {
 	Repo    *db.Repo
 	DataDir string
 	Client  *http.Client
+	mcp     *headroom.MCPServer
+
+	// The extras probes and the pip install/uninstall run are fields so a test
+	// can drive the CRUD contract without a Python 3.10 install on the box. Nil
+	// means the package function: production always takes that path.
+	extrasStatus    func(python string) headroom.ExtrasStatus
+	installExtras   func(dataDir string, extras []string) (map[string]any, error)
+	uninstallExtras func(dataDir string, extras []string) (map[string]any, error)
 }
 
 // NewHeadroomHandler creates a HeadroomHandler bound to the app data dir.
@@ -49,6 +58,7 @@ func NewHeadroomHandler(repo *db.Repo) *HeadroomHandler {
 				return http.ErrUseLastResponse // redirect: "manual"
 			},
 		},
+		mcp: headroom.NewMCPServer(headroom.NewBuiltinEngine()),
 	}
 }
 
@@ -59,6 +69,36 @@ func writeHeadroomError(w http.ResponseWriter, status int, message, code string)
 		body["code"] = code
 	}
 	handlerutil.WriteJSON(w, status, body)
+}
+
+// installedExtras reads the installed headroom extras, defaulting to the pip
+// probe. The seam exists so a test can assert the route's response shape and
+// the install/uninstall round-trip without a Python install.
+func (h *HeadroomHandler) installedExtras(python string) headroom.ExtrasStatus {
+	if h.extrasStatus != nil {
+		return h.extrasStatus(python)
+	}
+	return headroom.GetInstalledHeadroomExtras(python)
+}
+
+func (h *HeadroomHandler) install(extras []string) (map[string]any, error) {
+	if h.installExtras != nil {
+		return h.installExtras(h.DataDir, extras)
+	}
+	return headroom.InstallHeadroomExtras(h.DataDir, extras)
+}
+
+func (h *HeadroomHandler) uninstall(extras []string) (map[string]any, error) {
+	if h.uninstallExtras != nil {
+		return h.uninstallExtras(h.DataDir, extras)
+	}
+	return headroom.UninstallHeadroomExtras(h.DataDir, extras)
+}
+
+// HandleMCP serves the built-in headroom engine's MCP endpoint (POST /mcp):
+// JSON-RPC 2.0 tools for compression and stats.
+func (h *HeadroomHandler) HandleMCP(w http.ResponseWriter, r *http.Request) {
+	h.mcp.HandlePOST(w, r)
 }
 
 func (h *HeadroomHandler) headroomURL() string {
@@ -138,6 +178,11 @@ func (h *HeadroomHandler) HandleHeadroomStop(w http.ResponseWriter, r *http.Requ
 }
 
 // HandleHeadroomStatus reports proxy install/running state (GET /headroom/status).
+//
+// engine reports which engine compression will actually use, read from settings
+// rather than inferred from install state: the built-in engine works whether or
+// not a Python proxy is installed, so an "installed: false" line must not read
+// as "compression is off".
 func (h *HeadroomHandler) HandleHeadroomStatus(w http.ResponseWriter, r *http.Request) {
 	hurl := h.headroomURL()
 	status := headroom.GetHeadroomStatus(hurl)
@@ -148,7 +193,21 @@ func (h *HeadroomHandler) HandleHeadroomStatus(w http.ResponseWriter, r *http.Re
 	} else {
 		status["managedPid"] = pid
 	}
+	status["engine"] = h.headroomEngine()
 	handlerutil.WriteJSON(w, http.StatusOK, status)
+}
+
+// headroomEngine reads the configured engine, defaulting to built-in when the
+// settings row is absent or the field is unset.
+func (h *HeadroomHandler) headroomEngine() string {
+	if h.Repo == nil {
+		return headroom.EngineBuiltin
+	}
+	settings, err := h.Repo.GetSettings()
+	if err != nil || settings == nil {
+		return headroom.EngineBuiltin
+	}
+	return headroom.NormalizeEngine(settings.HeadroomEngine)
 }
 
 // HandleHeadroomExtras handles GET/POST/DELETE /headroom/extras.
@@ -159,7 +218,7 @@ func (h *HeadroomHandler) HandleHeadroomExtras(w http.ResponseWriter, r *http.Re
 			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"log": headroom.GetInstallLogTail(h.DataDir, 15)})
 			return
 		}
-		st := headroom.GetInstalledHeadroomExtras("")
+		st := h.installedExtras("")
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 			"available": headroom.CompressionExtras,
 			"installed": st.Installed,
@@ -171,7 +230,7 @@ func (h *HeadroomHandler) HandleHeadroomExtras(w http.ResponseWriter, r *http.Re
 			Extras []string `json:"extras"`
 		}
 		_ = json.UnmarshalRead(r.Body, &body) // Next: req.json().catch(() => ({}))
-		result, err := headroom.InstallHeadroomExtras(h.DataDir, body.Extras)
+		result, err := h.install(body.Extras)
 		if err != nil {
 			code := headroom.CodeOf(err)
 			status := http.StatusInternalServerError
@@ -187,7 +246,7 @@ func (h *HeadroomHandler) HandleHeadroomExtras(w http.ResponseWriter, r *http.Re
 			Extras []string `json:"extras"`
 		}
 		_ = json.UnmarshalRead(r.Body, &body)
-		result, err := headroom.UninstallHeadroomExtras(h.DataDir, body.Extras)
+		result, err := h.uninstall(body.Extras)
 		if err != nil {
 			code := headroom.CodeOf(err)
 			status := http.StatusInternalServerError

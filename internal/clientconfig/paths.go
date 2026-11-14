@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 )
 
-// Path resolution for the nine clients in docs/specs/client-schema-matrix.md §3.
+// Path resolution for the nine `connect` clients in
+// docs/specs/client-schema-matrix.md §3. The dashboard-only clients that were
+// added later resolve in paths_clients.go and follow the same rule.
 //
 // Every function here takes the home directory as an argument rather than
 // reading it from the environment. That is what lets the adapter tests build a

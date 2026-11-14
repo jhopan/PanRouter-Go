@@ -1,9 +1,9 @@
 package thinking
 
 import (
-	"panrouter/proxy/internal/providers"
 	"bytes"
 	json "encoding/json/v2"
+	"panrouter/proxy/internal/providers"
 	"strings"
 )
 
@@ -89,7 +89,7 @@ func Apply(body map[string]any, target, provider, model string, override *Intent
 		display = override.Display
 	}
 	stripped := Strip(body)
-	applyFormat(wireFormat, body, cfg, caps, providers.GetThinkingLevels(provider, clean), display)
+	applyFormat(wireFormat, body, cfg, caps, providers.GetThinkingLevels(provider, clean), display, provider)
 	return body, changed || stripped || dialectKeyPresent(body)
 }
 
@@ -227,12 +227,6 @@ func resolveFormat(target, provider, model string, caps providers.Capabilities) 
 // hasWriter reports whether a writer exists for fmt. Formats without one
 // leave the body untouched (no strip).
 func hasWriter(fmt string) bool {
-	switch fmt {
-	case "openai", "openai-responses", "claude-adaptive", "claude-budget",
-		"gemini-level", "gemini-budget", "zai", "qwen", "kimi", "deepseek",
-		"minimax", "hunyuan", "step", "tokenrouter", "kiro", "commandcode":
-		return true
-	default:
-		return false
-	}
+	_, ok := formatWriters[fmt]
+	return ok
 }

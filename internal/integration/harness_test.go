@@ -24,7 +24,7 @@ import (
 // table, so a runnable integration test must own one.
 const testAPIKey = "sk-integration-test-key"
 
-// Env is a fully wired 9router-go instance: the production chi router from
+// Env is a fully wired panrouter-go instance: the production chi router from
 // app.ProvideRouter (same middleware stack, same route table), a private
 // on-disk SQLite database built by the real schema bootstrap, and a real HTTP
 // listener on a random port.
@@ -71,7 +71,7 @@ func newEnvWithTokenSaver(t *testing.T, build func(*db.Repo) *handlers.TokenSave
 	chat.SetUsageWritesSynchronousForTest(true)
 
 	// DATA_DIR keeps auth.CLIToken() and config.LoadConfig() from reading or
-	// writing the developer's real ~/.9router. JWT_SECRET pins the HS256
+	// writing the developer's real ~/.panrouter. JWT_SECRET pins the HS256
 	// session secret so a minted cookie verifies regardless of the machine.
 	t.Setenv("DATA_DIR", t.TempDir())
 	t.Setenv("JWT_SECRET", "integration-suite-jwt-secret")

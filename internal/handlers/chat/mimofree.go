@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"panrouter/proxy/internal/log"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"panrouter/proxy/internal/log"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +26,8 @@ import (
 // unless a system message contains this exact marker signature.
 const mimoSystemMarker = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks."
 
-const mimoBootstrapURL = "https://api.xiaomimimimo.com/api/free-ai/bootstrap"
-const mimoChatURL = "https://api.xiaomimimimo.com/api/free-ai/openai/chat"
+const mimoBootstrapURL = "https://api.xiaomimimo.com/api/free-ai/bootstrap"
+const mimoChatURL = "https://api.xiaomimimo.com/api/free-ai/openai/chat"
 
 // mimoProviderID is the provider key the thinking-level table is filed under.
 const mimoProviderID = "mimo-free"

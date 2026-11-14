@@ -1,6 +1,12 @@
 package chat
 
 import (
+	"bytes"
+	"context"
+	json "encoding/json/v2"
+	"errors"
+	"fmt"
+	"net/http"
 	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/headroom"
@@ -14,12 +20,6 @@ import (
 	"panrouter/proxy/internal/tracing"
 	"panrouter/proxy/internal/translator"
 	"panrouter/proxy/internal/usagetracker"
-	"bytes"
-	"context"
-	json "encoding/json/v2"
-	"errors"
-	"fmt"
-	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -195,9 +195,14 @@ func (h *ChatHandler) handleAccountFallback(
 		apiKey := extractAPIKey(connData)
 		if apiKey == "" {
 			providerCfg, pErr := h.getProviderConfig(provider, connData)
-			if pErr == nil && providerCfg.DefaultAPIKey != "" {
+			switch {
+			case pErr == nil && providerCfg.DefaultAPIKey != "":
 				apiKey = providerCfg.DefaultAPIKey
-			} else {
+			case customJSONKeyOptional(connData):
+				// A custom JSON endpoint may be keyless by design: the node
+				// says so, and the connection carries no credential. Requiring
+				// one would make the node unusable through the fallback path.
+			default:
 				if lastErr == nil {
 					lastErr = fmt.Errorf("connection %s has no API key", connObj.ID)
 				}
@@ -233,6 +238,15 @@ func (h *ChatHandler) handleAccountFallback(
 				}
 			}
 		}
+		// A custom JSON business call is never replayed on the next account: the
+		// endpoint may already have performed its operation, and the doomed
+		// second call is the automation signature a business API bans on.
+		if isCustomJSONConn(connData) {
+			log.Info("fallback", "custom JSON failure is terminal, not rotating",
+				"provider", provider, "conn", connObj.ID, "error", lastErr)
+			return lastErr
+		}
+
 		// A node-state refusal (contract ended, lifetime quota spent) answers 403, which
 		// is a retryable status, so without this it would fall into the generic branch
 		// below and park the connection for two minutes on the model *and* on the
@@ -259,6 +273,13 @@ func (h *ChatHandler) handleAccountFallback(
 			continue
 		}
 		if errors.As(lastErr, &ue) && providers.RetryableStatusCodes[ue.StatusCode] {
+			// A gateway fault (500–504) is about the upstream, not the
+			// credential: it earns the model a short cooldown badge and a lock
+			// on this account, so the next request does not re-dial an upstream
+			// that just failed in the same second.
+			if ue.StatusCode >= http.StatusInternalServerError {
+				h.recordModelCooldown(ctx, provider, model, connObj.ID, ue)
+			}
 			if handlerutil.IsProbeContext(ctx) {
 				excludeIDs = append(excludeIDs, connObj.ID)
 				continue
@@ -318,8 +339,20 @@ func (h *ChatHandler) handleAccountFallback(
 				"conn", connObj.ID, "provider", provider, "model", model,
 				"lockKey", lockKey, "status", ue.StatusCode, "cooldown_s", cooldownSec,
 			}, connIdentityKV(connObj)...)...)
+			if stopsRotationOnRateLimit(provider, ue) {
+				log.Warn("fallback", "rate limit stops the rotation",
+					"provider", provider, "conn", connObj.ID, "model", model, "status", ue.StatusCode)
+				return lastErr
+			}
 			excludeIDs = append(excludeIDs, connObj.ID)
 			continue
+		}
+		// A gateway fault (5xx) is not retried across accounts, but it is still
+		// a fact about the model's health right now: record the cooldown badge
+		// and lock the model so the next request does not re-dial an upstream
+		// that just failed.
+		if errors.As(lastErr, &ue) && ue.StatusCode >= http.StatusInternalServerError {
+			h.recordModelCooldown(ctx, provider, model, connObj.ID, ue)
 		}
 		return lastErr
 	}
@@ -432,6 +465,16 @@ func opencodeClosureError(provider, model string, err error) error {
 		return err
 	}
 	detail := classifyOpencodeFreeTierRefusal(provider, ue.Body)
+	// The carrier is the authority when it names a wait: the classifier's 60s is
+	// only an estimate. A carrier longer than the safety ceiling is clamped, so a
+	// hostile or nonsensical value cannot park the egress forever — the same
+	// maxResetCooldown every other quota path respects.
+	if carrier, ok := opencodeCarrierRetryAfter(ue.Header, time.Now()); ok {
+		detail.RetryAfter = int(carrier / time.Second)
+	}
+	if limit := int(maxResetCooldown / time.Second); detail.RetryAfter > limit {
+		detail.RetryAfter = limit
+	}
 	body, _ := json.Marshal(map[string]any{
 		"error": map[string]any{
 			"message": detail.Message,
@@ -533,6 +576,14 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	ctx, w := f.Ctx, f.W
 	provider, model := f.Provider, f.Model
 	connectionID, connData := f.ConnectionID, f.ConnData
+	// Per-connection opt-in for a private/reserved upstream: the SSRF guard is
+	// what stops a credential-bearing connection from reaching an internal
+	// host, and this flag is the operator's explicit exception for a local
+	// gateway or a LAN peer. It rides on the request context, so the dialer
+	// sees it on both the direct and the proxied legs.
+	if connData != nil && connData.AllowPrivateNetworking {
+		ctx = internalproxy.WithAllowPrivateNetworking(ctx)
+	}
 	body, isStream := f.Body, f.IsStream
 	translateResponse, endpoint := f.TranslateResponse, f.Endpoint
 	// Unified thinking normalisation, inbound half: capture the client's
@@ -579,9 +630,13 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 
 	apiKey := resolveProviderAuthToken(provider, connData, extractAPIKey(connData))
 	if apiKey == "" {
-		if providerCfg.DefaultAPIKey != "" {
+		switch {
+		case providerCfg.DefaultAPIKey != "":
 			apiKey = providerCfg.DefaultAPIKey
-		} else {
+		case customJSONKeyOptional(connData):
+			// A keyless custom JSON node is usable without a credential: the
+			// endpoint authenticates its own callers or needs none.
+		default:
 			return &upstreamError{StatusCode: http.StatusUnauthorized, Body: []byte(`{"error":{"message":"no API key found","type":"auth_error","code":401}}`)}
 		}
 	}
@@ -781,7 +836,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			accountFastOpt = &v
 		}
 	}
-	if fastBody, modified := ApplyCodexFastMode(pipedBody, provider, accountFastOpt); modified {
+	if fastBody, modified := ApplyCodexFastMode(ctx, pipedBody, provider, accountFastOpt); modified {
 		pipedBody = fastBody
 	}
 
@@ -991,6 +1046,38 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// Inject served route response headers (x-panrouter-provider, x-panrouter-model, etc.)
 	// before any executor or forwarding function writes headers to w.
 	injectRouteHeaders(w, provider, model, f.ComboName, f.Attempts)
+
+	// A custom JSON business endpoint answers in its own shape and its reply is
+	// final as given, so it has its own executor: routing it through the OpenAI
+	// one reports "200 without a completion" and invites a replay of a business
+	// transaction.
+	if isCustomJSONConn(connData) {
+		execReq := &executor.Request{
+			Ctx:           ctx,
+			Client:        httpClient,
+			Config:        providerCfg,
+			Provider:      provider,
+			APIKey:        apiKey,
+			Body:          pipedBody,
+			IsStream:      isStream,
+			ClaudeClient:  endpoint == "/v1/v1/messages" || endpoint == "/v1/messages",
+			TranslateResp: translateResponse,
+			ConnectionID:  connectionID,
+			SessionID:     sessionID,
+			ConnData:      connData.ProviderSpecificData,
+			ResponseBuf:   &metrics.ResponseBuf,
+			StartTime:     start,
+			TTFT:          &metrics.TTFT,
+		}
+		err := executor.ForwardCustomJSON(w, execReq)
+		execReq.Release()
+		// A business transaction is never replayed on another account: the
+		// endpoint may have charged the operator's customer on the first call.
+		if err != nil {
+			return customJSONTerminalError(err)
+		}
+		return nil
+	}
 
 	if exec := executor.Get(provider); exec != nil {
 		execReq := &executor.Request{
@@ -1319,6 +1406,12 @@ func isClientCanceled(ctx context.Context, err error) bool {
 // a role:"system" message is rejected by the Anthropic API.
 // false from compress/inject means nothing changed (or unparseable) — keep original, not a failure.
 func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeNative bool) ([]byte, int, int, int) {
+	// X-PanRouter-Token-Saver: off|0|false|bypass opts the whole request out of
+	// every token saver — RTK, Caveman, Ponytail, ADHD, Headroom, system prompt
+	// prefix/suffix — and the body is forwarded untouched with 0 tokens saved.
+	if TokenSaverBypassEnabled(ctx) {
+		return body, 0, 0, 0
+	}
 	if h.TokenSaver == nil {
 		return body, 0, 0, 0
 	}
@@ -1361,6 +1454,12 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 	if claudeNative {
 		inject = tokensaver.InjectSystemPromptClaude
 	}
+	// Persona prompts only ever add to the body, so the size before them is the
+	// baseline each injection is measured against. The baseline moves after
+	// every successful injection: a persona added on top of an earlier one adds
+	// only its own prompt, and measuring it against the pre-persona length would
+	// count the earlier persona's bytes a second time.
+	beforeLen := len(out)
 	if h.TokenSaver.CavemanEnabled() {
 		bypass := false
 		if h.TokenSaver.CavemanAutoClarity() && tokensaver.ShouldBypassCaveman(out) {
@@ -1370,6 +1469,8 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 			prompt := tokensaver.GetCavemanPromptWithLang(h.TokenSaver.CavemanLevel(), h.TokenSaver.CavemanLanguage())
 			if next, did := inject(out, prompt); did {
 				out = next
+				recordPersonaInjection(&origTokens, &savedTokens, beforeLen, len(next))
+				beforeLen = len(out)
 			}
 		}
 	}
@@ -1377,26 +1478,67 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 		prompt := tokensaver.GetPonytailPrompt(h.TokenSaver.PonytailLevel())
 		if next, did := inject(out, prompt); did {
 			out = next
+			recordPersonaInjection(&origTokens, &savedTokens, beforeLen, len(next))
+			beforeLen = len(out)
 		}
 	}
 	if h.TokenSaver.ADHDEnabled() {
 		prompt := tokensaver.GetADHDPrompt(h.TokenSaver.ADHDLevel())
 		if next, did := inject(out, prompt); did {
 			out = next
+			recordPersonaInjection(&origTokens, &savedTokens, beforeLen, len(next))
+			// No baseline update: this is the last persona, so nothing reads
+			// beforeLen again. A persona added after this one must move the
+			// baseline here too, or it will count the prompts above it twice.
 		}
 	}
 	// Headroom runs after the in-process savers and before the global prompt, so
 	// it never sees the prompt this process is about to add.
 	//
-	// The client is built per call rather than cached on the handler: the proxy
-	// URL is an operator setting that can change while requests are in flight,
-	// and a shared client would need a lock around every field read to stay
-	// correct. Compress itself fails open on every refusal, so the only cost of
-	// not caching is one struct allocation.
+	// The client is built per call rather than cached on the handler: the engine
+	// and the proxy URL are operator settings that can change while requests are
+	// in flight, and a shared client would need a lock around every field read
+	// to stay correct. Compress itself fails open on every refusal, so the only
+	// cost of not caching is one struct allocation.
+	//
+	// The token counts are measured here rather than taken from the engine: the
+	// same estimator RTK uses above, so a saving from either stage is comparable
+	// on one scale and the usage page shows one number instead of two. Without
+	// this, headroom-only compression left SavedTokens at 0, and the usage page
+	// reported no compression at all on a request that was demonstrably
+	// compressed — the analytics row is only written when SavedTokens > 0.
 	if h.TokenSaver.HeadroomEnabled() {
-		if url, timeoutMs := h.TokenSaver.HeadroomEndpoint(); url != "" {
-			client := headroom.NewClient(url, "", nil)
+		url, timeoutMs := h.TokenSaver.HeadroomEndpoint()
+		engine := h.TokenSaver.HeadroomEngineName()
+		// The built-in engine needs no URL, so a compression that is switched on
+		// must not silently do nothing because the URL field happens to be empty.
+		if url != "" || headroom.NormalizeEngine(engine) == headroom.EngineBuiltin {
+			client := headroom.NewClientWithEngine(url, "", nil, engine)
 			if next, did, err := client.Compress(ctx, out, "", timeoutMs); err == nil && did {
+				nextOrig := len(out) / 4
+				nextCompressed := len(next) / 4
+				nextSaved := nextOrig - nextCompressed
+				if nextSaved > 0 {
+					// Headroom runs after RTK, so its saving is on top of the one
+					// already measured: the totals are cumulative, matching what
+					// the provider is about to be billed for.
+					if nextOrig > origTokens {
+						origTokens = nextOrig
+					}
+					savedTokens += nextSaved
+					if origTokens > 0 {
+						savedPct = (savedTokens * 100) / origTokens
+					}
+					log.Info(
+						"token_saver", "headroom compressed request",
+						"engine", headroom.NormalizeEngine(engine),
+						"orig_est", nextOrig,
+						"compressed_est", nextCompressed,
+						"saved_est", nextSaved,
+						"total_saved_est", savedTokens,
+						"saved_pct", fmt.Sprintf("%d%%", savedPct),
+					)
+				}
 				out = next
 			}
 		}
@@ -1486,14 +1628,68 @@ func extractErrorText(body []byte) string {
 }
 
 var (
-	resetsInRegex           = regexp.MustCompile(`(?i)resets?\s+in\s+([0-9hms\.]+)`)
-	codebuddyResetDateRegex = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?`)
+	resetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+([0-9hms\.]+)`)
+	// The sign is its own group: the provider prints UTC+8 and could print
+	// UTC-5, and the offset must be read out of the body either way.
+	codebuddyResetDateRegex = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC([+-]?)([0-9:]+))?`)
 )
 
 const (
 	minResetCooldown = 5 * time.Second
 	maxResetCooldown = 2 * time.Hour
+
+	// resetSafetyMargin is upstream RESET_SAFETY_MARGIN_MS
+	// (open-sse/executors/codebuddy-intl.js:22-33): a provider that names a
+	// reset time states when the quota refills on ITS clock, and the request in
+	// flight, the clock skew and the moment the counter rolls over are not the
+	// same instant. Asking one second early earns another refusal — and the
+	// retry is exactly what a gateway reads as automation. Ten minutes is cheap
+	// insurance against a whole extra refusal cycle.
+	resetSafetyMargin = 10 * time.Minute
+
+	// maxMonthlyResetCooldown is the ceiling for a provider whose quota window
+	// is MONTHLY. Upstream reaches the same number through quotaWindows.js
+	// (defaultMaxCooldownMs = 40 days, with `codebuddy-intl` and
+	// `codebuddy-cn` registered as MONTHLY scopes): a body naming a reset days
+	// away must park the account for that long, because clamping it to the
+	// generic two-hour ceiling puts an account that is still out of quota back
+	// into rotation.
+	maxMonthlyResetCooldown = 40 * 24 * time.Hour
 )
+
+// codebuddyIntlProviders are the spellings a stored connection row may use for
+// the CodeBuddy Intl site.
+var codebuddyIntlProviders = map[string]bool{
+	"codebuddy-intl": true,
+	"cbai":           true,
+}
+
+// stopsRotationOnRateLimit reports whether a rate limit from this provider must
+// end the pass instead of rotating to the next account.
+//
+// Upstream's rule (AGENTS.md §1): a 429 on CodeBuddy Intl gets ZERO retries, the
+// account is locked until the provider's own reset plus the margin, and the
+// rotation stops. Walking the pool is what turned one quota refusal into the
+// automation signature the provider bans on — 29 requests in two seconds across
+// 29 accounts — and earned 11140 "account restricted due to unusual activity"
+// followed by 30-day bans. Every other provider keeps the pool walk, because
+// there the next account is a real second chance rather than a second signal.
+func stopsRotationOnRateLimit(provider string, ue *upstreamError) bool {
+	if ue == nil || ue.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	return codebuddyIntlProviders[provider]
+}
+
+// monthlyCooldownProviders are the providers whose declared quota scope is
+// MONTHLY, so an announced reset may legitimately be days away. Both spellings
+// of the CodeBuddy pair are listed because a connection row may store either.
+var monthlyCooldownProviders = map[string]bool{
+	"codebuddy-intl": true,
+	"codebuddy-cn":   true,
+	"cbai":           true,
+	"cbcn":           true,
+}
 
 // extractResetDuration attempts to extract a structured reset duration from an error payload.
 // It parses:
@@ -1541,42 +1737,102 @@ func extractResetDuration(body []byte) (time.Duration, bool) {
 		}
 	}
 
-	// 3. CodeBuddy date-time pattern (e.g. 2026-09-28 14:30:00 or with UTC offset)
-	if matches := codebuddyResetDateRegex.FindSubmatch(body); len(matches) > 2 {
-		dateStr := string(matches[1])
-		timeStr := string(matches[2])
-		tzOffset := "+08:00"
-		if len(matches) > 3 && len(matches[3]) > 0 {
-			tz := string(matches[3])
-			if !strings.Contains(tz, ":") {
-				if num, err := strconv.Atoi(tz); err == nil {
-					tzOffset = fmt.Sprintf("+%02d:00", num)
-				}
-			} else if !strings.HasPrefix(tz, "+") && !strings.HasPrefix(tz, "-") {
-				tzOffset = "+" + tz
-			} else {
-				tzOffset = tz
-			}
-		}
-		if tm, err := time.Parse(time.RFC3339, fmt.Sprintf("%sT%s%s", dateStr, timeStr, tzOffset)); err == nil {
-			dur := time.Until(tm)
-			if dur > 0 {
-				return clampResetDuration(dur), true
-			}
+	// 3. CodeBuddy date-time pattern: "<date> <clock> UTC+8" (or no offset).
+	if tm, ok := codebuddyResetInstant(body); ok {
+		// The instant is absolute, so the wait is the same whatever zone the
+		// gateway runs in. The safety margin goes on top, and the ceiling is
+		// the monthly one: a frequency limit on a MONTHLY quota can name a
+		// reset days away.
+		if dur := time.Until(tm) + resetSafetyMargin; dur > 0 {
+			return clampCooldown(dur, maxMonthlyResetCooldown), true
 		}
 	}
 
 	return 0, false
 }
 
-func clampResetDuration(dur time.Duration) time.Duration {
+// codebuddyResetInstant returns the absolute instant a CodeBuddy quota body
+// names: "<date> <clock> UTC±N", e.g.
+// "your usage will reset at 2026-11-02 10:05:00 UTC+8".
+//
+// The offset is read out of the BODY, never from the host's zone.
+// open-sse/executors/codebuddy-intl.js:376-391 builds the Date from the body's
+// own offset for the same reason: the gateway runs WIB (UTC+7) while the
+// provider prints UTC+8, so reading 10:05 as server-local puts the lock an
+// hour early — the account is retried while it is still limited, and that
+// retry is the automation signal that earns a ban.
+//
+// A body with no offset falls back to UTC+8, the provider's own clock
+// (upstream's default branch). The safety margin is the caller's job: this
+// answers when the quota refills, not when the next request is safe.
+func codebuddyResetInstant(body []byte) (time.Time, bool) {
+	matches := codebuddyResetDateRegex.FindSubmatch(body)
+	if len(matches) < 3 {
+		return time.Time{}, false
+	}
+	offset := 8 * 3600 // no offset in the body: the provider's own clock
+	if len(matches) > 4 && len(matches[4]) > 0 {
+		secs, ok := codebuddyOffsetSeconds(string(matches[3]), string(matches[4]))
+		if !ok {
+			return time.Time{}, false
+		}
+		offset = secs
+	}
+	// ParseInLocation with the body's own fixed offset yields an absolute
+	// instant, so time.Local never enters the answer.
+	tm, err := time.ParseInLocation("2006-01-02 15:04:05",
+		string(matches[1])+" "+string(matches[2]), time.FixedZone("", offset))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return tm, true
+}
+
+// codebuddyOffsetSeconds turns the offset digits of a CodeBuddy body
+// ("8", "08:00", "5:30") into seconds east of UTC. A bare number is hours,
+// which is how the provider writes UTC+8; the colon form is hours:minutes as
+// some gateways print it. Out-of-range values are rejected rather than
+// clamped, so a garbled body falls through to the generic cooldown instead of
+// parking an account on a nonsense instant.
+func codebuddyOffsetSeconds(sign, digits string) (int, bool) {
+	hours, minutes := 0, 0
+	if i := strings.IndexByte(digits, ':'); i >= 0 {
+		h, hErr := strconv.Atoi(digits[:i])
+		m, mErr := strconv.Atoi(digits[i+1:])
+		if hErr != nil || mErr != nil {
+			return 0, false
+		}
+		hours, minutes = h, m
+	} else {
+		h, hErr := strconv.Atoi(digits)
+		if hErr != nil {
+			return 0, false
+		}
+		hours = h
+	}
+	if hours > 18 || minutes > 59 {
+		return 0, false
+	}
+	secs := hours*3600 + minutes*60
+	if sign == "-" {
+		secs = -secs
+	}
+	return secs, true
+}
+
+// clampCooldown keeps an announced wait inside [minResetCooldown, ceiling].
+func clampCooldown(dur, ceiling time.Duration) time.Duration {
 	if dur < minResetCooldown {
 		return minResetCooldown
 	}
-	if dur > maxResetCooldown {
-		return maxResetCooldown
+	if dur > ceiling {
+		return ceiling
 	}
 	return dur
+}
+
+func clampResetDuration(dur time.Duration) time.Duration {
+	return clampCooldown(dur, maxResetCooldown)
 }
 
 // extractRetryAfter extracts a retryAfter ISO timestamp from an upstream error JSON body.
@@ -1812,4 +2068,86 @@ func isModelScopedError(statusCode int, errorText string, model string, bodies .
 	}
 
 	return false
+}
+
+// tokenSaverBypassKey carries the token-saver opt-out on the context.
+// Port of upstream fallback.go: X-PanRouter-Token-Saver: off|0|false|bypass.
+type tokenSaverBypassKey struct{}
+
+// WithTokenSaverBypass marks ctx as a token-saver bypass: no compression or
+// prompt injection may run on this request.
+func WithTokenSaverBypass(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tokenSaverBypassKey{}, true)
+}
+
+// TokenSaverBypassEnabled reports whether the request opted out of token saving.
+func TokenSaverBypassEnabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(tokenSaverBypassKey{}).(bool)
+	return ok && v
+}
+
+// isTokenSaverBypassValue reports whether an X-PanRouter-Token-Saver header value
+// opts the request out of every token saver. The spellings mirror a boolean
+// switch, so "off" and "0" mean bypass, not "enable".
+func isTokenSaverBypassValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "off", "bypass":
+		return true
+	default:
+		return false
+	}
+}
+
+// claudeCacheTTL is the window the Claude head anchors ask for, read from the
+// operator's setting rather than fixed, so a 1h cache is a config change and
+// not a rebuild. The chat handler holds the saver config; a handler without one
+// (tests) reads as the 5m default.
+func (h *ChatHandler) claudeCacheTTL() string {
+	if h.TokenSaver == nil {
+		return translator.ClaudeCacheTTL5m
+	}
+	return h.TokenSaver.ClaudeCacheTTL()
+}
+
+// recordPersonaInjection accounts for a persona/system-prompt injection that
+// added tokens: the saving numbers are recomputed from the lengths so the
+// reported saving stays truthful even when the saver made the request bigger.
+func recordPersonaInjection(origTokens, savedTokens *int, beforeLen, afterLen int) {
+	if afterLen <= beforeLen {
+		return
+	}
+	added := (afterLen - beforeLen) / 4
+	if added <= 0 {
+		return
+	}
+	*origTokens += added
+	*savedTokens -= added
+	if *savedTokens < 0 {
+		*savedTokens = 0
+	}
+}
+
+// opencodeCarrierRetryAfter reads a Retry-After header in either form the HTTP
+// spec allows: delta-seconds, or an HTTP-date whose distance from now is the
+// wait. It reports ok=false when the header is absent or unreadable.
+func opencodeCarrierRetryAfter(h http.Header, now time.Time) (time.Duration, bool) {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if when, err := http.ParseTime(raw); err == nil {
+		if wait := when.Sub(now); wait > 0 {
+			return wait, true
+		}
+	}
+	return 0, false
 }

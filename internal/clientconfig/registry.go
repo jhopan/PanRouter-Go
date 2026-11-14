@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// The nine clients `connect` targets, in the order
-// docs/specs/client-schema-matrix.md §1.1 lists them. The list is the source of
-// truth that `--tools` validates against, and `all` expands to it.
+// The clients the dashboard's /api/cli-tools/<id>-settings routes and
+// `connect --tools` share, in the order the adapter files were added. The list
+// is the source of truth that `--tools` validates against, `all` expands to it,
+// and internal/handlers/router.go registers one route per entry.
 //
 // Aliases come from the same place (connectTools.js:540-543): they exist
 // because users type both forms, and refusing one of them would be a needless
@@ -24,6 +25,20 @@ var adapterFactories = []func() Adapter{
 	newClineAdapter,
 	newPiAdapter,
 	newOmpAdapter,
+	// The clients whose upstream dashboard routes exist but which `connect`
+	// never grew an adapter for. They are here so clientconfig.IDs() is the one
+	// list both `connect --tools` and the dashboard's /api/cli-tools routes
+	// read (internal/handlers/router.go registers one route per id).
+	newCodeWhaleAdapter,
+	newCopilotAdapter,
+	newCoworkAdapter,
+	newDeepSeekTUIAdapter,
+	newDevinAdapter,
+	newForgeAdapter,
+	newGrokBuildAdapter,
+	newJCodeAdapter,
+	newOpenClawAdapter,
+	newSmeltAdapter,
 }
 
 // adapterAliases maps every accepted spelling to its canonical id.
@@ -43,6 +58,21 @@ var adapterAliases = map[string]string{
 	"pi-coding-agent": "pi",
 	"omp":             "omp",
 	"oh-my-pi":        "omp",
+	"codewhale":       "codewhale",
+	"code-whale":      "codewhale",
+	"copilot":         "copilot",
+	"github-copilot":  "copilot",
+	"cowork":          "cowork",
+	"deepseek-tui":    "deepseek-tui",
+	"deepseek":        "deepseek-tui",
+	"devin":           "devin",
+	"forge":           "forge",
+	"forgecode":       "forge",
+	"grok-build":      "grok-build",
+	"grok":            "grok-build",
+	"jcode":           "jcode",
+	"openclaw":        "openclaw",
+	"smelt":           "smelt",
 }
 
 // registry is built once: the adapters are stateless values, so a shared map is

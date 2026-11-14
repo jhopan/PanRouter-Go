@@ -1,6 +1,6 @@
 package headroom
 
-// Live probe against a real Headroom proxy. Skipped unless NINEROUTER_HEADROOM_LIVE
+// Live probe against a real Headroom proxy. Skipped unless PANROUTER_HEADROOM_LIVE
 // is set, because it needs a proxy process the test cannot start.
 
 import (
@@ -13,9 +13,9 @@ import (
 )
 
 func TestLiveCompressAgainstRealProxy(t *testing.T) {
-	url := os.Getenv("NINEROUTER_HEADROOM_LIVE")
+	url := os.Getenv("PANROUTER_HEADROOM_LIVE")
 	if url == "" {
-		t.Skip("set NINEROUTER_HEADROOM_LIVE=http://127.0.0.1:8787 to run")
+		t.Skip("set PANROUTER_HEADROOM_LIVE=http://127.0.0.1:8787 to run")
 	}
 	lines := make([]string, 200)
 	for i := range lines {
@@ -27,7 +27,7 @@ func TestLiveCompressAgainstRealProxy(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user", "content": "Here is a long build log:\n" + strings.Join(lines, "\n") + "\nWhat failed?"}},
 	})
 
-	c := NewClient(url, "", nil)
+	c := NewClientWithEngine(url, "", nil, EngineExternal)
 	out, compressed, err := c.Compress(context.Background(), body, "gpt-4o", 8000)
 	t.Logf("in=%d out=%d compressed=%v err=%v", len(body), len(out), compressed, err)
 	if err != nil {
@@ -52,9 +52,9 @@ func TestLiveCompressAgainstRealProxy(t *testing.T) {
 }
 
 func TestLiveGuardStopsRealProxy(t *testing.T) {
-	url := os.Getenv("NINEROUTER_HEADROOM_LIVE")
+	url := os.Getenv("PANROUTER_HEADROOM_LIVE")
 	if url == "" {
-		t.Skip("set NINEROUTER_HEADROOM_LIVE to run")
+		t.Skip("set PANROUTER_HEADROOM_LIVE to run")
 	}
 	// Same long log, but carried by a Read tool result. If the guard works the
 	// proxy is never contacted; the body comes back byte-identical.
@@ -69,7 +69,7 @@ func TestLiveGuardStopsRealProxy(t *testing.T) {
 		},
 	})
 
-	c := NewClient(url, "", nil)
+	c := NewClientWithEngine(url, "", nil, EngineExternal)
 	out, compressed, err := c.Compress(context.Background(), body, "gpt-4o", 8000)
 	if err != nil {
 		t.Fatalf("guard must fail open: %v", err)

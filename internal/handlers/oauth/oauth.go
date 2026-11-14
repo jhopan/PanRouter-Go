@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,6 +22,24 @@ import (
 // OAuthHandler handles OAuth token import and social auth exchange endpoints.
 type OAuthHandler struct {
 	Repo *db.Repo
+
+	// ZedCloudBase overrides the cloud.zed.dev origin the Zed lanes validate a
+	// session against. Empty means the real host; tests point it at a stub.
+	ZedCloudBase string
+	// ZedCredentials reads the local Zed IDE session for auto-import. Nil means
+	// the platform reader, which reads this machine's secret store.
+	ZedCredentials ZedCredentialReader
+
+	// mimoHop performs one upstream leg of the Xiaomi login walk. Nil means the
+	// real HTTPS hop; a test injects canned redirects so the route is exercised
+	// without reaching the account host.
+	mimoHop func(ctx context.Context, sess *mimoLoginSession, target, ua string) (mimoHopResult, error)
+	// mimoPoll reads the signed-in identity out of a login session. Nil means
+	// the session's own cookie jar; a test injects pending -> complete.
+	mimoPoll func(sess *mimoLoginSession) *mimoIdentity
+	// mimoProxyProbe looks for a local HTTP proxy for non-CN clusters. Nil means
+	// the local-port probe.
+	mimoProxyProbe func(ctx context.Context) string
 }
 
 // NewOAuthHandler initializes an OAuthHandler.

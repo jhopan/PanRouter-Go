@@ -122,7 +122,7 @@ if [[ -z "$BASE_URL" ]]; then
   # The real probe. No -f: an invalid userToken answers 401, and that body is
   # the diagnostic — curl -f would discard it and print a bare "exit 22".
   probe="$(curl -sS -X POST "http://127.0.0.1:$PORT/api/providers/validate" \
-    -H "x-9r-cli-token: $cli_token" -H 'Content-Type: application/json' \
+    -H "x-panrouter-cli-token: $cli_token" -H 'Content-Type: application/json' \
     -d "{\"provider\":\"$PROVIDER\",\"apiKey\":$token_json}")"
   echo "$probe"
   case "$probe" in
@@ -139,7 +139,7 @@ fi
 echo "== registering the connection"
 [[ -z "$BASE_URL" ]] || echo "   (baseUrl override: $BASE_URL)"
 conn="$(curl -fsS -X POST "http://127.0.0.1:$PORT/api/connections" \
-  -H "x-9r-cli-token: $cli_token" -H 'Content-Type: application/json' \
+  -H "x-panrouter-cli-token: $cli_token" -H 'Content-Type: application/json' \
   -d "{\"name\":\"DeepSeek Web\",\"provider\":\"$PROVIDER\",\"priority\":0,\"isActive\":true,\"data\":{\"apiKey\":$token_json$base_url_field}}" \
   | python -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 echo "connection $conn registered"
@@ -147,7 +147,7 @@ echo "connection $conn registered"
 echo "== minting an engine key for the chat calls (/v1/* wants a client key, not the CLI token)"
 key="sk-live-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 curl -fsS -X POST "http://127.0.0.1:$PORT/api/keys" \
-  -H "x-9r-cli-token: $cli_token" -H 'Content-Type: application/json' \
+  -H "x-panrouter-cli-token: $cli_token" -H 'Content-Type: application/json' \
   -d "{\"name\":\"ds-live\",\"key\":\"$key\"}" >/dev/null
 
 echo "== one real turn, streaming"

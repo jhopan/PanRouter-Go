@@ -90,19 +90,19 @@ func TestCodebuddyHeaders_ChannelVerification(t *testing.T) {
 	cnCfg := &providers.ProviderConfig{BaseURL: "https://copilot.tencent.com/v2/chat/completions"}
 	intlCfg := &providers.ProviderConfig{BaseURL: "https://www.codebuddy.ai/v2/chat/completions"}
 
-	cnReq := &Request{Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
-	intlReq := &Request{Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
+	cnReq := &Request{Provider: "codebuddy-cn", Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
+	intlReq := &Request{Provider: "codebuddy-intl", Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 
 	cnHeaders := codebuddyHeaders(cnReq, cnCfg, cnReq.Body)
 	intlHeaders := codebuddyHeaders(intlReq, intlCfg, intlReq.Body)
 
-	if cnHeaders["User-Agent"] != "CLI/2.108.1 CodeBuddy/2.108.1" {
+	if cnHeaders["User-Agent"] != "CLI/2.178.0 CodeBuddy/2.178.0" {
 		t.Errorf("cn User-Agent = %q", cnHeaders["User-Agent"])
 	}
-	if cnHeaders["X-App"] != "cli" {
-		t.Errorf("cn X-App = %q", cnHeaders["X-App"])
+	if _, ok := cnHeaders["X-App"]; ok {
+		t.Errorf("cn X-App = %q, want it absent (the official CLI never sends it)", cnHeaders["X-App"])
 	}
-	if cnHeaders["X-IDE-Type"] != "CLI" || cnHeaders["X-IDE-Name"] != "CLI" || cnHeaders["X-IDE-Version"] != "2.108.1" {
+	if cnHeaders["X-IDE-Type"] != "CLI" || cnHeaders["X-IDE-Name"] != "CLI" || cnHeaders["X-IDE-Version"] != "2.178.0" {
 		t.Errorf("cn IDE headers mismatch: type=%q name=%q ver=%q", cnHeaders["X-IDE-Type"], cnHeaders["X-IDE-Name"], cnHeaders["X-IDE-Version"])
 	}
 	if cnHeaders["X-Domain"] != "copilot.tencent.com" {
@@ -121,13 +121,19 @@ func TestCodebuddyHeaders_ChannelVerification(t *testing.T) {
 		t.Errorf("cn Agent headers mismatch: intent=%q purpose=%q", cnHeaders["X-Agent-Intent"], cnHeaders["X-Agent-Purpose"])
 	}
 
-	if intlHeaders["User-Agent"] != "CLI/2.108.1 CodeBuddy/2.108.1" {
+	if intlHeaders["User-Agent"] != "CLI/2.178.0 CodeBuddy/2.178.0" {
 		t.Errorf("intl User-Agent = %q", intlHeaders["User-Agent"])
+	}
+	if intlHeaders["X-IDE-Version"] != "2.178.0" {
+		t.Errorf("intl X-IDE-Version = %q", intlHeaders["X-IDE-Version"])
 	}
 	if intlHeaders["X-Domain"] != "www.codebuddy.ai" {
 		t.Errorf("intl X-Domain = %q, want www.codebuddy.ai", intlHeaders["X-Domain"])
 	}
-	if !hex32RE.MatchString(intlHeaders["X-Request-ID"]) {
-		t.Errorf("intl X-Request-ID = %q, want 32 hex chars", intlHeaders["X-Request-ID"])
+	if !uuidRE.MatchString(intlHeaders["X-Request-ID"]) {
+		t.Errorf("intl X-Request-ID = %q, want a uuid", intlHeaders["X-Request-ID"])
+	}
+	if _, ok := intlHeaders["X-App"]; ok {
+		t.Errorf("intl X-App = %q, want it absent", intlHeaders["X-App"])
 	}
 }
