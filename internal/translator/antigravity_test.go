@@ -3,6 +3,7 @@ package translator_test
 import (
 	json "encoding/json/v2"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -212,26 +213,184 @@ func TestAntigravityImageModelAndConfig(t *testing.T) {
 	}
 }
 
-func TestWrapForAntigravity_OmitsAgentRequestType(t *testing.T) {
-	// Port of decolua/9router#3986: requestType="agent" triggers a false
-	// upstream 429 bucket on OMP harness payloads, so it must be omitted.
+// TestWrapForAntigravity_AgentIdentity pins the envelope identity the shipped
+// Hub 2.32.1 sends (open-sse/executors/antigravity.js): requestType "agent"
+// together with the labels bag inside the request, and a requestId in the
+// agent/<conversation>/<epoch_ms>/<trajectory>/<step> shape.
+//
+// The earlier port omitted requestType entirely, reading decolua/9router#3986
+// as "never send agent". Upstream's newer capture is the opposite: requestType
+// WITHOUT the labels is what Google answered with a detail-free 429, so the two
+// travel together.
+func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
 	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-medium")
+	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-medium", "sess-1")
 	if err != nil {
 		t.Fatalf("WrapForAntigravity failed: %v", err)
-	}
-	if strings.Contains(string(wrapped), `"requestType"`) {
-		t.Errorf("expected no requestType field in envelope, got %s", string(wrapped))
 	}
 	var req translator.AntigravityRequest
 	if err := json.Unmarshal(wrapped, &req); err != nil {
 		t.Fatalf("unmarshal wrapper: %v", err)
 	}
-	if req.RequestType != "" {
-		t.Errorf("expected empty RequestType, got %q", req.RequestType)
+	if req.RequestType != "agent" {
+		t.Errorf("RequestType = %q, want agent", req.RequestType)
 	}
 	if !antigravityRequestIDRe.MatchString(req.RequestID) {
-		t.Errorf("request ID %q does not match UUID format", req.RequestID)
+		t.Errorf("request ID %q does not match the agent/<uuid>/<ms>/<uuid>/<step> shape", req.RequestID)
+	}
+
+	inner := unwrapInnerRequest(t, wrapped)
+	if got, _ := inner["sessionId"].(string); got != "sess-1" {
+		t.Errorf("inner sessionId = %q, want sess-1", got)
+	}
+	labels, _ := inner["labels"].(map[string]any)
+	if labels == nil {
+		t.Fatalf("labels bag missing from the request: %s", string(wrapped))
+	}
+	parts := strings.Split(req.RequestID, "/")
+	for key, want := range map[string]string{
+		"cascade_id":               parts[1],
+		"root_cascade_id":          parts[1],
+		"trajectory_id":            parts[3],
+		"last_step_index":          strconv.Itoa(atoiOr(parts[4], 1) - 1),
+		"request_id":               parts[3] + "-" + strconv.Itoa(atoiOr(parts[4], 1)-1),
+		"used_claude":              "false",
+		"used_claude_conservative": "false",
+		"used_non_gemini_model":    "false",
+	} {
+		if got, _ := labels[key].(string); got != want {
+			t.Errorf("labels[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestWrapForAntigravity_LabelFlagsFollowTheModelFamily pins the used_* flags:
+// they are what tells the backend which model family the trajectory belongs to.
+func TestWrapForAntigravity_LabelFlagsFollowTheModelFamily(t *testing.T) {
+	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("WrapForAntigravity failed: %v", err)
+	}
+	labels, _ := unwrapInnerRequest(t, wrapped)["labels"].(map[string]any)
+	if labels == nil {
+		t.Fatal("labels bag missing")
+	}
+	if got, _ := labels["used_claude"].(string); got != "true" {
+		t.Errorf("used_claude = %q, want true for a claude model", got)
+	}
+	if got, _ := labels["used_non_gemini_model"].(string); got != "true" {
+		t.Errorf("used_non_gemini_model = %q, want true for a claude model", got)
+	}
+}
+
+// TestWrapForAntigravity_KeepsIncomingRequestID: a payload that already names
+// its trajectory keeps it, ids and all. Minting a fresh one splits one
+// conversation across two upstream trajectories.
+func TestWrapForAntigravity_KeepsIncomingRequestID(t *testing.T) {
+	const incoming = "agent/11111111-1111-4111-8111-111111111111/1794000000000/22222222-2222-4222-8222-222222222222/7"
+	geminiBody := []byte(`{"requestId":"` + incoming + `","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-medium", "sess-1")
+	if err != nil {
+		t.Fatalf("WrapForAntigravity failed: %v", err)
+	}
+	var req translator.AntigravityRequest
+	if err := json.Unmarshal(wrapped, &req); err != nil {
+		t.Fatalf("unmarshal wrapper: %v", err)
+	}
+	if req.RequestID != incoming {
+		t.Errorf("RequestID = %q, want the incoming id %q", req.RequestID, incoming)
+	}
+	labels, _ := unwrapInnerRequest(t, wrapped)["labels"].(map[string]any)
+	if got, _ := labels["trajectory_id"].(string); got != "22222222-2222-4222-8222-222222222222" {
+		t.Errorf("trajectory_id = %q, want the incoming trajectory", got)
+	}
+	if got, _ := labels["last_step_index"].(string); got != "6" {
+		t.Errorf("last_step_index = %q, want 6 (step 7)", got)
+	}
+}
+
+// atoiOr parses s, returning fallback when s is not a positive integer.
+func atoiOr(s string, fallback int) int {
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// TestAntigravityImageInput pins upstream's resolveImageInput: a data URI is
+// split into its mime type and payload, a bare base64 string keeps the png
+// default, and anything else resolves to no image part rather than an
+// undecodable inlineData body.
+func TestAntigravityImageInput(t *testing.T) {
+	long := strings.Repeat("A", 120)
+	tests := []struct {
+		name     string
+		input    string
+		wantMime string
+		wantData string
+		wantOK   bool
+	}{
+		{name: "png data uri", input: "data:image/png;base64,aGVsbG8=", wantMime: "image/png", wantData: "aGVsbG8=", wantOK: true},
+		{name: "jpeg data uri keeps its label", input: "data:image/jpeg;base64,/9j/4AAQ", wantMime: "image/jpeg", wantData: "/9j/4AAQ", wantOK: true},
+		{name: "bare base64 defaults to png", input: long, wantMime: "image/png", wantData: long, wantOK: true},
+		{name: "empty", input: "", wantOK: false},
+		{name: "too short to be an image", input: "aGVsbG8=", wantOK: false},
+		{name: "http url", input: "http://example.com/" + long, wantOK: false},
+		{name: "data uri with a non-image mime", input: "data:application/pdf;base64,JVBERi0=", wantOK: false},
+		{name: "long non-image data uri", input: "data:application/pdf;base64," + long, wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mime, data, ok := translator.AntigravityImageInput(tt.input)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if mime != tt.wantMime || data != tt.wantData {
+				t.Errorf("resolved (%q, %q), want (%q, %q)", mime, data, tt.wantMime, tt.wantData)
+			}
+		})
+	}
+}
+
+// TestWrapAntigravityImageRequest_DataURIIsSplit pins the wire: the inlineData
+// part carries the caller's own mime type and the payload alone.
+func TestWrapAntigravityImageRequest_DataURIIsSplit(t *testing.T) {
+	wrapped, err := translator.WrapAntigravityImageRequest("edit this", "data:image/jpeg;base64,/9j/4AAQSkZJRg==", "proj-1", "gemini-3.1-flash-image", "1:1")
+	if err != nil {
+		t.Fatalf("WrapAntigravityImageRequest failed: %v", err)
+	}
+	var req translator.AntigravityRequest
+	if err := json.Unmarshal(wrapped, &req); err != nil {
+		t.Fatalf("unmarshal wrapper: %v", err)
+	}
+	var inner struct {
+		Contents []struct {
+			Parts []struct {
+				InlineData *struct {
+					MimeType string `json:"mimeType"`
+					Data     string `json:"data"`
+				} `json:"inlineData"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(req.Request, &inner); err != nil {
+		t.Fatalf("unmarshal inner request: %v", err)
+	}
+	if len(inner.Contents) != 1 || len(inner.Contents[0].Parts) != 2 {
+		t.Fatalf("expected an image part and a prompt part, got %+v", inner.Contents)
+	}
+	image := inner.Contents[0].Parts[0].InlineData
+	if image == nil {
+		t.Fatalf("first part is not inlineData: %+v", inner.Contents[0].Parts)
+	}
+	if image.MimeType != "image/jpeg" || image.Data != "/9j/4AAQSkZJRg==" {
+		t.Errorf("inlineData = (%q, %q), want (image/jpeg, /9j/4AAQSkZJRg==)", image.MimeType, image.Data)
 	}
 }
 
@@ -776,8 +935,8 @@ func TestWrapForAntigravity_CapAndRequestID(t *testing.T) {
 	if gc == nil {
 		t.Fatal("generationConfig missing")
 	}
-	if v, _ := gc["maxOutputTokens"].(float64); v != 64000 {
-		t.Errorf("expected maxOutputTokens capped to 64000, got %v", gc["maxOutputTokens"])
+	if v, _ := gc["maxOutputTokens"].(float64); v != 65536 {
+		t.Errorf("expected maxOutputTokens capped to 65536 (the Hub's own figure), got %v", gc["maxOutputTokens"])
 	}
 	// The tier must NOT be injected as a thinking config: gemini-3.7-flash-tiered
 	// is always-thinking, and injecting thinkingConfig triggers strict thought

@@ -265,6 +265,13 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 		// row never matches and the request falls through to the configured
 		// strategy. Honouring the pin unconditionally made the dashboard's
 		// enable/disable toggle a no-op for every pinned request.
+		//
+		// The pre-skip re-verification covers the pin too: its filter reads the
+		// same quota cache, and upstream runs it before the filter for every
+		// candidate.
+		if provider == "antigravity" {
+			h.revalidateAntigravitySkips(ctx, []*models.ProviderConnection{conn}, model)
+		}
 		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model, serviceKind)
 		if ineligible && isProbe && conn.IsActive == 1 && !slices.Contains(excludeIDs, conn.ID) {
 			// A reauth_required account whose park has run out returns as a
@@ -360,6 +367,16 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 			if len(connections) == 0 {
 				return nil, nil, fmt.Errorf("no active connections for provider: %s", provider)
 			}
+		}
+
+		// Antigravity: verify the cached exhausted buckets we are about to skip
+		// on (upstream auth.js, before its availability filter). The skip below
+		// refuses an account on a cached 0%, and that refusal is what keeps the
+		// cache from ever being refreshed — so a stale 0% used to freeze a
+		// healthy account until its own cached resetAt. Bounded per connection
+		// and fail-open.
+		if provider == "antigravity" {
+			h.revalidateAntigravitySkips(ctx, connections, model)
 		}
 
 		// Node state before rotation: a node whose contract has ended, or whose
@@ -557,6 +574,12 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 // empty model means nothing model-scoped applies (upstream parity: the lock
 // filter only runs for a model-bearing request).
 func (h *ChatHandler) connectionModelBlocked(c *models.ProviderConnection, provider, model string) bool {
+	// Google flagged the account as ineligible (VALIDATION_REQUIRED): it refuses
+	// every model until someone verifies it in a browser, so the skip is not
+	// model-scoped and comes first (upstream auth.js availability filter).
+	if provider == "antigravity" && antigravityIneligibleSkip(c.ID) {
+		return true
+	}
 	if model == "" {
 		return false
 	}
@@ -616,6 +639,11 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 	}
 	if until, ok := db.ConnectionBlockedUntil(conn.Data); ok && until.After(time.Now()) {
 		return true, "account cooldown until " + until.UTC().Format(time.RFC3339)
+	}
+	// A flagged account refuses every model, so this check is not model-scoped
+	// and runs before the empty-model early return.
+	if conn.Provider == "antigravity" && antigravityIneligibleSkip(conn.ID) {
+		return true, "account ineligible"
 	}
 	if model == "" {
 		return false, ""
@@ -719,6 +747,26 @@ func quotaCacheBlocked(provider, connectionID, model string) bool {
 		return IsCodexConnectionExhausted(connectionID)
 	}
 	return false
+}
+
+// revalidateAntigravitySkips re-verifies the cached exhausted buckets the
+// Antigravity pre-filter is about to skip on. Fail-open: a failed quota read
+// leaves the cache untouched, and the request proceeds exactly as it would have
+// without the re-verification.
+func (h *ChatHandler) revalidateAntigravitySkips(ctx context.Context, conns []*models.ProviderConnection, model string) {
+	if h == nil || model == "" || len(conns) == 0 {
+		return
+	}
+	now := agNow()
+	if !antigravityAnyExhaustedCached(conns, model, now) {
+		// Nothing cached is blocking anyone: decoding every row's token would be
+		// work for nothing on the requests that are not being skipped.
+		return
+	}
+	refresh := func(ctx context.Context, connectionID, accessToken, projectID string) (map[string]AntigravityModelQuota, error) {
+		return RefreshAntigravityQuota(ctx, h.Client, connectionID, accessToken, projectID)
+	}
+	RevalidateAntigravityExhausted(ctx, refresh, AntigravityRevalidateCandidates(conns), model, now)
 }
 
 func (h *ChatHandler) getSessionAffinity() *SessionAffinityStore {

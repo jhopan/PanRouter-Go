@@ -122,3 +122,79 @@ func TestHandleImage_Antigravity(t *testing.T) {
 		t.Errorf("expected base64 PNG data, got %s", resp.Data[0].B64JSON)
 	}
 }
+
+// TestHandleImage_Antigravity_DataURIImageIsSplitForTheWire: an image edit
+// arrives as a data URI. The gateway must hand the backend the declared mime
+// type and the payload alone — sending the whole URI put
+// "data:image/jpeg;base64," into the base64 field (undecodable) and labelled a
+// JPEG as image/png.
+func TestHandleImage_Antigravity_DataURIImageIsSplitForTheWire(t *testing.T) {
+	const payload = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+	var gotMime, gotData string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody struct {
+			Request struct {
+				Contents []struct {
+					Parts []struct {
+						InlineData *struct {
+							MimeType string `json:"mimeType"`
+							Data     string `json:"data"`
+						} `json:"inlineData"`
+					} `json:"parts"`
+				} `json:"contents"`
+			} `json:"request"`
+		}
+		if err := json.UnmarshalRead(r.Body, &reqBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		if len(reqBody.Request.Contents) > 0 && len(reqBody.Request.Contents[0].Parts) > 0 {
+			if in := reqBody.Request.Contents[0].Parts[0].InlineData; in != nil {
+				gotMime, gotData = in.MimeType, in.Data
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo"}}]}}]}}`))
+	}))
+	defer upstream.Close()
+
+	ag := providers.KnownProviders["antigravity"]
+	origBase := ag.BaseURL
+	ag.BaseURL = upstream.URL
+	providers.KnownProviders["antigravity"] = ag
+	defer func() {
+		ag.BaseURL = origBase
+		providers.KnownProviders["antigravity"] = ag
+	}()
+
+	database, cleanup := setupMultimodalTestDB(t)
+	defer cleanup()
+
+	connData, _ := json.Marshal(map[string]any{
+		"apiKey":    "ag-token-img-123",
+		"projectId": "test-image-proj",
+	})
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-ag-img-edit', 'antigravity', 'oauth', 'Antigravity Image Edit', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(connData)); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	handler := newTestMediaHandler(repo)
+
+	body := `{"model":"antigravity/gemini-3.1-flash-image","prompt":"make it blue","image":"data:image/jpeg;base64,` + payload + `"}`
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleImages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotMime != "image/jpeg" {
+		t.Errorf("inlineData mimeType = %q, want image/jpeg", gotMime)
+	}
+	if gotData != payload {
+		t.Errorf("inlineData data = %q, want the payload alone", gotData)
+	}
+}

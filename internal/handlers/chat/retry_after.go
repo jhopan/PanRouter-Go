@@ -243,12 +243,145 @@ func retryAfterWait(ue *upstreamError) (time.Duration, bool) {
 		}
 	}
 	note(parseRetryAfterHeader(ue.Header.Get("Retry-After")))
+	note(parseRateLimitResetHeaders(ue.Header))
+	note(quotaResetTimestamp(ue.Body))
 	note(retryInfoDelay(ue.Body))
 	// extractRetryAfter already resolves quotaResetDelay, "Resets in X" and the
 	// retryAfter/retry_after/resetsAt/resets_at fields; re-reading its string
 	// keeps one owner of the field names.
 	note(parseRetryAfterValue(extractRetryAfter(ue.Body)))
 	return longest, found
+}
+
+// parseRateLimitResetHeaders reads the two carriers Google and OpenAI-style
+// gateways put beside Retry-After, which the executor's parseRetryHeaders also
+// reads: `x-ratelimit-reset-after` is a delta in seconds and
+// `x-ratelimit-reset` is an epoch in seconds. Without them a response that
+// announced its window only in these headers left the account on the burst
+// backoff.
+func parseRateLimitResetHeaders(h http.Header) (time.Duration, bool) {
+	if h == nil {
+		return 0, false
+	}
+	if v := strings.TrimSpace(h.Get("x-ratelimit-reset-after")); v != "" {
+		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
+			return time.Duration(secs * float64(time.Second)), true
+		}
+	}
+	if v := strings.TrimSpace(h.Get("x-ratelimit-reset")); v != "" {
+		if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+			if wait := time.Until(time.Unix(secs, 0)); wait > 0 {
+				return wait, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// rateLimitDetail is one google.rpc detail of a rate-limit body; only the
+// ErrorInfo metadata bag is read.
+type rateLimitDetail struct {
+	Metadata map[string]string `json:"metadata"`
+}
+
+// rateLimitDetails returns the detail list of a 409/429 body, reading both the
+// wrapped shape Google sends (`error.details`) and the unwrapped one some relays
+// forward instead.
+func rateLimitDetails(body []byte) []rateLimitDetail {
+	if len(body) == 0 {
+		return nil
+	}
+	var envelope struct {
+		Details []rateLimitDetail `json:"details"`
+		Error   struct {
+			Details []rateLimitDetail `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	if len(envelope.Error.Details) > 0 {
+		return envelope.Error.Details
+	}
+	return envelope.Details
+}
+
+// quotaResetInstant returns the exact instant a 409/429 body names, in the
+// order upstream's Antigravity parseError reads the carriers
+// (open-sse/executors/antigravity.js:455-503): the ErrorInfo
+// `quotaResetTimeStamp`, then the RetryInfo `retryDelay`, then the
+// `quotaResetDelay` delay prose.
+//
+// The instant is the bucket's own end, not a retry window, so nothing is
+// clamped here. retryAfterWait's duration is what the ACCOUNT cooldown uses, and
+// that path keeps its ceilings; a model-level park that clamped a multi-day
+// exhaustion to the generic two-hour window would put the account back into
+// rotation while it is still empty — the next request is a guaranteed-failing
+// round trip.
+//
+// Callers pass the body of a 409/429. Other statuses carry no quota reset.
+func quotaResetInstant(body []byte, now time.Time) (time.Time, bool) {
+	if wait, ok := quotaResetTimestamp(body); ok {
+		return now.Add(wait), true
+	}
+	if dur, ok := retryInfoDelay(body); ok {
+		return now.Add(dur), true
+	}
+	if dur, ok := quotaResetDelay(body); ok {
+		return now.Add(dur), true
+	}
+	return time.Time{}, false
+}
+
+// quotaResetDelay reads the ErrorInfo `quotaResetDelay` ("74h19m34.031069133s")
+// without the two-hour clamp extractResetDuration applies, so the park path can
+// last as long as the bucket it names.
+func quotaResetDelay(body []byte) (time.Duration, bool) {
+	for _, d := range rateLimitDetails(body) {
+		if dur, ok := parseDurationString(d.Metadata["quotaResetDelay"]); ok {
+			return dur, true
+		}
+	}
+	return 0, false
+}
+
+// quotaResetTimestamp reads the precise reset Google puts on a 409/429 body:
+// `details[].metadata.quotaResetTimeStamp`, an ISO-8601 instant. Antigravity's
+// generation endpoint answers RESOURCE_EXHAUSTED with that field — usually
+// beside `quotaResetDelay` and a google.rpc.RetryInfo `retryDelay` — and the
+// executor's parseError takes the instant over the live quota API, which has no
+// per-model row for a free-tier account.
+//
+// The other two carriers were already read (extractResetDuration reads
+// quotaResetDelay, retryInfoDelay reads the RetryInfo detail), so a body that
+// named ONLY the instant left the account with no cooldown at all:
+// retryableCooldownSec fell back to the classifier's two-second base and the
+// same exhausted account absorbed the next request.
+//
+// Google nests the details under `error.details`; some relays surface them
+// unwrapped at the top level, and the executor tolerates both. A stamp already
+// in the past names no future window, so it is skipped rather than clamped to
+// the five-second floor — upstream skips it too and falls through to the
+// message patterns.
+func quotaResetTimestamp(body []byte) (time.Duration, bool) {
+	details := rateLimitDetails(body)
+	if len(details) == 0 {
+		return 0, false
+	}
+	for _, d := range details {
+		raw := strings.TrimSpace(d.Metadata["quotaResetTimeStamp"])
+		if raw == "" {
+			continue
+		}
+		reset, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			continue
+		}
+		if wait := time.Until(reset); wait > 0 {
+			return wait, true
+		}
+	}
+	return 0, false
 }
 
 // retryInfoDelay reads the google.rpc.RetryInfo detail a rate-limited Gemini

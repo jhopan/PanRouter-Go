@@ -302,6 +302,13 @@ func (h *MediaHandler) tryAntigravitySearchConn(w http.ResponseWriter, r *http.R
 		if h.Repo != nil {
 			backoff = h.Repo.GetConnectionBackoffLevel(conn.ID)
 		}
+		if resp.StatusCode == http.StatusForbidden {
+			// The refusal is also the eligibility gate: record the verdict so the
+			// chat pre-filter skips this account before spending a request on it,
+			// and carry the appeal link the ban detector validates when the body
+			// has one (upstream records this from its usage reading).
+			chat.RecordAntigravityEligibility(conn.ID, chat.AntigravityVerdictFromErrorBody(respBody))
+		}
 		classification := providers.ClassifyError(resp.StatusCode, errText, backoff)
 		if classification.ShouldFallback && h.Repo != nil && !handlerutil.IsProbeContext(r.Context()) {
 			lockModel := translator.NormalizeAntigravityModel(model)

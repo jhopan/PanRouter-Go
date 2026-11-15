@@ -766,7 +766,23 @@ export interface ConnectionQuotaInfo {
 export interface ConnectionUsageResponse {
   plan?: string
   quotas?: Record<string, ConnectionQuotaInfo> | ConnectionQuotaInfo[]
+  message?: string
   error?: string
+  /**
+   * Antigravity account eligibility, as Google reported it on this reading.
+   *
+   * `eligible: false` means the account is flagged and refuses every model until
+   * it is verified in a browser (reasonCode "VALIDATION_REQUIRED"); the
+   * `validationUrl` is the one-use link for that. `eligible: true` means the
+   * reading looked and found the account healthy. The key is ABSENT when the
+   * reading had no opinion — the quota API is not asked about eligibility on
+   * every poll — which is not the same as healthy, and the badge stays off.
+   */
+  ineligible?: {
+    eligible?: boolean
+    reasonCode?: string
+    validationUrl?: string
+  }
 }
 
 // Usage dashboard (Details section): heatmap cells, lifetime cards, node health.

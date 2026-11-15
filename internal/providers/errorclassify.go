@@ -120,6 +120,29 @@ var ErrorRules = []ErrorRule{
 	// into an error) must not park a healthy connection. The real Google
 	// ban carries the "disabled in this account" sentence above plus the
 	// cloudcode-pa domain, which is what parks the account for 24h.
+	//
+	// Antigravity names transient faults in the BODY, not in the status:
+	// upstream's executor retries on ANTIGRAVITY_TRANSIENT_ERROR_PATTERNS
+	// regardless of the code (open-sse/executors/antigravity.js:26-42,
+	// isTransientAntigravityError:545-549), so "high traffic" or an agent
+	// turn that Google terminated arrives as a plain 400 and, without these
+	// rows, would be classified request-scoped and surfaced to the client
+	// without trying another account. Provider-scoped on purpose: the
+	// identical words in another lane's body ("timeout", "capacity") are not
+	// evidence that its fault is transient, and widening a shared rule would
+	// re-classify every provider's 4xx. The 429 rows below are untouched, so
+	// a rate limit keeps its own semantics (CodeBuddy's 429 never rotates —
+	// stopsRotationOnRateLimit).
+	{Provider: "antigravity", Text: "high traffic", Backoff: true},
+	{Provider: "antigravity", Text: "agent execution terminated due to error", Backoff: true},
+	{Provider: "antigravity", Text: "agent terminated due to error", Backoff: true},
+	{Provider: "antigravity", Text: "temporarily unavailable", Backoff: true},
+	{Provider: "antigravity", Text: "timeout", Backoff: true},
+	{Provider: "antigravity", Text: "stream ended", Backoff: true},
+	{Provider: "antigravity", Text: "stream closed", Backoff: true},
+	{Provider: "antigravity", Text: "stream terminated", Backoff: true},
+	{Provider: "antigravity", Text: "stream interrupted", Backoff: true},
+	{Provider: "antigravity", Text: "empty response", Backoff: true},
 	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
 	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
 	{Text: "insufficient_quota", CooldownMs: cooldownLong},

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"panrouter/proxy/internal/handlers/chat"
+	"panrouter/proxy/internal/log"
 	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/proxy"
 )
@@ -36,6 +38,12 @@ type usageResult struct {
 	// bare mirrors upstream handlers (e.g. qoder) that return {message}
 	// with NO quotas key on error. Most handlers include quotas:{}.
 	bare bool
+	// ineligible is the eligibility verdict the reading established (upstream
+	// `result.ineligible`): nil means "no opinion", which clears a stale flag.
+	// It is read by the usage handler and check-and-release, and serialised to
+	// the dashboard, whose badge is the only place an operator learns the
+	// account needs a browser re-verification.
+	ineligible *chat.AntigravityEligibility
 }
 
 func (r usageResult) toResponse() map[string]any {
@@ -46,6 +54,7 @@ func (r usageResult) toResponse() map[string]any {
 		for k, v := range r.extra {
 			out[k] = v
 		}
+		r.attachEligibility(out)
 		return out
 	}
 	if r.message != "" {
@@ -59,9 +68,30 @@ func (r usageResult) toResponse() map[string]any {
 		if len(r.quotas) > 0 {
 			out["quotas"] = r.quotas
 		}
+		r.attachEligibility(out)
 		return out
 	}
-	return map[string]any{"plan": r.plan, "quotas": map[string]any{}}
+	out := map[string]any{"plan": r.plan, "quotas": map[string]any{}}
+	r.attachEligibility(out)
+	return out
+}
+
+// attachEligibility publishes the Antigravity eligibility verdict the reading
+// established. The shape is upstream's (src/app/api/usage/[connectionId]/
+// route.js): `eligible:false` with the reason code and the verification link
+// means Google flagged the account, `eligible:true` means the reading looked
+// and found it healthy, and an ABSENT key means "no opinion" — the badge stays
+// off and the operator learns nothing, which is the honest answer for a
+// payload that never mentioned eligibility.
+func (r usageResult) attachEligibility(out map[string]any) {
+	if r.ineligible == nil {
+		return
+	}
+	out["ineligible"] = map[string]any{
+		"eligible":      r.ineligible.Eligible,
+		"reasonCode":    r.ineligible.ReasonCode,
+		"validationUrl": r.ineligible.ValidationURL,
+	}
 }
 
 // fetchProviderUsage dispatches a live quota fetch for providers with a
@@ -1730,6 +1760,9 @@ type antigravitySubInfo struct {
 	projectID  string
 	plan       string
 	paidTierID string
+	// eligibility is the loadCodeAssist verdict: nil when the payload says
+	// nothing about eligibility (Google omitted ineligibleTiers/allowedTiers).
+	eligibility *chat.AntigravityEligibility
 }
 
 // fetchAntigravitySubInfo mirrors getAntigravitySubscriptionInfo: one loadCodeAssist
@@ -1749,6 +1782,15 @@ func fetchAntigravitySubInfo(ctx context.Context, accessToken string) antigravit
 	}
 	if paid, _ := data["paidTier"].(map[string]any); paid != nil {
 		sub.paidTierID, _ = paid["id"].(string)
+	}
+	// The official CLI reads ineligibleTiers here and stops; the verdict travels
+	// back to the caller so the pre-filter can park the account (upstream
+	// parseAntigravityEligibility, whose healthy case clears a stale flag).
+	sub.eligibility = chat.ParseAntigravityEligibility(data)
+	if sub.eligibility != nil && !sub.eligibility.Eligible {
+		log.Warn("ag_quota", "ACCOUNT VERIFICATION REQUIRED",
+			"reason", sub.eligibility.ReasonCode,
+			"verification", providers.RedactAppealURLs(sub.eligibility.ValidationURL))
 	}
 	return sub
 }
@@ -1770,16 +1812,29 @@ func fetchAntigravityDashboardUsage(ctx context.Context, accessToken, projectID 
 	}
 	status, body, err := usagePost(ctx, antigravityDailyBaseURL+"/v1internal:fetchAvailableModels", reqBody, headers)
 	if err != nil {
-		return usageResult{plan: plan, message: "Antigravity error: " + err.Error()}
+		return usageResult{plan: plan, message: "Antigravity error: " + err.Error(), ineligible: sub.eligibility}
 	}
 	if status == http.StatusForbidden {
-		return usageResult{plan: plan, message: "Antigravity quota API access forbidden. Chat may still work."}
+		// The quota endpoint refuses with VALIDATION_REQUIRED when Google wants the
+		// account verified in a browser (upstream
+		// parseAntigravityQuotaEligibility). The verdict rides back to the caller,
+		// which owns the connection id and records it.
+		verdict := chat.ParseAntigravityQuotaEligibility(body)
+		res := usageResult{plan: plan, message: "Antigravity quota API access forbidden. Chat may still work.", ineligible: verdict}
+		if verdict != nil {
+			reason := verdict.ReasonCode
+			if reason == "" {
+				reason = "VALIDATION_REQUIRED"
+			}
+			res.message = "Antigravity account needs verification: " + reason
+		}
+		return res
 	}
 	if status == http.StatusUnauthorized {
-		return usageResult{plan: plan, message: "Antigravity quota API authentication expired. Chat may still work."}
+		return usageResult{plan: plan, message: "Antigravity quota API authentication expired. Chat may still work.", ineligible: sub.eligibility}
 	}
 	if status < 200 || status >= 300 {
-		return usageResult{plan: plan, message: fmt.Sprintf("Antigravity error: quota API returned %d.", status)}
+		return usageResult{plan: plan, message: fmt.Sprintf("Antigravity error: quota API returned %d.", status), ineligible: sub.eligibility}
 	}
 	quotas := map[string]any{}
 	isFreeTier := sub.paidTierID == "" || sub.paidTierID == "free-tier"

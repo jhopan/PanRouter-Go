@@ -31,6 +31,7 @@
   import { getIconPath } from './connections/types'
   import EditConnectionModal, { type ConnectionUpdate } from './connections/EditConnectionModal.svelte'
   import QuotaTable from './quota/QuotaTable.svelte'
+  import AntigravityEligibilityBadge from './quota/AntigravityEligibilityBadge.svelte'
   import AutoPingScheduleModal, {
     type AutoPingSaveResult,
     type AutoPingSchedule,
@@ -200,6 +201,7 @@
   // Edit modal state. The modal itself owns its fields and payload (issue #158).
   let editingConnection = $state<ProviderConnection | null>(null)
   let copiedArnId = $state<string | null>(null)
+  let copiedVerifyId = $state<string | null>(null)
 
   // Timers
   let intervalTimer: ReturnType<typeof setInterval> | null = null
@@ -616,6 +618,17 @@
     copiedArnId = id
     setTimeout(() => {
       if (copiedArnId === id) copiedArnId = null
+    }, 2000)
+  }
+
+  // One verify link is copied at a time, and the tick is keyed on the
+  // connection so a second card's copy cannot light up the first card's icon.
+  function copyVerifyLink(text: string | null, id: string) {
+    if (!text) return
+    copyToClipboard(text)
+    copiedVerifyId = id
+    setTimeout(() => {
+      if (copiedVerifyId === id) copiedVerifyId = null
     }, 2000)
   }
 
@@ -1376,6 +1389,14 @@
                   {/if}
                   {#if getConnectionSecondaryLabel(conn)}
                     <p class="truncate text-[11px] text-text-muted/80">{formatEmailLabel(getConnectionSecondaryLabel(conn), $emailPrivacy)}</p>
+                  {/if}
+                  {#if conn.provider === 'antigravity'}
+                    {@const agVerdict = quota?.raw?.ineligible ?? null}
+                    <AntigravityEligibilityBadge
+                      ineligible={agVerdict}
+                      copied={copiedVerifyId === conn.id}
+                      onCopy={(url) => copyVerifyLink(url, conn.id)}
+                    />
                   {/if}
                   {#if conn.provider === 'kiro'}
                     <div class="mt-1 flex flex-wrap items-center gap-1">

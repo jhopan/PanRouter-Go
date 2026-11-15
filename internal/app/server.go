@@ -128,6 +128,14 @@ func ProvideServer(p ServerParams) *http.Server {
 			startModelHealthScheduler(shutdown.Context(), p.Repo, p.ChatHandler)
 			startUptimeHeartbeat(shutdown.Context(), p.Repo)
 			startHeadroomOnBoot(p.Repo, config.ResolveDataDir())
+			// The Antigravity caches persist two things a restart must not lose:
+			// the accounts Google flagged as ineligible (15m TTL) and the weekly
+			// buckets already spent (which can block for days). Both restores are
+			// fail-open — a KV error never prevents startup — and both drop the
+			// rows whose TTL or reset has already passed.
+			chat.SetAntigravityKVStore(p.Repo)
+			chat.RestoreAntigravityIneligible()
+			chat.LoadPersistedAntigravityQuota()
 			// The tamper-evident audit trail: one writer goroutine, a bounded
 			// queue, and the retention sweeper when a window is configured.
 			// It is started here rather than in a provider because it must run

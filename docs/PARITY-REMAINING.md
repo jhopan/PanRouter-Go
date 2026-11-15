@@ -34,6 +34,8 @@ Stack **Responses sudah tuntas** — diff 1, 2, 3, dan 4 semuanya terpush, `go b
 - **Claude:** reset grant free tier · guard `ANTHROPIC_AUTH_TOKEN`
 - **Codex:** multi model profile `~/.codex/*.config.toml`
 - **Dashboard:** combo limits · vision adapter tabel · Tailwind health wait · lazy-load chart · tray arm64
+- **Antigravity:** ✅ selesai — pre-filter eligibility (`antigravityCapCache`), kuota persisten `ag_quota`,
+  re-verify pra-skip, bucket Argon (lihat `.changes/907-antigravity-block-machinery.md`). Tidak ada gap tersisa di sini.
 - **Bug test `-count=2`** — dua hipotesis sudah ruled out, jangan diulang
 - **Penentuan "Responses-native" masih per-provider, upstream-nya per-koneksi** — lihat §6
 

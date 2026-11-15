@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"panrouter/proxy/internal/fetchgate"
+	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/log"
+	"panrouter/proxy/internal/models"
 	"panrouter/proxy/internal/providers"
 )
 
@@ -133,6 +135,11 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 			defer cancel()
 
 			res := fetchAntigravityDashboardUsage(ctx, accessToken, projectID)
+			// Feed the pre-filter from the same reading the dashboard shows: a
+			// flagged account is skipped before the next request goes out, and a
+			// healthy or no-opinion reading releases a stale flag. Upstream
+			// records the verdict at exactly this point (usage.js).
+			chat.RecordAntigravityEligibility(conn.ID, res.ineligible)
 			handlerutil.WriteJSON(w, http.StatusOK, res.toResponse())
 			return
 		}
@@ -162,10 +169,31 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 		}
 	}
 
-	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"plan":   conn.Provider,
-		"quotas": respQuotas,
-	})
+	handlerutil.WriteJSON(w, http.StatusOK, usageResult{
+		plan:       conn.Provider,
+		quotas:     respQuotas,
+		ineligible: antigravityCachedVerdict(conn),
+	}.toResponse())
+}
+
+// antigravityCachedVerdict returns the eligibility flag this deployment already
+// recorded for an Antigravity connection, or nil. The quota API is not asked
+// about eligibility on every dashboard poll — a token-less or locked connection
+// never reaches it — so a response with no reading of its own still surfaces the
+// flag (upstream src/app/api/usage/[connectionId]/route.js:216-222).
+//
+// The cached entry carries no verification link: the persisted row deliberately
+// holds no URL (see internal/providers/antigravity_ban.go, which treats the link
+// as a credential), so the badge shows the reason without one.
+func antigravityCachedVerdict(conn *models.ProviderConnection) *chat.AntigravityEligibility {
+	if conn == nil || conn.Provider != "antigravity" {
+		return nil
+	}
+	cached := chat.GetAntigravityIneligibility(conn.ID)
+	if cached == nil {
+		return nil
+	}
+	return &chat.AntigravityEligibility{ReasonCode: cached.ReasonCode, ValidationURL: cached.ValidationURL}
 }
 
 // HandleGetUsageProviders handles GET /api/usage/providers

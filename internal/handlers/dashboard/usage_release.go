@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/models"
 )
@@ -120,8 +121,27 @@ func (h *DashboardHandler) checkAndRelease(ctx context.Context, conn *models.Pro
 		}
 		usage := fetchAntigravityDashboardUsage(ctx, accessToken, projectID)
 		if usage.message != "" {
+			// The provider has spoken and still refuses the account (or the
+			// read failed): leave the flag exactly as the last reading set it.
 			return releaseResult{reason: usage.message, quotas: usage.quotas}, nil
 		}
+		if usage.ineligible != nil && !usage.ineligible.Eligible {
+			// Still flagged: the user has not verified the account yet, so the
+			// flag and every block stay in place.
+			chat.RecordAntigravityEligibility(conn.ID, usage.ineligible)
+			reason := usage.ineligible.ReasonCode
+			if reason == "" {
+				reason = "VALIDATION_REQUIRED"
+			}
+			if usage.ineligible.ValidationURL != "" {
+				return releaseResult{reason: "Still needs verification (" + reason + ") — open the verification link, then check again", quotas: usage.quotas}, nil
+			}
+			return releaseResult{reason: "Still needs verification (" + reason + ")", quotas: usage.quotas}, nil
+		}
+		// The account is eligible again: lift the cached flag and its row
+		// (upstream clearAntigravityIneligible on this path), then the
+		// connection's blocks.
+		chat.ClearAntigravityIneligible(conn.ID)
 		if err := h.Repo.ReleaseConnectionBlocks(conn.ID); err != nil {
 			return releaseResult{}, err
 		}

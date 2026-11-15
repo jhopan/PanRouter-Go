@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -13,9 +14,14 @@ import (
 	"panrouter/proxy/internal/log"
 )
 
-// maxAntigravityOutputTokens caps generationConfig.maxOutputTokens; Google's
-// Antigravity backend rejects larger values (parity with Next.js capabilities.js).
-const maxAntigravityOutputTokens = 64000
+// maxAntigravityOutputTokens caps generationConfig.maxOutputTokens. Google's
+// Antigravity backend rejects larger values, and the shipped Hub sends exactly
+// this figure on the agent path (open-sse/executors/antigravity.js
+// MAX_ANTIGRAVITY_OUTPUT_TOKENS, captured 2026-11-15). The port capped at 64000
+// — capabilities.js's *default* maxOutput, not the 65536 the Gemini 3/4 pattern
+// rows and the Hub both use — so a legitimate 65536 request was silently
+// trimmed by 1536 tokens.
+const maxAntigravityOutputTokens = 65536
 
 // thinkingHeadroomTokens is added on top of thinkingBudget when ensuring
 // maxOutputTokens strictly exceeds it (parity across chat and image paths).
@@ -23,6 +29,40 @@ const thinkingHeadroomTokens = 8192
 
 // antigravityDecoyUnavailable is the placeholder description for injected decoy tools.
 const antigravityDecoyUnavailable = "This tool is currently unavailable."
+
+// antigravityFunctionNameRe is the tail Gemini accepts after the first
+// character: everything outside [a-zA-Z0-9_.:-] is replaced, and the name is
+// truncated to 64 bytes in total.
+var antigravityFunctionNameRe = regexp.MustCompile(`[^a-zA-Z0-9_.:\-]`)
+
+// antigravityFunctionNameStartRe is the first character Gemini accepts.
+var antigravityFunctionNameStartRe = regexp.MustCompile(`^[a-zA-Z_]`)
+
+// antigravityFunctionNameMaxLen caps a function name at the 64 bytes Google
+// documents ([a-zA-Z_][a-zA-Z0-9_.:-]{0,63}).
+const antigravityFunctionNameMaxLen = 64
+
+// SanitizeFunctionName makes a client tool name acceptable to generateContent,
+// which rejects the whole request when one declaration is not a valid function
+// name (open-sse/executors/antigravity.js sanitizeFunctionName).
+//
+// The result of this function — not the caller's name, and not the caller's
+// name with the cloak suffix — is what the backend echoes back on a
+// functionCall, so it is also the key the decloak map must hold
+// (CloakAntigravityRequest registers the sanitised name).
+func SanitizeFunctionName(name string) string {
+	if name == "" {
+		return "_unknown"
+	}
+	s := antigravityFunctionNameRe.ReplaceAllString(name, "_")
+	if !antigravityFunctionNameStartRe.MatchString(s) {
+		s = "_" + s
+	}
+	if len(s) > antigravityFunctionNameMaxLen {
+		s = s[:antigravityFunctionNameMaxLen]
+	}
+	return s
+}
 
 // antigravityRequestBlacklist are fields Google generateContent rejects when
 // present at the request root (thinking/reasoning fields set by upstream clients).
@@ -113,6 +153,11 @@ var AntigravityDecoyTools = []GeminiFunctionDecl{
 }
 
 // CloakAntigravityRequest cloaks tool names with `_ide` suffix and appends decoy tools.
+//
+// Every name that reaches the wire is run through SanitizeFunctionName: Google
+// rejects the whole request when one declaration is not a valid Gemini function
+// name, and the returned map is keyed on the sanitised name (what the backend
+// echoes back) → the caller's original name.
 func CloakAntigravityRequest(req *GeminiRequest, clientTool string) (*GeminiRequest, map[string]string) {
 	if req == nil {
 		return nil, nil
@@ -136,13 +181,24 @@ func CloakAntigravityRequest(req *GeminiRequest, clientTool string) (*GeminiRequ
 				continue
 			}
 			if AntigravityNativeToolNames[fn.Name] {
+				// Native names are already valid Gemini function names, but the
+				// pass runs on every declaration anyway: the wire invariant is
+				// "every name in tools[] is valid", and a native name is only
+				// excused from the suffix, not from the rule (upstream's
+				// executor sanitises the merged list the same way).
+				fn.Name = SanitizeFunctionName(fn.Name)
 				clientDecls = append(clientDecls, fn)
 				continue
 			}
 
-			suffixedName := fn.Name + "_ide"
-			toolNameMap[suffixedName] = fn.Name
-			fn.Name = suffixedName
+			// The cloaked name is what Google echoes back on a functionCall, so
+			// the decloak map is keyed on the SANITISED name. Registering the
+			// unsanitised "name_ide" instead leaves a dead entry (and a client
+			// whose tool name held a space or started with a digit never gets
+			// its own name back).
+			wireName := SanitizeFunctionName(fn.Name + "_ide")
+			toolNameMap[wireName] = fn.Name
+			fn.Name = wireName
 			clientDecls = append(clientDecls, fn)
 		}
 	}
@@ -175,12 +231,12 @@ func CloakAntigravityRequest(req *GeminiRequest, clientTool string) (*GeminiRequ
 			partCopy := p
 			if p.FunctionCall != nil && !AntigravityNativeToolNames[p.FunctionCall.Name] {
 				fc := *p.FunctionCall
-				fc.Name = fc.Name + "_ide"
+				fc.Name = SanitizeFunctionName(fc.Name + "_ide")
 				partCopy.FunctionCall = &fc
 			}
 			if p.FunctionResponse != nil && !AntigravityNativeToolNames[p.FunctionResponse.Name] {
 				fr := *p.FunctionResponse
-				fr.Name = fr.Name + "_ide"
+				fr.Name = SanitizeFunctionName(fr.Name + "_ide")
 				partCopy.FunctionResponse = &fr
 			}
 			cloakedParts[j] = partCopy
@@ -640,23 +696,96 @@ func antigravityUUIDFromSeed(seed string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hex[0:8], hex[8:12], hex[12:16], hex[16:20], hex[20:32])
 }
 
-// antigravityBuildRequestID builds the IDE request ID in the same shape as the
-// Next.js reference: agent/<conversationId>/<ts>/<trajectoryId>/<step>.
-func antigravityBuildRequestID(sessionID, model, requestType string, contentCount int) string {
+// antigravityRequestTypeAgent is the requestType the shipped Hub sends on the
+// agent turn. It travels WITH the labels bag and never alone: upstream's
+// capture (open-sse/executors/antigravity.js, Hub 2.32.1) records that
+// "requestType WITHOUT those labels is what produced detail-free 429
+// RESOURCE_EXHAUSTED before, so both travel together".
+const antigravityRequestTypeAgent = "agent"
+
+// antigravityIDERequestIDRe is the Hub's own requestId shape:
+// agent/<conversationId>/<epoch_ms>/<trajectoryId>/<step>. Upstream keeps an id
+// that already matches (reusing the conversation and trajectory it encodes)
+// instead of minting a second one for the same turn.
+var antigravityIDERequestIDRe = regexp.MustCompile(`^agent/[^/]+/\d+/[^/]+/\d+$`)
+
+// antigravityEnvelopeIdentity is the agent identity one Antigravity turn
+// carries: the ids inside requestId plus the labels bag that has to travel with
+// requestType "agent".
+type antigravityEnvelopeIdentity struct {
+	ConversationID string
+	TrajectoryID   string
+	Step           int
+	RequestID      string
+}
+
+// antigravityBuildIdentity resolves the envelope identity for one turn. An
+// incoming requestId in the Hub's own shape is reused verbatim (its encoded
+// conversation/trajectory/step come with it); otherwise the ids are derived from
+// the session exactly as upstream's uuidFromSeed does, so the same session keeps
+// the same conversation across turns.
+func antigravityBuildIdentity(sessionID, model, requestType string, contentCount int, incomingRequestID string) antigravityEnvelopeIdentity {
+	if antigravityIDERequestIDRe.MatchString(incomingRequestID) {
+		parts := strings.Split(incomingRequestID, "/")
+		step, err := strconv.Atoi(parts[4])
+		if err != nil || step <= 0 {
+			step = 1
+		}
+		return antigravityEnvelopeIdentity{
+			ConversationID: parts[1],
+			TrajectoryID:   parts[3],
+			Step:           step,
+			RequestID:      incomingRequestID,
+		}
+	}
 	if sessionID == "" {
 		sessionID = "anonymous"
 	}
 	conversationID := antigravityUUIDFromSeed("antigravity:conversation:" + sessionID)
 	trajectoryID := antigravityUUIDFromSeed(fmt.Sprintf("antigravity:trajectory:%s:%s:%s", sessionID, model, requestType))
 	step := max(contentCount*2-1, 1)
-	return fmt.Sprintf("agent/%s/%d/%s/%d", conversationID, time.Now().UnixMilli(), trajectoryID, step)
+	return antigravityEnvelopeIdentity{
+		ConversationID: conversationID,
+		TrajectoryID:   trajectoryID,
+		Step:           step,
+		RequestID:      fmt.Sprintf("agent/%s/%d/%s/%d", conversationID, time.Now().UnixMilli(), trajectoryID, step),
+	}
+}
+
+// antigravityAgentLabels is the labels bag upstream captured from the shipped
+// Hub 2.32.1: cascade/root-cascade/trajectory/request ids, the step index and
+// the used_* flags, all strings. `model_enum` is the Hub's own placeholder
+// table, which this port has no mapping for, so it is omitted rather than
+// guessed — upstream omits it for the same reason.
+func antigravityAgentLabels(id antigravityEnvelopeIdentity, model string) map[string]string {
+	lower := strings.ToLower(model)
+	stepIndex := strconv.Itoa(max(id.Step-1, 0))
+	return map[string]string{
+		"cascade_id":               id.ConversationID,
+		"last_step_index":          stepIndex,
+		"request_id":               id.TrajectoryID + "-" + stepIndex,
+		"root_cascade_id":          id.ConversationID,
+		"trajectory_id":            id.TrajectoryID,
+		"used_claude":              strconv.FormatBool(strings.HasPrefix(lower, "claude")),
+		"used_claude_conservative": "false",
+		"used_non_gemini_model":    strconv.FormatBool(!strings.HasPrefix(lower, "gemini")),
+	}
+}
+
+// antigravityBuildRequestID builds the IDE request ID in the same shape as the
+// Next.js reference: agent/<conversationId>/<ts>/<trajectoryId>/<step>.
+func antigravityBuildRequestID(sessionID, model, requestType string, contentCount int) string {
+	return antigravityBuildIdentity(sessionID, model, requestType, contentCount, "").RequestID
 }
 
 // hardenAntigravityRequest strips blacklisted thinking/reasoning fields Google
-// rejects and caps maxOutputTokens at maxAntigravityOutputTokens. It leaves the
-// request byte-for-byte intact when nothing needs changing so thought signatures
-// on functionCall/thought parts are never re-encoded (which would corrupt them).
-func hardenAntigravityRequest(geminiBody []byte) []byte {
+// rejects, caps maxOutputTokens at maxAntigravityOutputTokens, and stamps the
+// agent identity the envelope needs (sessionId + labels). sessionID/labels are
+// empty for a bare hardening pass.
+//
+// Without an identity it returns the request byte-for-byte intact so thought
+// signatures on functionCall/thought parts are never re-encoded.
+func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[string]string) []byte {
 	var m map[string]any
 	if err := json.Unmarshal(geminiBody, &m); err != nil {
 		return geminiBody
@@ -668,6 +797,18 @@ func hardenAntigravityRequest(geminiBody []byte) []byte {
 			delete(m, k)
 			changed = true
 		}
+	}
+
+	// The agent identity rides inside the request, not on the envelope: the Hub
+	// puts sessionId and the labels bag there, and requestType "agent" is
+	// rejected without the labels next to it.
+	if sessionID != "" && m["sessionId"] != sessionID {
+		m["sessionId"] = sessionID
+		changed = true
+	}
+	if len(labels) > 0 {
+		m["labels"] = labels
+		changed = true
 	}
 
 	gc, _ := m["generationConfig"].(map[string]any)
@@ -853,6 +994,23 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionI
 	// layers cannot disagree on the id that reaches Google.
 	modelName = AntigravityUpstreamModel(modelName)
 
+	// A body that already carries a requestId in the Hub's own shape keeps it:
+	// the conversation and trajectory it encodes are the client's, and minting a
+	// second identity for the same turn splits one conversation across two
+	// upstream trajectories. Upstream reads that id off the wrapper body; this
+	// port reads it off the request it is handed, before the cleaning pass (which
+	// round-trips through the typed request and would drop the unknown field),
+	// and only decodes again for the rare payload that names one.
+	incomingRequestID := ""
+	if bytes.Contains(geminiBody, []byte(`"requestId"`)) {
+		var probe struct {
+			RequestID string `json:"requestId"`
+		}
+		if err := json.Unmarshal(geminiBody, &probe); err == nil {
+			incomingRequestID = probe.RequestID
+		}
+	}
+
 	contentCount := 1
 	var geminiReq GeminiRequest
 	if err := json.Unmarshal(geminiBody, &geminiReq); err == nil {
@@ -867,22 +1025,30 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionI
 			geminiBody = cloakedBytes
 		}
 	}
-	geminiBody = hardenAntigravityRequest(geminiBody)
 
 	sess := projectID
 	if len(sessionID) > 0 && sessionID[0] != "" {
 		sess = sessionID[0]
 	}
 
+	// The incoming requestId was read above, before the cleaning pass dropped the
+	// unmodelled field; it now decides the envelope identity.
+	identity := antigravityBuildIdentity(sess, modelName, antigravityRequestTypeAgent, contentCount, incomingRequestID)
+
+	geminiBody = hardenAntigravityRequest(geminiBody, sess, antigravityAgentLabels(identity, modelName))
+
 	wrapper := AntigravityRequest{
 		Project:   projectID,
 		Model:     modelName,
 		UserAgent: "antigravity",
-		// Omit RequestType (was "agent"): parity with decolua/9router#3986.
-		// Google rejects agent-bucketed requests with false 429s; requestId
-		// keeps its existing agent/<...>/<...>/<...>/<step> shape.
-		RequestID: antigravityBuildRequestID(sess, modelName, "agent", contentCount),
-		Request:   geminiBody,
+		// requestType travels WITH the labels bag inside the request (see
+		// antigravityRequestTypeAgent): the shipped Hub sends both, and an
+		// agent-typed turn without them is what Google answered with a
+		// detail-free 429 RESOURCE_EXHAUSTED. requestId keeps its
+		// agent/<conversation>/<ts>/<trajectory>/<step> shape either way.
+		RequestType: antigravityRequestTypeAgent,
+		RequestID:   identity.RequestID,
+		Request:     geminiBody,
 	}
 	out, err := json.Marshal(wrapper, json.Deterministic(true))
 	if err != nil {
@@ -944,15 +1110,46 @@ func ParseImageConfig(model string) (cleanModel, aspectRatio string) {
 	return cleanModel, aspectRatio
 }
 
+// antigravityImageDataURIRe matches the data URI an image edit arrives as:
+// data:<image mime>;base64,<payload>.
+var antigravityImageDataURIRe = regexp.MustCompile(`^data:(image/[^;]+);base64,(.+)$`)
+
+// antigravityRawBase64Re is the first-character test upstream applies to a
+// payload that is not a data URI.
+var antigravityRawBase64Re = regexp.MustCompile(`^[A-Za-z0-9+/]`)
+
+// AntigravityImageInput resolves an image a caller supplied into the mime type
+// and payload Gemini's inlineData takes (upstream resolveImageInput).
+//
+// A data URI is split: sending it whole put "data:image/jpeg;base64," into the
+// base64 field, which the backend cannot decode, and the declared mime type was
+// ignored so every edit was labelled image/png. A bare payload keeps the png
+// default. Anything else — an http URL, an empty string, a data URI that is not
+// an image, an obviously-too-short string — resolves to no image part at all,
+// exactly as upstream refuses it, rather than being sent as an undecodable
+// body. (Upstream's own second branch would take a non-image data URI longer
+// than 100 bytes and pass it through as a png payload; this port refuses it
+// because the only two outcomes are "text-only request" and "body the backend
+// rejects".)
+func AntigravityImageInput(input string) (mimeType, data string, ok bool) {
+	if m := antigravityImageDataURIRe.FindStringSubmatch(input); m != nil {
+		return m[1], m[2], true
+	}
+	if len(input) <= 100 || strings.HasPrefix(input, "http") || strings.HasPrefix(input, "data:") || !antigravityRawBase64Re.MatchString(input) {
+		return "", "", false
+	}
+	return "image/png", input, true
+}
+
 // WrapAntigravityImageRequest builds an Antigravity request envelope for image generation.
 // sessionID scopes conversation and trajectory UUIDs per connection or client session.
 func WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio string, sessionID ...string) ([]byte, error) {
 	parts := []GeminiPart{}
-	if base64Input != "" {
+	if mimeType, data, ok := AntigravityImageInput(base64Input); ok {
 		parts = append(parts, GeminiPart{
 			InlineData: &GeminiInlineData{
-				MimeType: "image/png",
-				Data:     base64Input,
+				MimeType: mimeType,
+				Data:     data,
 			},
 		})
 	}

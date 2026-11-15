@@ -688,6 +688,12 @@ func init() {
 	// PROVIDER_CAPABILITIES.cx = PROVIDER_CAPABILITIES.codex).
 	providerCapabilities["cx"] = providerCapabilities["codex"]
 
+	// The provider token-limit table is read by the provider string the call
+	// site happens to carry, so the lane's declared figures have to be reachable
+	// under both of Antigravity's spellings — GetCapabilitiesDetailForModel("ag")
+	// otherwise fell past them to the substring table.
+	providerTokenLimits["ag"] = providerTokenLimits["antigravity"]
+
 	// The global mcode site serves the identical catalog, so it shares the
 	// table rather than restating it (upstream
 	// PROVIDER_CAPABILITIES["minimax-code-global"] = PROVIDER_CAPABILITIES["minimax-code"]).
@@ -1000,6 +1006,20 @@ func GetModelTokenLimits(model string) (contextWindow int, maxOutput int) {
 // which is why this is not expressed as a providerCapabilities row (those win
 // over patterns and would drag their thinking format along).
 var providerTokenLimits = map[string]map[string][2]int{
+	// Antigravity's registry advertises the ids below and upstream's
+	// provider-blind capability tables resolve them to these figures
+	// (MODEL_CAPABILITIES' exact `claude-sonnet-4-6` row is 1M/128k, and
+	// `*gemini*` gives gemini-pro-agent the 1M window with the shared 64000
+	// output ceiling). The port's shared substring table reads the same ids as
+	// 200k/8192 (claude) and 128k/4096 (unknown), so the lane declares its own
+	// numbers here rather than republishing every other claude/gemini lane.
+	// Limits only: the flags and thinking shape keep resolving through the
+	// pattern table.
+	"antigravity": {
+		"claude-sonnet-4-6":   {1000000, 128000},
+		"gemini-pro-agent":    {1048576, 64000},
+		"gpt-oss-120b-medium": {128000, 64000},
+	},
 	// CodeBuddy's product-config catalog, the same figures codebuddy-cn
 	// declares in providerCapabilities. codebuddy-intl serves the same ids
 	// but resolves its own thinking levels, so only the limits are shared.
@@ -1038,6 +1058,37 @@ var providerTokenLimits = map[string]map[string][2]int{
 	},
 }
 
+// antigravityClaudeMaxOutputFloor is the maxOutput a Claude model keeps on the
+// Antigravity lane, and it is upstream's capability DEFAULT, not a claude
+// number: the Antigravity registry's Claude ids resolve through
+// PATTERN_CAPABILITIES rows that declare flags and a thinking shape only
+// (open-sse/providers/capabilities.js `*claude*opus*` / `*claude*haiku*` /
+// `*claude*sonnet*`), so DEFAULT_CAPABILITIES.maxOutput —
+// open-sse/providers/capabilities.js:63 — is what upstream publishes for them
+// (`claude-opus-4-6-thinking`: 200000 context / 64000 output).
+//
+// This port's provider-blind `*claude*` substring row
+// (internal/providers/capabilities.go substring table) answers 8192 for every
+// claude id without an exact limits row, which under-states the lane by 7x —
+// a client budgeting output against /v1/models would clamp a legitimate request
+// to 8192. The floor is applied on the Antigravity lane only, so no other
+// Claude lane's published limits move.
+const antigravityClaudeMaxOutputFloor = 64000
+
+// isAntigravityClaudeModel reports whether the (provider, model) pair is a
+// Claude id on the Antigravity lane. Both of the provider's spellings resolve
+// through ResolveAlias ("ag" → "antigravity").
+func isAntigravityClaudeModel(provider, model string) bool {
+	if ResolveAlias(strings.ToLower(strings.TrimSpace(provider))) != "antigravity" {
+		return false
+	}
+	base := model
+	if _, after, found := strings.CutLast(model, "/"); found {
+		base = after
+	}
+	return strings.Contains(strings.ToLower(base), "claude")
+}
+
 // lookupProviderTokenLimits returns the limits a provider declares for a model,
 // or (0, 0) when it declares none.
 func lookupProviderTokenLimits(provider, model string) (contextWindow, maxOutput int) {
@@ -1070,6 +1121,20 @@ func lookupModelTokenLimits(model string) [2]int {
 		return [2]int{1000000, 128000}
 	case strings.Contains(m, "gemini-1.5") || strings.Contains(m, "gemini-2.0") || strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3") || strings.Contains(m, "gemini-4") || strings.Contains(m, "gemini-argon") || strings.Contains(m, "glm-5.3-flash"):
 		return [2]int{1048576, 65536}
+	// gemini-pro-agent is the Antigravity registry's alias for Gemini 3.1 Pro
+	// and carries no "3" for the family rows above to match, so it fell to the
+	// 128000/4096 unknown floor. Upstream resolves it through the generic
+	// `*gemini*` row: the 1M window with the shared 64000 output ceiling (that
+	// row declares no maxOutput, so DEFAULT_CAPABILITIES' 64000 stands).
+	case strings.Contains(m, "gemini-pro"):
+		return [2]int{1048576, 64000}
+	// gpt-oss is an open-weight family whose server-side window upstream
+	// declares as 128000 with the shared 64000 output ceiling (*gpt-oss* in
+	// capabilities.js). Without the row the id fell to the 128000/4096 unknown
+	// floor: the Antigravity registry row "gpt-oss-120b-medium" was published
+	// with an output cap 15x below what the model accepts.
+	case strings.Contains(m, "gpt-oss"):
+		return [2]int{128000, 64000}
 	case strings.Contains(m, "grok-4.7"):
 		return [2]int{500000, 500000}
 	case strings.Contains(m, "grok-4.5") || strings.Contains(m, "grok-4.6"):
@@ -1428,6 +1493,7 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	// Letting the pattern win published 1M for a 200k endpoint, so clients
 	// budgeted five times the context the gateway would actually accept.
 	var cw, maxOut int
+	customMaxOut := 0
 	fill := func(c, m int) {
 		if cw == 0 && c > 0 {
 			cw = c
@@ -1439,6 +1505,7 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 
 	if custom, ok := lookupCustomModelCaps(provider, model); ok {
 		fill(custom.ContextWindow, custom.MaxOutput)
+		customMaxOut = custom.MaxOutput
 	}
 	if c, m := lookupProviderTokenLimits(provider, model); c > 0 || m > 0 {
 		fill(c, m)
@@ -1463,6 +1530,13 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	}
 	if c, m := GetModelTokenLimits(provider + "/" + model); c > 0 || m > 0 {
 		fill(c, m)
+	}
+	// The Antigravity lane's Claude rows keep upstream's default maxOutput
+	// instead of the 8192 the shared `*claude*` substring row guesses
+	// (antigravityClaudeMaxOutputFloor). An operator's own declaration wins:
+	// a custom row that named a maxOutput is a decision, not a guess.
+	if customMaxOut == 0 && maxOut < antigravityClaudeMaxOutputFloor && isAntigravityClaudeModel(provider, model) {
+		maxOut = antigravityClaudeMaxOutputFloor
 	}
 	if cw == 0 {
 		cw = 128000

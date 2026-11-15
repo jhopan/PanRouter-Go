@@ -471,6 +471,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Gemini 3.1 Pro (Low)"
     },
     {
+      "id": "gemini-3-flash",
+      "name": "Gemini 3 Flash"
+    },
+    {
       "id": "claude-sonnet-5-5-high",
       "name": "Claude Sonnet 5.5 (High)",
       "upstreamModelId": "claude-sonnet-5-5-high(high)"

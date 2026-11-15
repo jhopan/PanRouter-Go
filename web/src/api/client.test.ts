@@ -8,6 +8,7 @@ import {
   normalizeConnection,
   onUnauthorized,
   responseErrorMessage,
+  type ConnectionUsageResponse,
   type ProviderConnection,
 } from './client'
 
@@ -109,6 +110,37 @@ describe('dashboard API authentication and errors', () => {
       redirectUri: 'http://localhost:20130/callback',
       state: 'state-123',
     })
+  })
+
+  // The quota tracker's Antigravity badge reads the eligibility verdict off this
+  // response (QuotaTrackerView → readAntigravityEligibility). Nothing else
+  // publishes it, so the field has to survive the call.
+  it('passes the Antigravity eligibility verdict through getConnectionUsage', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: string[] = []
+    globalThis.fetch = async (input) => {
+      requests.push(String(input))
+      return Response.json({
+        plan: 'Free',
+        quotas: {},
+        ineligible: {
+          eligible: false,
+          reasonCode: 'VALIDATION_REQUIRED',
+          validationUrl: 'https://accounts.google.com/v3/signin/continue?authuser=1',
+        },
+      })
+    }
+    let usage: ConnectionUsageResponse
+    try {
+      usage = await api.getConnectionUsage('conn-ag-1')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(requests[0]).toBe('/api/usage/conn-ag-1')
+    expect(usage.ineligible?.eligible).toBe(false)
+    expect(usage.ineligible?.reasonCode).toBe('VALIDATION_REQUIRED')
+    expect(usage.ineligible?.validationUrl).toContain('accounts.google.com')
   })
 
   it('triggers onUnauthorized and clears storage on 401 responses', async () => {
