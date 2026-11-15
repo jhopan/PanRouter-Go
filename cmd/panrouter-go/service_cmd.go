@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/urfave/cli/v2"
 
@@ -13,13 +14,27 @@ import (
 
 // serviceInstall writes the autostart entry so the gateway starts on boot,
 // then reports which backend owns it.
+// serviceArgs is what the autostart entry runs. It adds --serve on top of the
+// forwarded flags because a supervised instance must never open the interactive
+// picker: Windows hands a scheduled task a console, and the picker then waits for
+// a keypress while the task reports itself running and serves nothing.
+func serviceArgs(cCtx *cli.Context) []string {
+	args := forwardArgs(cCtx)
+	for _, arg := range args {
+		if arg == "--serve" || strings.HasPrefix(arg, "--serve=") {
+			return args
+		}
+	}
+	return append(args, "--serve")
+}
+
 func serviceInstall(cCtx *cli.Context) error {
 	if backend := cCtx.String("backend"); backend != "" {
 		if err := os.Setenv(service.BackendOverrideEnv, backend); err != nil {
 			return fmt.Errorf("service install: %w", err)
 		}
 	}
-	info, err := service.Install(forwardArgs(cCtx))
+	info, err := service.Install(serviceArgs(cCtx))
 	if err != nil {
 		return err
 	}

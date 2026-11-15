@@ -152,6 +152,10 @@ func buildApp(self string) *cli.App {
 				Usage: "disable the prompt-injection detector (on by default; env: INJECTION_GUARD_DISABLED)",
 			},
 			&cli.BoolFlag{
+				Name:  "serve",
+				Usage: "run the server in this process and never show the interactive picker (autostart entries pass this)",
+			},
+			&cli.BoolFlag{
 				Name:    daemon.BackgroundName,
 				Aliases: []string{"d"},
 				Usage:   "run as a background daemon: detaches from the terminal and returns (env: PANROUTER_BACKGROUND)",
@@ -314,6 +318,15 @@ func foregroundOrBackground(cCtx *cli.Context) error {
 	}
 	if cCtx.Bool(daemon.BackgroundName) {
 		return startDetached(cCtx)
+	}
+	// --serve is what the autostart entries pass, and it is not a convenience:
+	// Task Scheduler gives a Windows task a console, so stdinIsTerminal() below
+	// was true for the boot-time instance. The task opened the interactive picker
+	// and waited for a keypress nobody could send — `service status` reported
+	// Active: true while the gateway listened on no port, and the run log stayed
+	// empty because the server never started.
+	if cCtx.Bool("serve") {
+		return runServer(cCtx)
 	}
 	// On a terminal, bare `panrouter-go` offers the interface picker; without one
 	// (service unit, container, pipe) it boots the server as before.

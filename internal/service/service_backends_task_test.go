@@ -2,9 +2,11 @@ package service
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestWindowsTaskGuardsOffWindows(t *testing.T) {
@@ -25,7 +27,29 @@ func TestWindowsTaskGuardsOffWindows(t *testing.T) {
 func TestInstallWindowsTaskOnWindows(t *testing.T) {
 	stubHost(t, hostStub{goos: "windows"})
 	stubWindowsTaskUser(t, "bima")
-	calls := stubRun(t)
+	t.Setenv("USERNAME", "bima")
+
+	// The definition is written to a temp file and handed to schtasks, so the
+	// stub reads it back through the argument it is given.
+	var definition string
+	calls := stubRunFunc(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(name, "powershell") {
+			// The task answers "Running" (ordinal 4) after /run.
+			return "4", nil
+		}
+		if i := slices.Index(args, "/xml"); i >= 0 && i+1 < len(args) {
+			if data, err := os.ReadFile(args[i+1]); err == nil {
+				// The file is UTF-16LE with a BOM, which is what schtasks
+				// accepts; decode it to compare against the rendered form.
+				units := make([]uint16, 0, len(data)/2)
+				for j := 2; j+1 < len(data); j += 2 {
+					units = append(units, uint16(data[j])|uint16(data[j+1])<<8)
+				}
+				definition = string(utf16.Decode(units))
+			}
+		}
+		return "", nil
+	})
 
 	info, err := installWindowsTask(`C:\panrouter-go.exe`, []string{"--rtk=true"})
 	if err != nil {
@@ -37,36 +61,84 @@ func TestInstallWindowsTaskOnWindows(t *testing.T) {
 	if info.Path != windowsTaskName {
 		t.Errorf("Info.Path = %q, want %q", info.Path, windowsTaskName)
 	}
+
 	var create *svcCall
 	for i := range *calls {
 		if (*calls)[i].name == "schtasks.exe" && slices.Contains((*calls)[i].args, "/create") {
 			create = &(*calls)[i]
+			break
 		}
 	}
 	if create == nil {
 		t.Fatalf("calls = %v, want a schtasks /create", *calls)
 	}
-	// The task must not run as SYSTEM (different %APPDATA%, needs elevation).
-	if slices.Contains(create.args, "SYSTEM") {
-		t.Errorf("schtasks /create args = %v, must not run as SYSTEM", create.args)
+	// The task body comes from the definition file, not from the command line:
+	// /tr cannot express the battery conditions, the execution limit or the
+	// working directory, and their defaults are what stopped the autostart.
+	if !slices.Contains(create.args, "/xml") || !slices.Contains(create.args, "/f") {
+		t.Errorf("schtasks /create args = %v, want /xml <file> /f", create.args)
 	}
-	if !slices.Contains(create.args, "onlogon") {
-		t.Errorf("schtasks /create args = %v, want /sc onlogon", create.args)
+	for _, flag := range []string{"/tr", "/sc", "/it", "/ru", "/rp", "/rl"} {
+		if slices.Contains(create.args, flag) {
+			t.Errorf("schtasks /create args = %v, must not use %s", create.args, flag)
+		}
 	}
-	if !slices.Contains(create.args, "/it") {
-		t.Errorf("schtasks /create args = %v, want /it (interactive-only, no stored password)", create.args)
+	if definition == "" {
+		t.Fatal("the task definition was not readable through the /xml argument")
 	}
-	if slices.Contains(create.args, "/rp") {
-		t.Errorf("schtasks /create args = %v, must not store a password with /rp", create.args)
+	for _, want := range []string{
+		"<UserId>bima</UserId>", // never SYSTEM: that reads a different %APPDATA%
+		"<LogonType>InteractiveToken</LogonType>",
+		"<RunLevel>LeastPrivilege</RunLevel>",
+		"<Command>C:\\panrouter-go.exe</Command>",
+		"<Arguments>--rtk=true</Arguments>",
+		"<WorkingDirectory>" + windowsTaskWorkDir() + "</WorkingDirectory>",
+		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
+		"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+	} {
+		if !strings.Contains(definition, want) {
+			t.Errorf("task definition is missing %s:\n%s", want, definition)
+		}
 	}
-	if !slices.Contains(create.args, "/ru") || !slices.Contains(create.args, "bima") {
-		t.Errorf("schtasks /create args = %v, want /ru for the installing user", create.args)
+	if _, err := os.Stat(argAfter(create.args, "/xml")); err == nil {
+		t.Error("the task definition file was left behind")
 	}
-	if slices.Contains(create.args, "/rl") {
-		t.Errorf("schtasks /create args = %v, must not request /rl highest", create.args)
+}
+
+// TestWindowsTaskXMLKeepsTheGatewayAliveOnBattery pins the three settings whose
+// defaults made the autostart silently useless.
+//
+// Observed on a laptop running on its battery: `schtasks /create` succeeds,
+// `schtasks /run` succeeds, the task sits in "Queued" with Last Result 0, and no
+// process ever appears — `service start` reported exactly that ("started via
+// windows-task (active: false)"). DisallowStartIfOnBatteries defaults to true.
+// StopIfGoingOnBatteries would then kill the gateway on an unplug, and
+// ExecutionTimeLimit (PT72H) would end it after three days.
+func TestWindowsTaskXMLKeepsTheGatewayAliveOnBattery(t *testing.T) {
+	xml := windowsTaskXML(`C:\bin\panrouter-go.exe`, nil, "bima", `C:\checkout`)
+	for _, want := range []string{
+		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
+		"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+		"<StartWhenAvailable>true</StartWhenAvailable>",
+		"<WorkingDirectory>C:\\checkout</WorkingDirectory>",
+		"<LogonTrigger>",
+	} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("definition missing %s", want)
+		}
 	}
-	if got := argAfter(create.args, "/tr"); got != `C:\panrouter-go.exe --rtk=true` {
-		t.Errorf("/tr value = %q, want the cmd.exe command line", got)
+	if strings.Contains(xml, "<Arguments>") {
+		t.Error("an empty argument list must not emit an empty Arguments element")
+	}
+
+	// A path with XML-significant characters must survive as text, not break the
+	// definition: schtasks rejects a malformed file and install then fails.
+	escaped := windowsTaskXML(`C:\a&b\panrouter-go.exe`, []string{"--name=<x>"}, "", "")
+	if !strings.Contains(escaped, "C:\\a&amp;b\\panrouter-go.exe") || !strings.Contains(escaped, "--name=&lt;x&gt;") {
+		t.Errorf("definition did not escape XML-significant characters: %s", escaped)
 	}
 }
 
@@ -254,4 +326,34 @@ func TestControlWindowsTask(t *testing.T) {
 			t.Error("controlWindowsTask(explode) error = nil, want error")
 		}
 	})
+}
+
+// TestWindowsTaskXMLBytesAreUTF16 pins the encoding schtasks demands.
+//
+// The first version wrote UTF-8 and schtasks refused it outright:
+// `ERROR: The task XML is malformed. (1,40)::ERROR: unable to switch the
+// encoding`. The parser accepts only a UTF-16 file whose declaration says so, so
+// the bytes carry a BOM and the string form declares UTF-16.
+func TestWindowsTaskXMLBytesAreUTF16(t *testing.T) {
+	definition := windowsTaskXMLBytes(`C:\\bin\\panrouter-go.exe`, []string{"--log=info"}, "bima", `C:\\checkout`)
+
+	if len(definition) < 2 || definition[0] != 0xFF || definition[1] != 0xFE {
+		t.Fatalf("definition does not start with a UTF-16LE BOM: % x", definition[:min(len(definition), 8)])
+	}
+	if len(definition)%2 != 0 {
+		t.Fatalf("UTF-16 output has an odd length: %d", len(definition))
+	}
+
+	units := make([]uint16, 0, len(definition)/2)
+	for i := 2; i+1 < len(definition); i += 2 {
+		units = append(units, uint16(definition[i])|uint16(definition[i+1])<<8)
+	}
+	decoded := string(utf16.Decode(units))
+
+	if decoded != windowsTaskXML(`C:\\bin\\panrouter-go.exe`, []string{"--log=info"}, "bima", `C:\\checkout`) {
+		t.Errorf("decoded definition differs from the rendered one:\n%s", decoded)
+	}
+	if !strings.Contains(decoded, `<?xml version="1.0" encoding="UTF-16"?>`) {
+		t.Errorf("the declaration must name the encoding the bytes use: %s", decoded[:60])
+	}
 }

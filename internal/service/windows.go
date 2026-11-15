@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf16"
 )
 
 // windowsTaskName is the scheduled-task name this package owns.
@@ -50,29 +53,142 @@ func windowsCommandLine(exe string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
+// windowsTaskWorkDir is the directory the task starts the gateway in. It is the
+// directory install ran from — the checkout — so the `.env` an operator keeps
+// beside the source is the one the boot-time instance reads. Without it the task
+// inherits %SystemRoot%\System32 and reads no .env at all; the port silently
+// became the default and the operator's settings were ignored.
+var windowsTaskWorkDir = func() string {
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
+}
+
+// windowsTaskXML renders the task definition schtasks /create /xml registers.
+//
+// It exists instead of the /tr form for three settings the command line cannot
+// express, each of which silently broke the autostart on a laptop:
+//
+//   - DisallowStartIfOnBatteries defaults to true. On a machine running on its
+//     battery `schtasks /run` accepts the request, the task sits in "Queued",
+//     the last result stays 0 — and nothing starts. That is what `service start`
+//     looked like from the outside: "started via windows-task (active: false)".
+//   - StopIfGoingOnBatteries defaults to true, so an unplug would kill the
+//     gateway mid-request even if it did start.
+//   - ExecutionTimeLimit defaults to PT72H: a gateway is meant to outlive three
+//     days, and the default ends it.
+//
+// WorkingDirectory is the third: see windowsTaskWorkDir. StartWhenAvailable and
+// the one-minute restart make the entry behave like the supervision the POSIX
+// backends get from their service manager.
+func windowsTaskXML(exe string, args []string, user, workDir string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-16"?>`)
+	b.WriteString(`<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`)
+	b.WriteString(`<RegistrationInfo><Description>PanRouter-Go gateway</Description></RegistrationInfo>`)
+	b.WriteString(`<Triggers><LogonTrigger><Enabled>true</Enabled>`)
+	if user != "" {
+		b.WriteString(`<UserId>` + xmlEscape(user) + `</UserId>`)
+	}
+	b.WriteString(`</LogonTrigger></Triggers>`)
+	b.WriteString(`<Principals><Principal id="Author">`)
+	if user != "" {
+		b.WriteString(`<UserId>` + xmlEscape(user) + `</UserId>`)
+	}
+	b.WriteString(`<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>`)
+	b.WriteString(`<Settings>`)
+	b.WriteString(`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`)
+	b.WriteString(`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`)
+	b.WriteString(`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`)
+	b.WriteString(`<AllowHardTerminate>true</AllowHardTerminate>`)
+	b.WriteString(`<StartWhenAvailable>true</StartWhenAvailable>`)
+	b.WriteString(`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`)
+	b.WriteString(`<Enabled>true</Enabled>`)
+	b.WriteString(`<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>`)
+	b.WriteString(`</Settings>`)
+	b.WriteString(`<Actions Context="Author"><Exec>`)
+	b.WriteString(`<Command>` + xmlEscape(exe) + `</Command>`)
+	if len(args) > 0 {
+		b.WriteString(`<Arguments>` + xmlEscape(strings.Join(args, " ")) + `</Arguments>`)
+	}
+	if workDir != "" {
+		b.WriteString(`<WorkingDirectory>` + xmlEscape(workDir) + `</WorkingDirectory>`)
+	}
+	b.WriteString(`</Exec></Actions>`)
+	b.WriteString(`</Task>`)
+	return b.String()
+}
+
+// windowsTaskXMLBytes renders the definition the way schtasks reads it.
+//
+// The file has to be UTF-16LE with a BOM: schtasks' XML parser refuses a
+// declaration that is not UTF-16 and answers `unable to switch the encoding`
+// for a UTF-8 file, which is what the first version of this sent.
+func windowsTaskXMLBytes(exe string, args []string, user, workDir string) []byte {
+	return utf16LEWithBOM(windowsTaskXML(exe, args, user, workDir))
+}
+
+// utf16LEWithBOM encodes a string as UTF-16 little endian with a byte-order
+// mark, surrogate pairs included. encoding/xml has no encoder for a non-UTF-8
+// target without pulling in x/text, and this is the whole requirement.
+func utf16LEWithBOM(value string) []byte {
+	out := make([]byte, 0, 2+2*len(value))
+	out = append(out, 0xFF, 0xFE)
+	for _, unit := range utf16.Encode([]rune(value)) {
+		out = append(out, byte(unit), byte(unit>>8))
+	}
+	return out
+}
+
+// xmlEscape escapes one XML text node or attribute value.
+func xmlEscape(value string) string {
+	var buf bytes.Buffer
+	if err := xml.EscapeText(&buf, []byte(value)); err != nil {
+		return value
+	}
+	return buf.String()
+}
+
 func installWindowsTask(exe string, args []string) (Info, error) {
 	if goos != "windows" {
 		return Info{}, fmt.Errorf("service.Install: windows-task backend only runs on windows")
 	}
 	taskCmd := windowsCommandLine(exe, args)
-	// /it sets the task's logon type to InteractiveToken: it runs only while
-	// the run-as user is logged on and stores no password, so schtasks does not
-	// stop to prompt for one.
-	create := []string{"/create", "/tn", windowsTaskName, "/tr", taskCmd, "/sc", "onlogon", "/it"}
-	// /ru names the run-as user explicitly; it defaults to the creating user
-	// when it cannot be resolved. Making a scheduled task needs an
-	// Administrator console, so install surfaces that from the command result.
-	if user := windowsTaskUser(); user != "" {
-		create = append(create, "/ru", user)
+	user := windowsTaskUser()
+	workDir := windowsTaskWorkDir()
+
+	definition := windowsTaskXMLBytes(exe, args, user, workDir)
+	file, err := os.CreateTemp("", "panrouter-go-task-*.xml")
+	if err != nil {
+		return Info{Backend: BackendWindowsTask, Exec: taskCmd}, fmt.Errorf("service.Install: write task definition: %w", err)
 	}
-	create = append(create, "/f")
-	if _, err := run("schtasks.exe", create...); err != nil {
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(definition); err != nil {
+		_ = file.Close()
+		return Info{Backend: BackendWindowsTask, Exec: taskCmd}, fmt.Errorf("service.Install: write task definition: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return Info{Backend: BackendWindowsTask, Exec: taskCmd}, fmt.Errorf("service.Install: write task definition: %w", err)
+	}
+
+	// schtasks /create /xml carries the settings /tr cannot express. /f replaces
+	// an existing registration so a re-install is not a failure.
+	if _, err := run("schtasks.exe", "/create", "/tn", windowsTaskName, "/xml", file.Name(), "/f"); err != nil {
 		return Info{Backend: BackendWindowsTask, Exec: taskCmd}, err
 	}
+
+	info := Info{Backend: BackendWindowsTask, Path: windowsTaskName, Exec: taskCmd, Enabled: true}
 	if _, err := run("schtasks.exe", "/run", "/tn", windowsTaskName); err != nil {
-		return Info{Backend: BackendWindowsTask, Path: windowsTaskName, Exec: taskCmd, Enabled: true}, nil
+		return info, nil
 	}
-	return Info{Backend: BackendWindowsTask, Path: windowsTaskName, Exec: taskCmd, Enabled: true, Active: true}, nil
+	// The run request being accepted is not the gateway starting: a task blocked
+	// by a condition (battery, session) is queued and reports success. Ask the
+	// task itself, which is the same probe status uses.
+	active, known := windowsTaskRunning(windowsTaskName)
+	info.Active = active
+	info.ActiveUnknown = !known
+	return info, nil
 }
 
 func uninstallWindowsTask() (Info, bool) {

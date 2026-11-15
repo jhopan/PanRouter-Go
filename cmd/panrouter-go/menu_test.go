@@ -1,7 +1,10 @@
 package main
 
 import (
+	"slices"
+
 	"bufio"
+	"github.com/urfave/cli/v2"
 	"strings"
 	"testing"
 )
@@ -45,5 +48,40 @@ func TestTrayBinaryName(t *testing.T) {
 	name := trayBinaryName()
 	if !strings.HasSuffix(name, "-tray") {
 		t.Errorf("expected tray binary name to end with -tray, got %q", name)
+	}
+}
+
+// TestServiceArgsAlwaysAskForTheServerPath pins the argument the autostart entry
+// carries.
+//
+// Without --serve the supervised instance fell into the interactive picker,
+// because Windows gives a scheduled task a console and the CLI treated a console
+// as "a human is here". The task then reported Active: true while the process sat
+// on the menu: no port bound, no boot line in the run log, and `service status`
+// said everything was fine.
+func TestServiceArgsAlwaysAskForTheServerPath(t *testing.T) {
+	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "rtk"},
+			&cli.BoolFlag{Name: "serve"},
+		},
+		Action: func(cCtx *cli.Context) error {
+			args := serviceArgs(cCtx)
+			if slices.Index(args, "--serve") == -1 {
+				t.Errorf("serviceArgs() = %v, want --serve in the list", args)
+			}
+			// A second --serve would be harmless but sloppy: the flag must not
+			// be appended when it is already carried.
+			if n := len(slices.DeleteFunc(slices.Clone(args), func(a string) bool { return a != "--serve" })); n != 1 {
+				t.Errorf("serviceArgs() = %v, want exactly one --serve", args)
+			}
+			return nil
+		},
+	}
+	if err := app.Run([]string{"panrouter-go", "--rtk=true"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := app.Run([]string{"panrouter-go", "--serve", "--rtk=true"}); err != nil {
+		t.Fatalf("run with an explicit --serve: %v", err)
 	}
 }
