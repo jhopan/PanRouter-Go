@@ -2,11 +2,11 @@
 
 # PanRouter-Go — FREE AI Router & Token Saver (Single Binary)
 
-> **Built on the shoulders of two MIT projects.**
-> The router itself is **[9router](https://github.com/decolua/9router)** by
-> **decolua and contributors**. The Go port this repository started from is
-> **[9router-go](https://github.com/luqman-v1/9router-go)** by
-> **Luqmanul Hakim**. Both copyright notices stay in `LICENSE`.
+> **Licence credit, not a reference.**
+> This repository began from a Go port of **[9router-go](https://github.com/luqman-v1/9router-go)**
+> by **Luqmanul Hakim**, which descends from **[9router](https://github.com/decolua/9router)**
+> by **decolua and contributors**. Both copyright notices stay in `LICENSE`, and
+> neither project is a behaviour reference any more.
 >
 > This repository is the Go port of **[PanRouter](https://github.com/jhopan/PanRouter)**,
 > which is where the behaviour is decided. Ports follow PanRouter; they do not
@@ -23,7 +23,7 @@
 [![GitHub All Releases](https://img.shields.io/github/downloads/jhopan/PanRouter-Go/total.svg)](https://github.com/jhopan/PanRouter-Go/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-Join%20Group-26A5E1?logo=telegram&logoColor=white)](https://jhopan.github.io/PanRouter-Go/tg)
 
-[🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🔄 Share DB with PanRouter](#-sharing-a-database-with-panrouter) • [🌐 Upstream](https://github.com/decolua/9router)
+[🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🔄 Share DB with PanRouter](#-sharing-a-database-with-panrouter) • [🌐 Upstream](https://github.com/jhopan/PanRouter)
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ## 🤔 Why panrouter-go?
 
-Same idea as [PanRouter](https://github.com/decolua/9router), minus the Node.js runtime: **one Go binary** serves the proxy APIs + an embedded Svelte dashboard.
+Same idea as [PanRouter](https://github.com/jhopan/PanRouter), minus the Node.js runtime: **one Go binary** serves the proxy APIs + an embedded Svelte dashboard.
 
 **Stop wasting money, tokens and hitting limits:**
 
@@ -103,7 +103,7 @@ irm https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.ps1 | iex
 panrouter-go
 # Dashboard: http://localhost:20130 (Default password: 123456)
 ```
-> **Already using upstream [PanRouter](https://github.com/decolua/9router)?** Point panrouter-go at the same data dir — it opens the **same `DATA_DIR/db/data.sqlite`**. Your providers, connections, combos, API keys, and usage history carry over as-is. No import step, no migration. See [Sharing a database with PanRouter](#-sharing-a-database-with-panrouter) for the caveats.
+> **Already using upstream [PanRouter](https://github.com/jhopan/PanRouter)?** Point panrouter-go at the same data dir — it opens the **same `DATA_DIR/db/data.sqlite`**. Your providers, connections, combos, API keys, and usage history carry over as-is. No import step, no migration. See [Sharing a database with PanRouter](#-sharing-a-database-with-panrouter) for the caveats.
 
 **Keep the terminal free (background mode):**
 
@@ -209,7 +209,7 @@ milliseconds as `comboStrategies[comboName].firstTokenTimeoutMs`.
 
 ## 🔄 Sharing a database with PanRouter
 
-**Already running [PanRouter](https://github.com/decolua/9router) (the Next.js version)? panrouter-go reads that exact database. There is no import, no export, and no migration step.**
+**Already running [PanRouter](https://github.com/jhopan/PanRouter) (the Next.js version)? panrouter-go reads that exact database. There is no import, no export, and no migration step.**
 
 Both projects default to the same file and speak the same schema:
 
@@ -445,7 +445,7 @@ Issues and pull requests use templates, so pick the right one rather than openin
 
 - **Bug report** — something behaves incorrectly. Include a reproduction, `panrouter-go version`, OS, and the log excerpt around the failure.
 - **Feature request** — the problem you cannot solve today, the surface it touches, and whether upstream already has it.
-- **Upstream parity** — a behaviour `decolua/panrouter` has and this gateway does not; link the upstream commit or PR.
+- **Upstream parity** — a behaviour PanRouter has and this gateway does not; link the upstream commit or PR.
 - **Question** — configuration and usage help.
 
 PRs follow the checks CI runs: `go vet ./...`, `go test -count=1 ./...`, `make test-integration`, plus `cd web && bun test` and `make vet-svelte` for anything touching the dashboard. Before writing code, skim [`AGENTS.md`](AGENTS.md) — provider isolation and the Go/Svelte conventions there are enforced by review.
@@ -456,12 +456,12 @@ PRs follow the checks CI runs: `go vet ./...`, `go test -count=1 ./...`, `make t
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — routing, providers, runtime layout
 - [`DATABASE.md`](DATABASE.md) — SQLite schema & operator contract
 - [`ROADMAP.md`](ROADMAP.md) — proposals only, not current behavior
-- [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.9**, upstream baseline `decolua/panrouter` v0.5.85). Work merged since the last tag lives in [`.changes/`](.changes/) and is folded in at the next release; the dashboard's changelog modal shows both.
+- [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.9**, upstream baseline PanRouter). Work merged since the last tag lives in [`.changes/`](.changes/) and is folded in at the next release; the dashboard's changelog modal shows both.
 - [`docs/TELEGRAM_RELEASE_NOTIFICATIONS.md`](docs/TELEGRAM_RELEASE_NOTIFICATIONS.md) — one-time setup for the release notice posted to Telegram
 
 ## Credits
 
-- [PanRouter](https://github.com/decolua/9router) — original Next.js gateway & dashboard this Go port preserves compatibility with
+- [PanRouter](https://github.com/jhopan/PanRouter) — the behaviour reference this Go port reproduces
 
 ## 📄 License
 

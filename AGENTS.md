@@ -13,17 +13,21 @@ are MIT and both keep their copyright notice in `LICENSE`.
 
 ### Lineage
 
-This repository is a cleaned fork of two MIT projects. **Both copyright notices
-stay in `LICENSE` — never remove them.** They are the entire attribution.
+This repository began from a Go port of two MIT projects. **Both copyright
+notices stay in `LICENSE` — never remove them.** They are the entire attribution,
+and that is the only role they have here.
 
-| Project | Author | What we took |
+| Project | Author | Status |
 |---|---|---|
-| **[9router](https://github.com/decolua/9router)** | decolua and contributors | The original router: provider registry, translators, executor design, dashboard, the whole idea |
-| **[9router-go](https://github.com/luqman-v1/9router-go)** | Luqmanul Hakim | The Go port this repository started from — the proxy engine, the embedded Svelte dashboard, the benchmarks |
+| **[9router](https://github.com/decolua/9router)** | decolua and contributors | Licence credit only. The router this code ultimately descends from |
+| **[9router-go](https://github.com/luqman-v1/9router-go)** | Luqmanul Hakim | Licence credit only. The Go port this repository started from; its git history was intentionally dropped |
 
-The git history of 9router-go was intentionally dropped when this repo was
-created. The code is carried forward; the history is not. Attribution lives in
-`LICENSE`, `README.md` and here.
+**Neither is a reference any more, and neither is a sync source.** Do not port
+changes from 9router-go, do not read it to decide what this repo should do, and do
+not cite it as the specification for a behaviour. The single behaviour reference is
+PanRouter — §1. Where an existing comment cites a 9router issue as the *origin* of
+a behaviour, that comment is history: what the behaviour must match is PanRouter's
+current code.
 
 ### The One Rule
 
@@ -52,14 +56,14 @@ PanRouter-Go (Go, binary)   <- reproduction: same behaviour, ~6x less RAM
 ## 1. Upstream Source of Truth & Local Reference
 
 When implementing features, fixing bugs, adding providers, updating routing
-logic, or verifying API parity, treat **PanRouter** as the behavioural
-specification — panrouter remains the architectural ancestor.
+logic, or verifying API parity, **PanRouter is the only reference.** Everything
+this repository does is either PanRouter's behaviour or a documented divergence
+from it; nothing here is justified by "9router did it".
 
 | Role | Repository | Local path |
 |---|---|---|
-| **Behaviour reference (primary)** | `https://github.com/jhopan/PanRouter` | `C:/Users/ACER/Documents/Project/Panrouter` |
-| Architectural ancestor | `https://github.com/decolua/9router` | — (upstream of both) |
-| Origin of this Go port | `https://github.com/luqman-v1/9router-go` | — (history dropped here) |
+| **Behaviour reference (the only one)** | `https://github.com/jhopan/PanRouter` | `C:/Users/ACER/Documents/Project/Panrouter` |
+| Licence credit, not a reference | `https://github.com/luqman-v1/9router-go` (and `decolua/9router` above it) | — |
 
 ### Parity Protocol
 
@@ -73,9 +77,9 @@ specification — panrouter remains the architectural ancestor.
      ProviderNodes, Usage, Auth).
    - Combo expansion, model fallback, account rotation, strike-breaker quota.
    - SQLite database compatibility (`~/.panrouter/db/data.sqlite`).
-3. **Changelog tracking.** When porting, reference the PanRouter commit or the
-   panrouter issue in your `.changes/<pr-number>-<slug>.md` fragment. Never write
-   it into `CHANGELOG.md` — see §7.6 for the rule and the reason.
+3. **Changelog tracking.** When porting, reference the PanRouter commit, file and
+   line in your `.changes/<pr-number>-<slug>.md` fragment. Never write it into
+   `CHANGELOG.md` — see §7.6 for the rule and the reason.
 
 ### Drift that had to be ported first — all five are ported
 

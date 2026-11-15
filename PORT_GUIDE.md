@@ -16,15 +16,12 @@ in `LICENSE` — do not remove them.
 
 | Project | Author | What we took |
 |---|---|---|
-| **[9router](https://github.com/decolua/9router)** | decolua and contributors | The original router: provider registry, translators, executor design, dashboard, the whole idea |
-| **[9router-go](https://github.com/luqman-v1/9router-go)** | Luqmanul Hakim | The Go port this repository started from — the proxy engine, the embedded Svelte dashboard, the benchmarks |
+| **[9router](https://github.com/decolua/9router)** | decolua and contributors | Licence credit only — the router this code ultimately descends from |
+| **[9router-go](https://github.com/luqman-v1/9router-go)** | Luqmanul Hakim | Licence credit only — the Go port this repository started from (history dropped) |
 
-Behaviour reference: **[PanRouter](https://github.com/jhopan/PanRouter)**, which
-is itself derived from 9router.
-
-The git history of 9router-go was intentionally dropped when this repo was
-created — the code is carried forward, the history is not. Attribution lives in
-`LICENSE`, `README.md` and here.
+Behaviour reference: **[PanRouter](https://github.com/jhopan/PanRouter)**. It is
+the only one: do not port changes from, or read behaviour out of, either project
+above.
 
 ---
 
