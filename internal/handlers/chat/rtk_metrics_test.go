@@ -42,7 +42,7 @@ func TestRTKCompressionMetricsCalculationAndLog(t *testing.T) {
 		t.Fatalf("marshal body: %v", err)
 	}
 
-	got, origTokens, savedTokens, savedPct := h.applyTokenSavers(context.Background(), body, false)
+	got, origTokens, savedTokens, savedPct := applySaverValues(h, context.Background(), body, false)
 	if string(got) == string(body) {
 		t.Fatal("expected RTK to modify body")
 	}

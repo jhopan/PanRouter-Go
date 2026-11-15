@@ -225,6 +225,68 @@ func commandFromDecodedArgs(args map[string]any) string {
 	return ""
 }
 
+// MessageCompressionStats is what one message-level RTK pass weighed and saved.
+//
+// BytesBefore counts every tool-output body the pass considered and BytesAfter
+// what those same bodies weigh once the filters have run, so a body no filter
+// claimed still counts on both sides. That is what keeps the percentage the
+// console line prints a share of the tool output rather than of the bodies that
+// happened to shrink. Port of the stats open-sse/rtk/index.js accumulates.
+type MessageCompressionStats struct {
+	BytesBefore int
+	BytesAfter  int
+	Hits        int
+	// Filters names the filters that claimed a body, in first-seen order and
+	// without repeats — the order upstream's formatRtkLog prints.
+	Filters []string
+}
+
+// rtkCollector runs a compression and records what it weighed. One collector
+// serves a whole body, so the filter list is the document's rather than one
+// message's.
+type rtkCollector struct {
+	stats MessageCompressionStats
+	seen  map[string]bool
+}
+
+// apply compresses one tool-output body and books it against the pass.
+//
+// A body counts as a hit only when it actually shrank: upstream drops the
+// result when it is empty or no smaller than its input (open-sse/rtk/index.js
+// compressText), and a filter that only rewrote a body to the same size has
+// saved nothing to report.
+func (c *rtkCollector) apply(text, command string, cfg RTKConfig) string {
+	c.stats.BytesBefore += len(text)
+	res := CompressTextDetailedWithCommand(text, command, cfg)
+	c.stats.BytesAfter += len(res.Text)
+	if len(res.Text) < len(text) {
+		c.stats.Hits++
+		c.recordFilters(res.TechniquesUsed)
+	}
+	return res.Text
+}
+
+// recordFilters books the filter names behind one compressed body. A technique
+// is named "<filter>:<rule>" for a matched filter (ApplyRTKFilter) and
+// "<stage>-filter" for the fallback stages, so the part before the colon is the
+// filter's own id and is what a reader recognises.
+func (c *rtkCollector) recordFilters(techniques []string) {
+	for _, t := range techniques {
+		name := t
+		if i := strings.IndexByte(name, ':'); i > 0 {
+			name = name[:i]
+		}
+		if name == "" || name == "none" || c.seen[name] {
+			continue
+		}
+		if c.seen == nil {
+			c.seen = make(map[string]bool, len(techniques))
+		}
+		c.seen[name] = true
+		c.stats.Filters = append(c.stats.Filters, name)
+	}
+}
+
 // CompressMessages compresses tool_result content in LLM request bodies in-place.
 // Returns modified body and true if any compression was applied.
 func CompressMessages(body []byte) ([]byte, bool) {
@@ -234,6 +296,19 @@ func CompressMessages(body []byte) ([]byte, bool) {
 // CompressMessagesWithConfig compresses tool_result content in LLM request bodies in-place using RTKConfig.
 // Returns modified body and true if any compression was applied.
 func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
+	return compressMessages(body, cfg, &rtkCollector{})
+}
+
+// CompressMessagesWithConfigStats is CompressMessagesWithConfig plus the
+// per-filter accounting the [RTK] console line prints. The body and the changed
+// flag are exactly those CompressMessagesWithConfig returns.
+func CompressMessagesWithConfigStats(body []byte, cfg RTKConfig) ([]byte, bool, MessageCompressionStats) {
+	c := &rtkCollector{}
+	out, did := compressMessages(body, cfg, c)
+	return out, did, c.stats
+}
+
+func compressMessages(body []byte, cfg RTKConfig, c *rtkCollector) ([]byte, bool) {
 	var rawMap map[string]jsontext.Value
 	if err := json.Unmarshal(body, &rawMap); err != nil {
 		return body, false
@@ -281,14 +356,14 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				continue
 			}
 			if output, ok := msg["output"].(string); ok && len(output) > MinCompressSize {
-				msg["output"] = CompressTextWithCommand(output, command, cfg)
+				msg["output"] = c.apply(output, command, cfg)
 				compressed = true
 			} else if outputArr, ok := msg["output"].([]any); ok {
 				for _, part := range outputArr {
 					if partMap, ok := part.(map[string]any); ok {
 						if t, ok := partMap["type"].(string); ok && (t == "input_text" || t == "text") {
 							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
-								partMap["text"] = CompressTextWithCommand(text, command, cfg)
+								partMap["text"] = c.apply(text, command, cfg)
 								compressed = true
 							}
 						}
@@ -316,14 +391,14 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				continue
 			}
 			if content, ok := msg["content"].(string); ok && len(content) > MinCompressSize {
-				msg["content"] = CompressTextWithCommand(content, command, cfg)
+				msg["content"] = c.apply(content, command, cfg)
 				compressed = true
 			} else if contentArr, ok := msg["content"].([]any); ok {
 				for _, part := range contentArr {
 					if partMap, ok := part.(map[string]any); ok {
 						if t, ok := partMap["type"].(string); ok && t == "text" {
 							if text, ok := partMap["text"].(string); ok && len(text) > MinCompressSize {
-								partMap["text"] = CompressTextWithCommand(text, command, cfg)
+								partMap["text"] = c.apply(text, command, cfg)
 								compressed = true
 							}
 						}
@@ -361,18 +436,18 @@ func CompressMessagesWithConfig(body []byte, cfg RTKConfig) ([]byte, bool) {
 				}
 
 				if text, ok := block["text"].(string); ok && len(text) > MinCompressSize {
-					block["text"] = CompressTextWithCommand(text, command, cfg)
+					block["text"] = c.apply(text, command, cfg)
 					compressed = true
 				}
 				if content, ok := block["content"].(string); ok && len(content) > MinCompressSize {
-					block["content"] = CompressTextWithCommand(content, command, cfg)
+					block["content"] = c.apply(content, command, cfg)
 					compressed = true
 				} else if innerArr, ok := block["content"].([]any); ok {
 					for _, innerPart := range innerArr {
 						if innerBlock, ok := innerPart.(map[string]any); ok {
 							if innerBlock["type"] == "text" {
 								if text, ok := innerBlock["text"].(string); ok && len(text) > MinCompressSize {
-									innerBlock["text"] = CompressTextWithCommand(text, command, cfg)
+									innerBlock["text"] = c.apply(text, command, cfg)
 									compressed = true
 								}
 							}

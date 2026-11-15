@@ -704,7 +704,9 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// beta query, the OAuth cloaking and the beta-flag merge below.
 	upstreamClaude := isAnthropic || servesClaudeMessages(provider, providerCfg)
 	compressStart := time.Now()
-	pipedBody, origTokens, savedTokens, savedPct := h.applyTokenSavers(ctx, body, claudeNative)
+	saver := h.applyTokenSavers(ctx, body, claudeNative)
+	pipedBody := saver.Body
+	origTokens, savedTokens, savedPct := saver.OrigTokens, saver.SavedTokens, saver.SavedPct
 	compressDurMs := int(time.Since(compressStart).Milliseconds())
 	if compressDurMs <= 0 {
 		compressDurMs = 1
@@ -924,6 +926,40 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		requestedName = translator.RequestedModelFromContext(ctx)
 	}
 	comboName := f.ComboName
+
+	// Correlated console lines for this attempt (port of chatCore.js:258-279 and
+	// the saver line at :348). The body is final by now — every translator,
+	// sanitizer and saver has rewritten it — so the counts describe what the
+	// upstream is about to receive. The request line walks that body, so it is
+	// built only when the level will print it; the tag and the attempt id are
+	// read either way, because the DONE line of this attempt carries the same
+	// pair.
+	reqTag := log.TagForSession(handlerutil.GetSessionID(ctx))
+	reqID := log.RequestID()
+	if log.LineEnabled() {
+		// A request whose model id never reached the context (a bypass path, a
+		// probe) prints the resolved model, which is what the client asked for
+		// in that case.
+		clientModel := requestedName
+		if clientModel == "" {
+			clientModel = provider + "/" + model
+		}
+		msgs, tools := bodyShapeCounts(pipedBody)
+		emitAttemptLines(reqTag, log.RequestLine{
+			ClientModel: clientModel,
+			Provider:    provider,
+			Model:       model,
+			SourceFmt:   clientWireFormat(ctx, endpoint),
+			TargetFmt:   upstreamWireFormat(provider, wireModel, providerCfg),
+			Stream:      isStream,
+			Messages:    msgs,
+			Tools:       tools,
+			Think:       thinkForLine(thinkingIntent),
+			AccName:     f.ConnName,
+			AccID:       connectionID,
+			RequestID:   reqID,
+		}, saver)
+	}
 	usagetracker.GetTracker().TrackPendingRequested(requestedName, comboName, model, provider, connectionID, true, false)
 	defer func() {
 		hasErr := fwdErr != nil
@@ -1294,6 +1330,17 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 		logInfo.ConnName, logInfo.ConnEmail = identityNames(h.connIdentityKVOr(f, connectionID))
 		h.logUsage(ctx, logInfo, usage, latencyMs, body, metrics)
+		// This attempt's completion line, from the usage the path has already
+		// parsed and the latency it has already measured — the same three
+		// figures upstream prints from (requestDetail.js:86-101).
+		log.Line(reqTag, "📊", log.FormatDoneLine(log.DoneLine{
+			TotalMs:    latencyMs,
+			TTFTMs:     metrics.TTFT,
+			InTokens:   usage.PromptTokens,
+			OutTokens:  usage.CompletionTokens,
+			CacheRead:  usage.GetCachedTokens(),
+			CacheWrite: usage.CacheCreationInputTokens,
+		}))
 		metrics.ResponseBuf.Reset()
 		fwdErr = nil
 		return nil
@@ -1413,15 +1460,20 @@ func isClientCanceled(ctx context.Context, err error) bool {
 // /v1/messages): system prompts must go to the top-level "system" field —
 // a role:"system" message is rejected by the Anthropic API.
 // false from compress/inject means nothing changed (or unparseable) — keep original, not a failure.
-func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeNative bool) ([]byte, int, int, int) {
+//
+// The result carries what the pass did to the body, including the RTK byte
+// accounting and the caveman level whose prompt was applied, because the
+// correlated console lines print both (chatCore.js:313-322).
+func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeNative bool) tokenSaverResult {
+	res := tokenSaverResult{Body: body}
 	// X-PanRouter-Token-Saver: off|0|false|bypass opts the whole request out of
 	// every token saver — RTK, Caveman, Ponytail, ADHD, Headroom, system prompt
 	// prefix/suffix — and the body is forwarded untouched with 0 tokens saved.
 	if TokenSaverBypassEnabled(ctx) {
-		return body, 0, 0, 0
+		return res
 	}
 	if h.TokenSaver == nil {
-		return body, 0, 0, 0
+		return res
 	}
 	// Prompt-injection guard: tag (never block) flagged user content. Early
 	// detection here means operators can see abuse before it reaches upstream.
@@ -1435,7 +1487,12 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 	var origTokens, savedTokens, savedPct int
 	if h.TokenSaver.RTKEnabled() {
 		rtkCfg := h.TokenSaver.RTKConfig()
-		if next, did := tokensaver.CompressMessagesWithConfig(out, rtkCfg); did {
+		next, did, stats := tokensaver.CompressMessagesWithConfigStats(out, rtkCfg)
+		// Booked whether or not the pass changed anything: the console line
+		// prints nothing without a hit, and the bytes it weighed answer "why
+		// was nothing compressed" for a body full of tool output.
+		res.RTK = stats
+		if did {
 			origTokens = len(out) / 4
 			compressedTokens := len(next) / 4
 			savedTokens = origTokens - compressedTokens
@@ -1474,9 +1531,11 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 			bypass = true
 		}
 		if !bypass {
-			prompt := tokensaver.GetCavemanPromptWithLang(h.TokenSaver.CavemanLevel(), h.TokenSaver.CavemanLanguage())
+			level := h.TokenSaver.CavemanLevel()
+			prompt := tokensaver.GetCavemanPromptWithLang(level, h.TokenSaver.CavemanLanguage())
 			if next, did := inject(out, prompt); did {
 				out = next
+				res.CavemanLevel = level
 				recordPersonaInjection(&origTokens, &savedTokens, beforeLen, len(next))
 				beforeLen = len(out)
 			}
@@ -1566,7 +1625,11 @@ func (h *ChatHandler) applyTokenSavers(ctx context.Context, body []byte, claudeN
 			}
 		}
 	}
-	return out, origTokens, savedTokens, savedPct
+	res.Body = out
+	res.OrigTokens = origTokens
+	res.SavedTokens = savedTokens
+	res.SavedPct = savedPct
+	return res
 }
 
 func resolveProtocol(endpoint string) string {

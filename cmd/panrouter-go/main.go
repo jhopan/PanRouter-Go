@@ -343,6 +343,17 @@ func unknownCommandError(args []string) error {
 }
 
 func runServer(cCtx *cli.Context) error {
+	// A service-managed process has no writable stdout — the Windows scheduled
+	// task hands it none — so its console, including the per-request lines that
+	// name the account and the token counts, would go nowhere and `panrouter-go
+	// logs` would show a file that stopped at the previous run. Tee it into the
+	// run log instead. Skipped for the background daemon (whose stdout is already
+	// that file) and when LOG_FILE names an explicit destination.
+	if os.Getenv("LOG_FILE") == "" && os.Getenv(daemon.EnvBackground) == "" {
+		if detach, err := daemon.AttachConsoleLog(); err == nil {
+			defer detach()
+		}
+	}
 	if logPath := os.Getenv("LOG_FILE"); logPath != "" {
 		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
