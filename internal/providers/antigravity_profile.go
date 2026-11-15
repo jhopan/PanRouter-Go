@@ -71,20 +71,15 @@ func IsAntigravityClientProfile(v any) bool {
 // plain string (settings JSON, quota tracker) use this rather than a cast.
 func (p AntigravityClientProfile) String() string { return string(p) }
 
-// AntigravityUserAgentFor returns the User-Agent header for the given profile.
+// AntigravityUserAgentFor returns the User-Agent header for a connection.
 //
-//	ide → antigravity/<ide version>            (the IDE app's own shape)
-//	cli → antigravity/cli/<cli version> (aidev_client; os_type=…; arch=…;
-//	      cl=…; auth_method=consumer)          (the standalone `agy` CLI)
-//
-// The two stay different strings: the profile setting would be a no-op
-// otherwise. Note that AntigravityIDEUserAgent in client_identity.go is pinned
-// to the CLI shape because the legacy IDE flavor receives 404 on the Argon
-// lanes; this function is the profile-aware replacement for callers that want
-// the operator's choice honoured.
+// The profile no longer selects the identity. It used to: `ide` produced
+// antigravity/<version> and `cli` the agy CLI string, on the theory that the two
+// clients differed. PanRouter's 2026-11-14 capture settled it — the shipped
+// client sends one value, `antigravity/hub/2.32.1 (aidev_client; os_type=…;
+// arch=…; cl=1021296516)` — so a profile that changed the header would present a
+// fingerprint no real client has. The profile stays because other behaviour is
+// keyed on it; the header does not.
 func AntigravityUserAgentFor(profile AntigravityClientProfile) string {
-	if profile == AntigravityProfileCLI {
-		return AntigravityCLIUserAgent
-	}
-	return "antigravity/" + AntigravityIDEVersion
+	return AntigravityUserAgent()
 }

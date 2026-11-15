@@ -1168,7 +1168,7 @@ func (h *DashboardHandler) writeConnectionModels(w http.ResponseWriter, r *http.
 		headers := map[string]string{
 			"Content-Type":  "application/json",
 			"Authorization": "Bearer " + token,
-			"User-Agent":    providers.AntigravityCLIUserAgent,
+			"User-Agent":    providers.AntigravityUserAgent(),
 		}
 		status, body, err := validateProbeDo(r.Context(), http.MethodPost, "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", headers, reqPayload)
 		if err != nil {

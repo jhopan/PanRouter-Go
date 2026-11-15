@@ -215,11 +215,13 @@ func mustReadAll(r io.Reader) []byte {
 // discovered as the CLI rather than as the IDE — and a caller with no
 // connection data still gets the CLI shape rather than nothing.
 func TestAntigravityProjectUserAgent(t *testing.T) {
-	ideUA := providers.AntigravityUserAgentFor(providers.AntigravityProfileIDE)
-	cliUA := providers.AntigravityUserAgentFor(providers.AntigravityProfileCLI)
-	if ideUA == cliUA {
-		t.Fatal("IDE and CLI user agents are identical; the profile setting would be a no-op")
-	}
+	// One captured identity for every profile. The profile used to pick between
+	// two strings; PanRouter's 2026-11-14 capture shows the shipped client sends
+	// a single value, so the resolver must return it whatever the connection
+	// stores (the profile still drives other behaviour). The identity itself is
+	// pinned in providers.TestAntigravityUserAgentFor.
+	want := providers.AntigravityUserAgent()
+	ideUA, cliUA := want, want
 
 	tests := []struct {
 		name string

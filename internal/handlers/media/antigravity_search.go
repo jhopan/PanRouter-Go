@@ -258,7 +258,7 @@ func (h *MediaHandler) tryAntigravitySearchConn(w http.ResponseWriter, r *http.R
 
 	httpReq.Header.Set(constants.HeaderContentType, constants.ContentTypeJSON)
 	httpReq.Header.Set(constants.HeaderAuthorization, "Bearer "+apiKey)
-	httpReq.Header.Set("User-Agent", providers.AntigravityCLIUserAgent)
+	httpReq.Header.Set("User-Agent", providers.AntigravityUserAgent())
 
 	client, clientErr := h.ChatH.GetClientForConnection(connData)
 	if clientErr != nil {

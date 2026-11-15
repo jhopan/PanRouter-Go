@@ -1,6 +1,9 @@
 package providers
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeAntigravityClientProfile(t *testing.T) {
 	tests := []struct {
@@ -43,24 +46,37 @@ func TestIsAntigravityClientProfile(t *testing.T) {
 	}
 }
 
+// TestAntigravityUserAgentFor pins the identity contract after the capture.
+//
+// The profile used to choose between two strings (an ide shape and the agy CLI
+// one). PanRouter's 2026-11-14 capture shows the shipped client sends a single
+// value — antigravity/hub/2.32.1 (aidev_client; os_type=…; arch=…;
+// cl=1021296516) — so a profile that changed the header would present a
+// fingerprint no real client has. The profile still exists because other
+// behaviour is keyed on it; the header no longer varies.
 func TestAntigravityUserAgentFor(t *testing.T) {
-	ide := AntigravityUserAgentFor(AntigravityProfileIDE)
-	if ide != "antigravity/"+AntigravityIDEVersion {
-		t.Errorf("IDE user agent = %q, want %q", ide, "antigravity/"+AntigravityIDEVersion)
+	want := AntigravityUserAgent()
+	for _, profile := range []AntigravityClientProfile{AntigravityProfileIDE, AntigravityProfileCLI, "bogus"} {
+		if got := AntigravityUserAgentFor(profile); got != want {
+			t.Errorf("AntigravityUserAgentFor(%q) = %q, want the one captured identity %q", profile, got, want)
+		}
 	}
-	cli := AntigravityUserAgentFor(AntigravityProfileCLI)
-	if cli != AntigravityCLIUserAgent {
-		t.Errorf("CLI user agent = %q, want %q", cli, AntigravityCLIUserAgent)
+
+	// The captured shape, not merely a non-empty string.
+	prefix := "antigravity/hub/" + AntigravityHubVersion + " (aidev_client; os_type="
+	if !strings.HasPrefix(want, prefix) || !strings.HasSuffix(want, "; cl="+AntigravityClientLabel+")") {
+		t.Errorf("default identity = %q, want the captured hub descriptor %q…", want, prefix)
 	}
-	// The two profiles must not produce the same string, or the setting is a
-	// no-op.
-	if ide == cli {
-		t.Error("IDE and CLI user agents are identical; the profile setting has no effect")
+
+	// The escape hatch restores the pre-capture CLI string, which is what makes an
+	// A/B test on a live account possible without rebuilding.
+	t.Setenv("ANTIGRAVITY_IDENTITY", AntigravityIdentityCLI)
+	legacy := AntigravityUserAgent()
+	if !strings.HasPrefix(legacy, "antigravity/cli/") {
+		t.Errorf("ANTIGRAVITY_IDENTITY=cli produced %q, want the legacy cli identity", legacy)
 	}
-	// An unknown profile falls back to IDE through Normalize, and the
-	// function itself must behave the same way.
-	if got := AntigravityUserAgentFor("bogus"); got != ide {
-		t.Errorf("unknown profile user agent = %q, want the IDE shape %q", got, ide)
+	if legacy == want {
+		t.Error("the override did not change the identity")
 	}
 }
 

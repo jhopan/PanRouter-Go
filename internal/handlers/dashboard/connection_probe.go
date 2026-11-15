@@ -901,7 +901,7 @@ func classifyOAuthProbe(status int, cfg oauthProbeConfig) oauthProbeAttempt {
 func probeCloudCodeAssist(ctx context.Context, client *http.Client, provider, accessToken string) oauthProbeAttempt {
 	userAgent := "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0"
 	if provider == "antigravity" || provider == "agy" {
-		userAgent = providers.AntigravityCLIUserAgent
+		userAgent = providers.AntigravityUserAgent()
 	}
 	status, body, err := connectionProbeDo(ctx, client, http.MethodPost, cloudCodeAssistProbeURL, map[string]string{
 		"Authorization": "Bearer " + accessToken,

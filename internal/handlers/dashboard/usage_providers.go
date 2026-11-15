@@ -1727,7 +1727,6 @@ var antigravityDashboardBaseURL = "https://cloudcode-pa.googleapis.com"
 // intentionally stays on PROD and is untouched.
 var antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 
-const antigravityDashboardUA = providers.AntigravityCLIUserAgent
 
 var antigravityImportantModels = map[string]bool{
 	"gemini-4-carbon-high": true, "gemini-4-carbon-medium": true, "gemini-4-carbon-low": true,
@@ -1749,7 +1748,7 @@ var antigravityImportantModels = map[string]bool{
 func antigravityDashboardHeaders(accessToken string) map[string]string {
 	return map[string]string{
 		"Authorization":    "Bearer " + accessToken,
-		"User-Agent":       antigravityDashboardUA,
+		"User-Agent":       providers.AntigravityUserAgent(),
 		"Content-Type":     "application/json",
 		"X-Client-Name":    "antigravity",
 		"X-Client-Version": providers.AntigravityIDEVersion,

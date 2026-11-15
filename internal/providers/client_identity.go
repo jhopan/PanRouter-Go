@@ -1,5 +1,11 @@
 package providers
 
+import (
+	"os"
+	"runtime"
+	"strings"
+)
+
 // Upstream ships one version constant per client family and derives every
 // identity header from it (open-sse/providers/registry/codex.js CODEX_CLI_VERSION,
 // open-sse/config/grokCli.js GROK_CLI_VERSION). These are the same two values,
@@ -37,15 +43,79 @@ const (
 	// GrokCLIPagerIdentifier is the identifier the probe and OAuth paths send.
 	GrokCLIPagerIdentifier = "grok-pager"
 
-	// Antigravity client identifiers. Google Cloud Code upstream requires the 'cli'
-	// flavor for Gemini 4 Argon tiered models (the 'ide' flavor receives HTTP 404).
-	// Version and cl observed on the real agy 1.5.1 release (2026-11-05,
-	// capture published same-day in iamxeph/pi-provider-antigravity#108); cl
-	// is not a binary constant, it comes from runtime config, so each bump
-	// needs a fresh live capture. os_type/arch stay pinned to windows/amd64
-	// on purpose so every pooled account presents one identical fingerprint.
-	AntigravityCLIVersion   = "1.5.1"
-	AntigravityIDEVersion   = "2.24.0"
-	AntigravityCLIUserAgent = "antigravity/cli/" + AntigravityCLIVersion + " (aidev_client; os_type=windows; arch=amd64; cl=1014269460; auth_method=consumer)"
-	AntigravityIDEUserAgent = AntigravityCLIUserAgent
+	// Antigravity identity. ONE captured value, not an assembly of guesses:
+	//
+	//   antigravity/hub/2.32.1 (aidev_client; os_type=<host>; arch=<host>; cl=1021296516)
+	//
+	// PanRouter's capture (2026-11-14) ran the shipped Hub client
+	// (language_server.exe) with the argument set the Hub launcher passes —
+	// `--subclient_type hub --override_ide_version 2.32.1` — against a local
+	// listener and read the wire value. It settles three things: "hub" is the
+	// subclient type rather than a product name, the version is the Hub app's own
+	// (2.32.1, neither the IDE release nor its VS Code base), and the trailing
+	// parenthesised block is a client descriptor, not the old macOS-style
+	// darwin/arm64 suffix that no real client ever sent.
+	//
+	// os_type/arch describe the machine, because the real client always describes
+	// the machine it runs on: a Linux box must not claim windows.
+	//
+	// This port had a different capture — the standalone `agy` CLI 1.5.1 with
+	// `antigravity/cli/…; auth_method=consumer` (2026-11-05) — and a note that the
+	// non-cli flavour answered the Argon lanes with 404. Two captures cannot both
+	// describe the same lane, so the parity value is the default and
+	// ANTIGRAVITY_IDENTITY=cli restores the previous string without a rebuild
+	// (see AntigravityUserAgent).
+	AntigravityHubVersion  = "2.32.1"
+	AntigravityClientLabel = "1021296516"
+	// AntigravityIDEVersion is the value the X-Client-Version headers carry. It
+	// tracks the Hub version: one client identity across every Antigravity call.
+	AntigravityIDEVersion = AntigravityHubVersion
+
+	// antigravityLegacyCLIUserAgent is the identity this port shipped before the
+	// capture above, kept only behind ANTIGRAVITY_IDENTITY=cli.
+	antigravityLegacyCLIUserAgent = "antigravity/cli/1.5.1 (aidev_client; os_type=windows; arch=amd64; cl=1014269460; auth_method=consumer)"
 )
+
+// AntigravityIdentities are the two values ANTIGRAVITY_IDENTITY accepts.
+const (
+	AntigravityIdentityHub = "hub"
+	AntigravityIdentityCLI = "cli"
+)
+
+// AntigravityUserAgent returns the User-Agent every Antigravity call sends.
+//
+// ANTIGRAVITY_IDENTITY=cli selects the pre-capture CLI flavour, which is the one
+// the repository's older note claims the Argon lanes require. It exists so the
+// difference can be A/B tested on a live account without rebuilding the binary;
+// the default is the captured Hub identity because PanRouter is the reference.
+func AntigravityUserAgent() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ANTIGRAVITY_IDENTITY")), AntigravityIdentityCLI) {
+		return antigravityLegacyCLIUserAgent
+	}
+	return "antigravity/hub/" + AntigravityHubVersion +
+		" (aidev_client; os_type=" + antigravityOsType() +
+		"; arch=" + antigravityArch() +
+		"; cl=" + AntigravityClientLabel + ")"
+}
+
+// antigravityOsType names the host the way the client descriptor does: the
+// client's own word for macOS is "macos", not "darwin".
+func antigravityOsType() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "windows"
+	case "darwin":
+		return "macos"
+	default:
+		return "linux"
+	}
+}
+
+// antigravityArch maps the build's architecture onto the two names the client
+// descriptor uses.
+func antigravityArch() string {
+	if runtime.GOARCH == "arm64" {
+		return "arm64"
+	}
+	return "amd64"
+}

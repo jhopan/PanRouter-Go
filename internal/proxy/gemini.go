@@ -126,7 +126,7 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 	headers := map[string]string{
 		"Content-Type":  "application/json",
 		"Authorization": "Bearer " + apiKey,
-		"User-Agent":    providers.AntigravityCLIUserAgent,
+		"User-Agent":    providers.AntigravityUserAgent(),
 		"Accept":        accept,
 	}
 	if isStream {
