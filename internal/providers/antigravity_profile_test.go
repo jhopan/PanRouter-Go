@@ -88,3 +88,31 @@ func TestAntigravityClientProfileString(t *testing.T) {
 		t.Errorf("String() = %q, want ide", got)
 	}
 }
+
+// TestAntigravityIdentityOverride pins which values the escape hatch accepts.
+//
+// The variable is this port's own (the reference has one identity and no
+// switch), so a typo must not silently invent a third identity: only the two
+// known names count, and anything else leaves the captured Hub value in place.
+func TestAntigravityIdentityOverride(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"", ""},
+		{"hub", AntigravityIdentityHub},
+		{"HUB", AntigravityIdentityHub},
+		{" cli ", AntigravityIdentityCLI},
+		{"ide", ""},
+		{"garbage", ""},
+	}
+	for _, tc := range tests {
+		t.Setenv("ANTIGRAVITY_IDENTITY", tc.value)
+		if got := AntigravityIdentityOverride(); got != tc.want {
+			t.Errorf("AntigravityIdentityOverride() with %q = %q, want %q", tc.value, got, tc.want)
+		}
+		if tc.want == "" && !strings.HasPrefix(AntigravityUserAgent(), "antigravity/hub/") {
+			t.Errorf("identity %q changed the User-Agent away from the captured hub value", tc.value)
+		}
+	}
+}

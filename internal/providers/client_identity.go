@@ -82,6 +82,19 @@ const (
 	AntigravityIdentityCLI = "cli"
 )
 
+// AntigravityIdentityOverride reports the value ANTIGRAVITY_IDENTITY names, or
+// "" when the captured Hub identity is in use. The variable is this port's own:
+// the reference has one identity and no switch, so an override is a deployment
+// decision that the boot log announces.
+func AntigravityIdentityOverride() string {
+	switch value := strings.ToLower(strings.TrimSpace(os.Getenv("ANTIGRAVITY_IDENTITY"))); value {
+	case AntigravityIdentityCLI, AntigravityIdentityHub:
+		return value
+	default:
+		return ""
+	}
+}
+
 // AntigravityUserAgent returns the User-Agent every Antigravity call sends.
 //
 // ANTIGRAVITY_IDENTITY=cli selects the pre-capture CLI flavour, which is the one

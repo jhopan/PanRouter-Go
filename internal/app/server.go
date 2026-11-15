@@ -136,6 +136,14 @@ func ProvideServer(p ServerParams) *http.Server {
 			chat.SetAntigravityKVStore(p.Repo)
 			chat.RestoreAntigravityIneligible()
 			chat.LoadPersistedAntigravityQuota()
+			// Which Antigravity identity this process sends. The default is the
+			// captured Hub descriptor and needs no announcement; a non-default one
+			// is an operator decision that changes what Google sees on every call,
+			// so it gets a line in the boot log instead of being a silent
+			// difference from the reference.
+			if identity := providers.AntigravityIdentityOverride(); identity != "" {
+				log.Printf("[antigravity] identity override active: %s (User-Agent: %s)", identity, providers.AntigravityUserAgent())
+			}
 			// The tamper-evident audit trail: one writer goroutine, a bounded
 			// queue, and the retention sweeper when a window is configured.
 			// It is started here rather than in a provider because it must run
