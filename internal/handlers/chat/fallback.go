@@ -1655,6 +1655,14 @@ const (
 	// generic two-hour ceiling puts an account that is still out of quota back
 	// into rotation.
 	maxMonthlyResetCooldown = 40 * 24 * time.Hour
+
+	// maxWeeklyResetCooldown is the ceiling for a provider whose quota window
+	// is WEEKLY. Token Harbor's free tier is a rolling 7-day allowance
+	// (upstream registers it as QUOTA_SCOPES.WEEKLY), so the reset it names is
+	// at most one window out; a longer one is a parse or a clock bug and must
+	// not park the account past the window it belongs to. This is also the
+	// calendar the park falls back to when the 429 body names no reset.
+	maxWeeklyResetCooldown = 7 * 24 * time.Hour
 )
 
 // codebuddyIntlProviders are the spellings a stored connection row may use for
@@ -1679,16 +1687,6 @@ func stopsRotationOnRateLimit(provider string, ue *upstreamError) bool {
 		return false
 	}
 	return codebuddyIntlProviders[provider]
-}
-
-// monthlyCooldownProviders are the providers whose declared quota scope is
-// MONTHLY, so an announced reset may legitimately be days away. Both spellings
-// of the CodeBuddy pair are listed because a connection row may store either.
-var monthlyCooldownProviders = map[string]bool{
-	"codebuddy-intl": true,
-	"codebuddy-cn":   true,
-	"cbai":           true,
-	"cbcn":           true,
 }
 
 // extractResetDuration attempts to extract a structured reset duration from an error payload.

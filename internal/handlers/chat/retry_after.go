@@ -4,11 +4,13 @@ import (
 	json "encoding/json/v2"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"panrouter/proxy/internal/constants"
+	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/translator"
 )
 
@@ -55,22 +57,66 @@ const comboRetryWaitCap = 8 * time.Second
 // a brief mute becomes a longer one.
 const deepSeekWebMaxMuteCooldown = 7 * 24 * time.Hour
 
+// quotaScope is the calendar cadence a provider's free tier refills on, ported
+// from upstream QUOTA_SCOPES (open-sse/config/quotaWindows.js). The declared
+// scope decides two things: the ceiling an announced reset is bounded by, and
+// the calendar a refusal parks on when its body names no reset of its own.
+type quotaScope int
+
+const (
+	// scopeMonthly is a calendar-month window (CodeBuddy's subscription cycle).
+	scopeMonthly quotaScope = iota
+	// scopeWeekly is a rolling weekly window: Token Harbor's free allowance
+	// refills at the next weekly rollover (upstream
+	// `tokenharbor: { scope: QUOTA_SCOPES.WEEKLY }`).
+	scopeWeekly
+)
+
+// quotaWindowScopes are the providers whose quota window this router knows.
+// Both spellings of the CodeBuddy pair are listed because a connection row may
+// store either; resolving the provider's alias covers the rest (`cbai` →
+// codebuddy-intl, `th`/`thh` → tokenharbor).
+var quotaWindowScopes = map[string]quotaScope{
+	"codebuddy-intl": scopeMonthly,
+	"codebuddy-cn":   scopeMonthly,
+	"cbai":           scopeMonthly,
+	"cbcn":           scopeMonthly,
+	"tokenharbor":    scopeWeekly,
+}
+
+// scopeFor resolves a provider id (or one of its aliases) to the quota scope it
+// declares, or ok=false for a provider with no declared window.
+func scopeFor(provider string) (quotaScope, bool) {
+	if scope, ok := quotaWindowScopes[provider]; ok {
+		return scope, true
+	}
+	scope, ok := quotaWindowScopes[providers.ResolveAlias(provider)]
+	return scope, ok
+}
+
 // maxCooldownFor returns the ceiling for an announced wait on one provider.
 //
 // Most providers state a wait in minutes, and the generic two-hour ceiling is
-// generous for them. Two exceptions, both because the provider names the real
+// generous for them. The exceptions are the providers that name the real
 // release time:
 //   - deepseek-web announces a mute end (up to a week).
 //   - CodeBuddy Intl/CN run on MONTHLY quotas (upstream quotaWindows.js
 //     registers both as QUOTA_SCOPES.MONTHLY), so a frequency limit can name a
 //     reset days away. Clamping that to two hours is what puts an exhausted
 //     account back into rotation while it is still out of quota.
+//   - Token Harbor runs on a WEEKLY rolling allowance, so its ceiling is one
+//     weekly window: upstream bounds the same reset by
+//     quotaWindowFor(provider).maxCooldownMs, and a daily/monthly ceiling would
+//     either park an empty account for weeks or hand it back mid-window.
 func maxCooldownFor(provider string) time.Duration {
 	if provider == "deepseek-web" {
 		return deepSeekWebMaxMuteCooldown
 	}
-	if monthlyCooldownProviders[provider] {
-		return maxMonthlyResetCooldown
+	if scope, ok := scopeFor(provider); ok {
+		if scope == scopeMonthly {
+			return maxMonthlyResetCooldown
+		}
+		return maxWeeklyResetCooldown
 	}
 	return maxResetCooldown
 }
@@ -94,6 +140,101 @@ func comboPassRetryWait(earliest time.Duration, rateLimited bool) time.Duration 
 	return earliest
 }
 
+// tokenharborAllowanceMarker is the phrase Token Harbor's free-tier refusal
+// carries ("You've used this period's free allowance"). Upstream keys both the
+// quota classification (quotaWindows.js QUOTA_EXHAUSTED_SIGNALS) and the reset
+// parse (auth.js tokenharborResetMs) on it, so a 429 without it is a plain
+// burst throttle and keeps the ordinary backoff.
+const tokenharborAllowanceMarker = "free allowance"
+
+// tokenharborResetRe matches the reset sentence a Token Harbor free-allowance
+// 429 states: "Your next rolling 7-day period starts on 2 Oct 2026 at 06:22
+// UTC". Ported from upstream TH_RESET_RE (src/sse/services/auth.js:22).
+var tokenharborResetRe = regexp.MustCompile(
+	`(?i)(?:starts? on|next .{0,24}period starts? on)\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*UTC`)
+
+// tokenharborResetAt parses the exact instant out of a Token Harbor
+// free-allowance 429 body — upstream tokenharborResetMs
+// (src/sse/services/auth.js:20-60).
+//
+// It applies only to the tokenharbor lane (its `th`/`thh` aliases resolve
+// through the shared alias table) and only to a 429, and it refuses a body
+// whose wording does not match rather than guessing a date: the shape of the
+// sentence is the only evidence that a date in the text is the reset. A named
+// instant that is already past names no future window, so it is refused too
+// (upstream returns null for it) and the caller's calendar fallback applies.
+func tokenharborResetAt(statusCode int, provider string, body []byte, now time.Time) (time.Time, bool) {
+	if !isTokenharborAllowance(statusCode, provider, body) {
+		return time.Time{}, false
+	}
+	m := tokenharborResetRe.FindStringSubmatch(string(body))
+	if m == nil {
+		return time.Time{}, false
+	}
+	// The layout carries no zone, so Parse yields UTC whatever the host's zone
+	// is: the same body gives the same instant on every gateway, and Go's month
+	// match ignores case the way the upstream regex does.
+	reset, err := time.Parse("2 Jan 2006 15:04", m[1]+" "+m[2]+":"+m[3])
+	if err != nil {
+		return time.Time{}, false
+	}
+	if !reset.After(now) {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
+// isTokenharborAllowance reports whether a failure is Token Harbor's
+// free-allowance refusal at all: the tokenharbor lane (by id or alias), a 429,
+// and the allowance wording in the body.
+func isTokenharborAllowance(statusCode int, provider string, body []byte) bool {
+	if statusCode != http.StatusTooManyRequests {
+		return false
+	}
+	if providers.ResolveAlias(provider) != "tokenharbor" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(body)), tokenharborAllowanceMarker)
+}
+
+// tokenharborParkDuration returns how long a Token Harbor free-allowance 429
+// parks the account, or ok=false for every other provider, status and body.
+//
+// Order of truth mirrors upstream: the instant the body states wins over the
+// fixed quota cooldown the classifier hands back (auth.js:439-441 builds
+// cooldownMs from the parsed reset before checkFallbackError's rule table is
+// consulted), and it is bounded by the provider's own window. When the body
+// names no parseable reset — the message shape changed, or the instant it named
+// has passed — the provider's calendar takes over, exactly as upstream's
+// quotaWindow.js resolver falls back to calendarResetMs(scope) for a
+// WEEKLY-scoped provider.
+func tokenharborParkDuration(statusCode int, provider string, ue *upstreamError, now time.Time) (time.Duration, bool) {
+	var body []byte
+	if ue != nil {
+		body = ue.Body
+	}
+	if !isTokenharborAllowance(statusCode, provider, body) {
+		return 0, false
+	}
+	if reset, ok := tokenharborResetAt(statusCode, provider, body, now); ok {
+		return clampCooldown(reset.Sub(now), maxWeeklyResetCooldown), true
+	}
+	return clampCooldown(nextWeeklyRollover(now).Sub(now), maxWeeklyResetCooldown), true
+}
+
+// nextWeeklyRollover returns the coming weekly quota boundary: the next Monday
+// at 00:00 UTC, or the Monday after when now IS a Monday. It is upstream
+// calendarResetMs(QUOTA_SCOPES.WEEKLY) with weeklyResetWeekday = 1.
+func nextWeeklyRollover(now time.Time) time.Time {
+	utc := now.UTC()
+	day := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+	delta := (int(time.Monday) - int(utc.Weekday()) + 7) % 7
+	if delta == 0 {
+		delta = 7
+	}
+	return day.AddDate(0, 0, delta)
+}
+
 // retryableCooldownSec returns how long a failed account must stay out of
 // rotation, in seconds, given the classifier's own backoff as the baseline.
 //
@@ -105,7 +246,16 @@ func comboPassRetryWait(earliest time.Duration, rateLimited bool) time.Duration 
 // account again instead of waiting out a lock it set itself. Every other
 // status keeps the quota-reset reading it has always had. maxResetCooldown
 // stops a hostile or nonsensical duration from parking an account forever.
+//
+// A Token Harbor free-allowance 429 overrides both readings: see
+// tokenharborParkDuration.
 func retryableCooldownSec(statusCode int, base time.Duration, ue *upstreamError, provider string) int {
+	return retryableCooldownSecAt(statusCode, base, ue, provider, time.Now())
+}
+
+// retryableCooldownSecAt is retryableCooldownSec with the clock injected, so a
+// test can pin the instant a park ends without waiting out the calendar.
+func retryableCooldownSecAt(statusCode int, base time.Duration, ue *upstreamError, provider string, now time.Time) int {
 	cooldown := base
 	if statusCode == http.StatusTooManyRequests {
 		if wait, ok := retryAfterWait(ue); ok {
@@ -113,6 +263,12 @@ func retryableCooldownSec(statusCode int, base time.Duration, ue *upstreamError,
 		}
 	} else if dur, ok := extractResetDuration(ue.Body); ok {
 		cooldown = dur
+	}
+	// The provider's own instant beats the fixed quota cooldown the classifier
+	// returns for a free-allowance 429: parking for that flat hour hands the
+	// account back days before the window the body named.
+	if park, ok := tokenharborParkDuration(statusCode, provider, ue, now); ok {
+		cooldown = park
 	}
 	return ceilSeconds(min(cooldown, maxCooldownFor(provider)))
 }
