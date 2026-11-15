@@ -309,6 +309,11 @@ func TestAntigravityFamilyKey(t *testing.T) {
 
 func TestAntigravityArgonBucket(t *testing.T) {
 	base := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	// The fixture's "reset in the future" only means anything against a pinned
+	// clock: IsAntigravityModelBlocked compares resetAt with agNow(), so on a real
+	// clock this test expired six hours after it was written and reported that a
+	// spent Argon bucket no longer blocked anything.
+	useAntigravityClock(t, base)
 	future := base.Add(6 * time.Hour)
 	quotas := map[string]AntigravityModelQuota{
 		"gemini_argon_weekly": {RemainingPercentage: 0, ResetAt: future},

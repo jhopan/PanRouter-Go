@@ -231,3 +231,59 @@ func TestMaxCooldownFor_TokenharborWeeklyCeiling(t *testing.T) {
 		t.Errorf("maxCooldownFor(openai) = %v, want the generic %v", got, maxResetCooldown)
 	}
 }
+
+// TestTokenharborQuotaVerdictResetsTheLadder pins the two fields upstream's own
+// test asserts for this body (tests/unit/tokenharbor-quota.test.js:16-23):
+// shouldFallback, the weekly ceiling on the cooldown — and `newBackoffLevel: 0`.
+//
+// A spent free allowance is not a burst, so the exponential ladder must not
+// advance *and* must not keep an old level: upstream returns 0 and the row stores
+// it. Without that, an account that had escalated on earlier throttles kept its
+// raised level through a quota refusal and every later read treated it as a
+// repeat offender.
+func TestTokenharborQuotaVerdictResetsTheLadder(t *testing.T) {
+	cls := providers.ClassifyErrorForProvider(http.StatusTooManyRequests, tokenharborFreeAllowanceBody, 3, "tokenharbor")
+	if !cls.ShouldFallback {
+		t.Fatalf("classification = %+v, want fallback", cls)
+	}
+	if cls.NewBackoffLevel != 0 {
+		t.Errorf("NewBackoffLevel = %d, want 0 (a quota refusal resets the ladder)", cls.NewBackoffLevel)
+	}
+	if cls.CooldownMs > int(maxWeeklyResetCooldown/time.Millisecond) {
+		t.Errorf("CooldownMs = %d, want at most the weekly ceiling", cls.CooldownMs)
+	}
+
+	// An alias routes to the same lane, and a lane whose rule *does* back off
+	// still escalates — the reset is for non-burst verdicts only.
+	if alias := providers.ClassifyErrorForProvider(http.StatusTooManyRequests, tokenharborFreeAllowanceBody, 3, "th"); alias.NewBackoffLevel != 0 {
+		t.Errorf("th alias NewBackoffLevel = %d, want 0", alias.NewBackoffLevel)
+	}
+	if escalating := providers.ClassifyError(http.StatusTooManyRequests, "too many requests, slow down", 3); escalating.NewBackoffLevel == 0 {
+		t.Error("a burst rule must still escalate the ladder")
+	}
+}
+
+// TestNextWeeklyRolloverIsMondayMidnightUTC pins the calendar fallback the
+// reference asserts when the 429 body names no parseable reset
+// (tests/unit/tokenharbor-quota.test.js:25-29: getUTCDay() == 1, getUTCHours() == 0).
+func TestNextWeeklyRolloverIsMondayMidnightUTC(t *testing.T) {
+	// A Wednesday, mid-afternoon, in a zone that is not UTC.
+	now := time.Date(2026, 11, 18, 15, 30, 0, 0, time.FixedZone("WITA", 8*3600))
+	got := nextWeeklyRollover(now).UTC()
+	if got.Weekday() != time.Monday {
+		t.Errorf("fallback lands on %s, want Monday", got.Weekday())
+	}
+	if got.Hour() != 0 || got.Minute() != 0 || got.Second() != 0 {
+		t.Errorf("fallback lands at %s, want 00:00:00 UTC", got)
+	}
+	if !got.After(now.UTC()) {
+		t.Errorf("fallback %s is not after now %s", got, now.UTC())
+	}
+
+	// On a Monday already past midnight the fallback is the *next* Monday, not
+	// the instant that has already gone.
+	monday := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	if next := nextWeeklyRollover(monday).UTC(); next.Weekday() != time.Monday || next.Equal(monday) {
+		t.Errorf("on a Monday the fallback = %s, want the next Monday", next)
+	}
+}

@@ -506,10 +506,16 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 					NewBackoffLevel: newLevel,
 				}
 			}
+			// A verdict that is not a burst does not advance the exponential
+			// ladder, and it does not keep an old level either: upstream's
+			// checkFallbackError answers `newBackoffLevel: 0` for these rules
+			// (open-sse/services/accountFallback.js), which is what the stored
+			// row then carries. Keeping a raised level would make a spent
+			// allowance look like a repeated burst on every later read.
 			return ErrorClassification{
 				ShouldFallback:  true,
 				CooldownMs:      rule.CooldownMs,
-				NewBackoffLevel: backoffLevel,
+				NewBackoffLevel: 0,
 				Quota:           rule.Quota,
 			}
 		}
@@ -524,10 +530,11 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 					NewBackoffLevel: newLevel,
 				}
 			}
+			// Same as the text path: a non-burst verdict resets the ladder.
 			return ErrorClassification{
 				ShouldFallback:  true,
 				CooldownMs:      rule.CooldownMs,
-				NewBackoffLevel: backoffLevel,
+				NewBackoffLevel: 0,
 				Quota:           rule.Quota,
 			}
 		}
