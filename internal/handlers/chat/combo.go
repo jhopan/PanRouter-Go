@@ -1868,7 +1868,25 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 		return
 	}
 	currentLevel := h.Repo.GetConnectionBackoffLevel(connID)
-	cls := providers.ClassifyErrorForProvider(ue.StatusCode, extractErrorText(ue.Body), currentLevel, provider)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, codebuddyClassificationText(provider, extractErrorText(ue.Body), ue.Body), currentLevel, provider)
+	// A fatal verdict is about the request, not the account: return without locking
+	// and without excluding, so a combo does not walk its members locking each one
+	// over a payload that can never succeed. Same rule as the single-provider loop.
+	if cls.Fatal {
+		log.Warn("combo", "request-level refusal, not locking", "conn", connID, "provider", provider, "model", model, "status", ue.StatusCode)
+		return
+	}
+	// A provider ban parks the account for the ban window and leaves the rest of
+	// the combo in play — the ban says nothing about the other members.
+	if cls.Banned {
+		until := time.Now().UTC().Add(providers.BannedAccountCooldown)
+		if banErr := h.Repo.LockConnectionBanned(connID, extractErrorText(ue.Body), until); banErr != nil {
+			log.Warn("combo", "record account ban failed", "conn", connID, "error", banErr)
+		}
+		*excludeIDs = append(*excludeIDs, connID)
+		log.Warn("combo", "account banned by the provider", "conn", connID, "provider", provider, "model", model, "until", until.Format(time.RFC3339))
+		return
+	}
 	// Upstream parity (checkFallbackError): request-scoped 4xx (400/404/405/
 	// 409/422/...) must not lock the account — the bug is in the request,
 	// not the credential. Only lock when ShouldFallback is set.

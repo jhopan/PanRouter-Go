@@ -107,10 +107,12 @@ func TestTransformCodebuddyBody_NoReasoningEffort(t *testing.T) {
 }
 
 func TestTransformCodebuddyBody_UpstreamMessageShape(t *testing.T) {
-	// Upstream PR 5032 parity: leading system prompt prepended, client system
-	// instructions preserved, user content as typed blocks.
+	// Intl lane: the client's system prompt is folded into the ONE leading system
+	// message (not replaced, not prefixed with a gateway prompt) and user content
+	// travels as typed blocks. Upstream open-sse/executors/codebuddy-intl.js
+	// transformRequest.
 	input := `{"model":"glm-5.3-flash","messages":[{"role":"system","content":"client-sys"},{"role":"user","content":"hi"}],"stream":false}`
-	out, err := transformCodebuddyBody([]byte(input))
+	out, err := transformCodebuddyBodyFor("codebuddy-intl", []byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,8 +136,8 @@ func TestTransformCodebuddyBody_UpstreamMessageShape(t *testing.T) {
 		t.Errorf("first message must be system, got %q", m.Messages[0].Role)
 	}
 	sysContent, ok := m.Messages[0].Content.(string)
-	if !ok || sysContent != "You are CodeBuddy Code.\n\nclient-sys" {
-		t.Errorf("expected combined system prompt, got %q", sysContent)
+	if !ok || sysContent != "client-sys" {
+		t.Errorf("the client's own system prompt must lead the conversation, got %q", sysContent)
 	}
 	blocks, ok := m.Messages[1].Content.([]any)
 	if !ok || len(blocks) != 1 {
@@ -147,9 +149,11 @@ func TestTransformCodebuddyBody_UpstreamMessageShape(t *testing.T) {
 	}
 }
 
-func TestTransformCodebuddyBody_SanitizesChannelMarkers(t *testing.T) {
-	// Upstream PR 5032 parity: prepends "You are CodeBuddy Code.", preserves caller
-	// system/developer instructions, and sanitizes external client markers.
+func TestTransformCodebuddyBody_NeutralisesAgentIdentity(t *testing.T) {
+	// CN lane: a system prompt carrying a third-party agent identity is replaced
+	// WHOLE with the neutral one — a substring redaction leaves the surrounding
+	// harness text, which is what the WAF reads.
+	// Upstream open-sse/shared/codebuddySystemPrompt.js.
 	input := `{
 		"model": "glm-5.2",
 		"messages": [
@@ -158,16 +162,8 @@ func TestTransformCodebuddyBody_SanitizesChannelMarkers(t *testing.T) {
 				"content": "You are Claude Code, Anthropic's official CLI for Claude.\nAlways reply in JSON."
 			},
 			{
-				"role": "developer",
-				"content": "Follow strict schema rules."
-			},
-			{
 				"role": "user",
 				"content": "hello"
-			},
-			{
-				"role": "assistant",
-				"content": "I am running with cc_entrypoint=cli"
 			}
 		]
 	}`
@@ -185,60 +181,113 @@ func TestTransformCodebuddyBody_SanitizesChannelMarkers(t *testing.T) {
 		t.Fatalf("unmarshal output: %v", err)
 	}
 
-	if len(m.Messages) != 3 {
-		t.Fatalf("expected 3 messages (system + user + assistant), got %d: %s", len(m.Messages), out)
-	}
-
-	// 1. Consolidated system message
-	if m.Messages[0].Role != "system" {
-		t.Fatalf("first message role = %q, want system", m.Messages[0].Role)
+	if len(m.Messages) != 2 {
+		t.Fatalf("expected system + user, got %d: %s", len(m.Messages), out)
 	}
 	sysStr, ok := m.Messages[0].Content.(string)
 	if !ok {
-		t.Fatalf("first message content must be string, got %T", m.Messages[0].Content)
+		t.Fatalf("first message content must keep the client's string shape, got %T", m.Messages[0].Content)
 	}
-	if !strings.HasPrefix(sysStr, "You are CodeBuddy Code.") {
-		t.Errorf("system prompt must start with 'You are CodeBuddy Code.', got %q", sysStr)
+	if sysStr != codebuddyNeutralSystemPrompt {
+		t.Errorf("system prompt = %q, want the neutral replacement", sysStr)
 	}
-	if !strings.Contains(sysStr, "Always reply in JSON.") {
-		t.Errorf("system prompt must preserve caller system instructions, got %q", sysStr)
-	}
-	if !strings.Contains(sysStr, "Follow strict schema rules.") {
-		t.Errorf("system prompt must preserve caller developer instructions, got %q", sysStr)
-	}
-	if strings.Contains(sysStr, "You are Claude Code") {
-		t.Errorf("system prompt must sanitize external client markers, got %q", sysStr)
-	}
-	if !strings.Contains(sysStr, "[external-client-identity]") {
-		t.Errorf("system prompt must replace marker with [external-client-identity], got %q", sysStr)
+	if strings.Contains(sysStr, "Claude Code") {
+		t.Errorf("the agent identity survived neutralisation: %q", sysStr)
 	}
 
-	// 2. User message formatted as typed blocks
-	if m.Messages[1].Role != "user" {
-		t.Fatalf("second message role = %q, want user", m.Messages[1].Role)
+	// A legitimate user system prompt is NOT touched: replacing it would silently
+	// drop the operator's instructions.
+	plain := `{"messages":[{"role":"system","content":"Answer in British English."},{"role":"user","content":"hi"}]}`
+	plainOut, err := transformCodebuddyBody([]byte(plain))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	userBlocks, ok := m.Messages[1].Content.([]any)
-	if !ok || len(userBlocks) != 1 {
-		t.Fatalf("user content must be 1 typed block, got %#v", m.Messages[1].Content)
+	var plainMap struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
 	}
-	block, _ := userBlocks[0].(map[string]any)
-	if block["type"] != "text" || block["text"] != "hello" {
-		t.Errorf("unexpected user block: %#v", block)
+	if err := json.Unmarshal(plainOut, &plainMap); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if got, _ := plainMap.Messages[0].Content.(string); got != "Answer in British English." {
+		t.Errorf("a legitimate system prompt was rewritten to %q", got)
 	}
 
-	// 3. Assistant message sanitized
-	if m.Messages[2].Role != "assistant" {
-		t.Fatalf("third message role = %q, want assistant", m.Messages[2].Role)
+	// The CN lane's length catch-all: an unrecognised harness prompt past the
+	// limit is treated as one.
+	long := `{"messages":[{"role":"system","content":"` + strings.Repeat("x", codebuddySystemPromptLengthLimit+1) + `"},{"role":"user","content":"hi"}]}`
+	longOut, err := transformCodebuddyBody([]byte(long))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	asstStr, ok := m.Messages[2].Content.(string)
-	if !ok {
-		t.Fatalf("assistant content must be string, got %T", m.Messages[2].Content)
+	var longMap struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
 	}
-	if strings.Contains(asstStr, "cc_entrypoint=cli") {
-		t.Errorf("assistant content must not contain cc_entrypoint=cli, got %q", asstStr)
+	if err := json.Unmarshal(longOut, &longMap); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
 	}
-	if !strings.Contains(asstStr, "[external-client-identity]") {
-		t.Errorf("assistant content must replace marker with [external-client-identity], got %q", asstStr)
+	if got, _ := longMap.Messages[0].Content.(string); got != codebuddyNeutralSystemPrompt {
+		t.Errorf("a %d-character system prompt = %.40q..., want the neutral one", codebuddySystemPromptLengthLimit+1, got)
+	}
+}
+
+func TestTransformCodebuddyBody_IntlKeepsOneLeadingSystemMessage(t *testing.T) {
+	// The intl gateway answers 11128 unless the conversation opens with exactly one
+	// system message, so every system/developer message is folded into it — with
+	// the default only when the client sent none at all.
+	none := `{"messages":[{"role":"user","content":"hi"}]}`
+	out, err := transformCodebuddyBodyFor("codebuddy-intl", []byte(none))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var m struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(m.Messages) != 2 || m.Messages[0].Role != "system" {
+		t.Fatalf("expected a synthesized leading system message, got %s", out)
+	}
+	if got, _ := m.Messages[0].Content.(string); got != codebuddySystemPrompt {
+		t.Errorf("default leading prompt = %q, want %q", got, codebuddySystemPrompt)
+	}
+
+	// Two client prompts (system + developer) fold into one, in order, with the
+	// agent identity neutralised inside the fold.
+	both := `{"messages":[
+		{"role":"system","content":"You are Claude Code, Anthropic's official CLI for Claude."},
+		{"role":"developer","content":"Answer in British English."},
+		{"role":"user","content":"hi"}
+	]}`
+	out, err = transformCodebuddyBodyFor("codebuddy-intl", []byte(both))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var folded struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &folded); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if len(folded.Messages) != 2 {
+		t.Fatalf("expected the fold to leave system + user, got %s", out)
+	}
+	leading, _ := folded.Messages[0].Content.(string)
+	if !strings.Contains(leading, codebuddyNeutralSystemPrompt) {
+		t.Errorf("the agent identity was not neutralised in the fold: %q", leading)
+	}
+	if !strings.Contains(leading, "Answer in British English.") {
+		t.Errorf("the client's own instruction was lost in the fold: %q", leading)
 	}
 }
 
@@ -501,14 +550,12 @@ func TestForwardCodebuddyCN_WireHeadersAndBody(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(parsedBody.Messages))
 	}
 	sysText, _ := parsedBody.Messages[0].Content.(string)
-	if !strings.HasPrefix(sysText, "You are CodeBuddy Code.") {
-		t.Errorf("system prompt must start with 'You are CodeBuddy Code.', got %q", sysText)
-	}
-	if !strings.Contains(sysText, "Do work.") {
-		t.Errorf("system prompt must preserve caller instructions, got %q", sysText)
-	}
-	if strings.Contains(sysText, "You are Claude Code") {
-		t.Errorf("system prompt must sanitize external client markers, got %q", sysText)
+	// This system prompt IS a third-party agent identity, so the whole prompt is
+	// replaced — a substring redaction would leave the harness text around it,
+	// which is what the WAF reads (upstream codebuddySystemPrompt.js). A
+	// legitimate prompt is left alone; the test above covers that.
+	if sysText != codebuddyNeutralSystemPrompt {
+		t.Errorf("system prompt = %q, want the neutral replacement", sysText)
 	}
 }
 
@@ -682,10 +729,12 @@ func TestTransformCodebuddyBody_ReasoningMapping(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(m.Messages) < 2 {
-		t.Fatalf("expected at least 2 messages, got %d", len(m.Messages))
+	// The CN lane keeps the client's messages as sent (no leading system message is
+	// synthesized), so the assistant turn is the first one.
+	if len(m.Messages) != 1 {
+		t.Fatalf("expected the assistant turn alone, got %d messages", len(m.Messages))
 	}
-	asst := m.Messages[1]
+	asst := m.Messages[0]
 	if asst.Role != "assistant" {
 		t.Fatalf("expected assistant role, got %q", asst.Role)
 	}

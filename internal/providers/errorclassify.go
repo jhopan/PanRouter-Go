@@ -21,6 +21,24 @@ type ErrorRule struct {
 	// spent. These do NOT clear on a short timer, so they get a long cooldown
 	// and are surfaced as a distinct status instead of a transient blip.
 	Quota bool
+
+	// ── Verdicts that are not cooldowns ──────────────────────────────────────
+	//
+	// Banned: the provider banned the ACCOUNT ("Your account has been restricted
+	// due to unusual activity"). There is no reset to wait for, so the account is
+	// parked for BannedAccountCooldown — retrying it every few hours is both
+	// pointless and more of the automation pattern the ban was issued for.
+	Banned bool
+	// Fatal: the REQUEST can never succeed (a malformed request, or a prompt past
+	// the model's context window). Nothing is wrong with the account, so it must
+	// not be locked and the router must not walk the pool — the same request fails
+	// on every account, and locking each one in turn is how a single bad request
+	// parked a whole pool.
+	Fatal bool
+	// RequestRejected and RequestTooLarge name why a Fatal verdict was fatal, so
+	// the client gets the real cause instead of a generic refusal.
+	RequestRejected bool
+	RequestTooLarge bool
 }
 
 // BackoffConfig controls exponential backoff scaling.
@@ -36,6 +54,26 @@ var BackoffConfig = struct {
 
 // TransientCooldownMs is the default cooldown for unmatched/unknown errors.
 const TransientCooldownMs = 30 * 1000 // 30 seconds
+
+// IsCodeBuddyLane reports whether a provider id (or alias) is one of the two
+// CodeBuddy gateways. They share a refusal vocabulary that keys on numeric codes
+// (11140/11128/11115), which is why their callers classify against the body.
+func IsCodeBuddyLane(provider string) bool {
+	switch ResolveAlias(provider) {
+	case "codebuddy-intl", "codebuddy-cn":
+		return true
+	default:
+		return false
+	}
+}
+
+// BannedAccountCooldown is how long a provider-banned account stays out of
+// rotation (upstream BANNED_ACCOUNT_COOLDOWN_MS, errorConfig.js:53). A ban is not
+// a cooldown: the provider lifts it when it lifts it, and a shorter retry timer
+// would only re-dial the banned account — the automation pattern that earned the
+// ban. Thirty days is chosen so a manually appealed account returns on its own
+// long before the park lapses.
+const BannedAccountCooldown = 30 * 24 * time.Hour
 
 // cooldown durations (ms) used by ERROR_RULES
 const (
@@ -68,6 +106,40 @@ const (
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
 // Checked top-to-bottom: text rules first (by order), then status rules.
 var ErrorRules = []ErrorRule{
+	// ── CodeBuddy Intl gateway blocks (open-sse/config/errorConfig.js:153-174) ──
+	// Provider-scoped and FIRST in the table, because the bodies overlap: 11140
+	// arrives with msg:"request illegal" AND the restriction sentence in
+	// displayMsg, and 11128 is spelled the same. A generic row further down would
+	// swallow the verdict — a banned account earned a 2s backoff that way, and
+	// being re-dialled every two seconds is the automation pattern that earned the
+	// ban.
+	//
+	// 11140 / "unusual activity" / "restricted due to" = the ACCOUNT is banned.
+	// No reset to wait for, so the caller parks it for BannedAccountCooldown.
+	{Provider: "codebuddy-intl", Text: "11140", Banned: true},
+	{Provider: "codebuddy-intl", Text: "unusual activity", Banned: true},
+	{Provider: "codebuddy-intl", Text: "restricted due to", Banned: true},
+	{Provider: "codebuddy-intl", Text: "账号存在异常行为", Banned: true},
+	{Provider: "codebuddy-intl", Text: "帳號存在異常行為", Banned: true},
+	// 11128 "request illegal" is channel verification refusing the REQUEST: the
+	// account is fine, the shape is not. Escalating a backoff on it parked a
+	// healthy account for 1800s, so the verdict is fatal — surfaced, never locked.
+	{Provider: "codebuddy-intl", Text: "11128", Fatal: true, RequestRejected: true},
+	// "request illegal" with NO code is the ban state before 11140 is confirmed:
+	// the account is flagged and refusing everything.
+	{Provider: "codebuddy-intl", Text: "request illegal", Banned: true},
+	// "conversation id missing" stays a per-request backoff: the gateway throttles
+	// the caller over it, but nothing about the account is wrong.
+	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
+	// 11115: the PROMPT is past the model's context window. Nothing is wrong with
+	// the account, and the same prompt fails on every account — locking each in
+	// turn is how one oversized request walked an 18-account pool.
+	{Provider: "codebuddy-intl", Text: "11115", Fatal: true, RequestTooLarge: true},
+	{Provider: "codebuddy-intl", Text: "prompt is too long", Fatal: true, RequestTooLarge: true},
+	{Provider: "codebuddy-intl", Text: "content too long", Fatal: true, RequestTooLarge: true},
+	{Provider: "codebuddy-intl", Text: "内容过长", Fatal: true, RequestTooLarge: true},
+	{Provider: "codebuddy-intl", Text: "內容過長", Fatal: true, RequestTooLarge: true},
+
 	{Text: "11158", CooldownMs: cooldownLong},
 	{Text: "model_not_in_plan", CooldownMs: cooldownLong},
 	{Text: "当前账号类型暂不支持该模型", CooldownMs: cooldownLong},
@@ -110,8 +182,6 @@ var ErrorRules = []ErrorRule{
 	// off (upstream 3b137aa6): without a provider-scoped rule the messages
 	// fall through to the request-scoped 4xx path and the connection gets
 	// zero cooldown while its backoff level never moves.
-	{Provider: "codebuddy-intl", Text: "request illegal", Backoff: true},
-	{Provider: "codebuddy-intl", Text: "conversation id missing", Backoff: true},
 	// DeepSeek web account-level refusals both arrive as 403, and they are
 	// not the same verdict. A ban ("refused this account") is the account
 	// itself; an address refusal ("refused this address") is the egress, and
@@ -488,6 +558,17 @@ type ErrorClassification struct {
 	// — and re-deriving it from the rule table would be a second copy of the
 	// same decision.
 	Quota bool
+
+	// Banned reports that the provider banned the account rather than throttled
+	// it: the caller parks it for BannedAccountCooldown and keeps rotating, since
+	// the ban says nothing about the other accounts.
+	Banned bool
+	// Fatal reports a request-level rejection: the caller returns the error
+	// without locking or rotating.
+	Fatal bool
+	// RequestRejected and RequestTooLarge carry the fatal sub-reason.
+	RequestRejected bool
+	RequestTooLarge bool
 }
 
 // ClassifyError classifies an upstream error by matching text and status against ErrorRules.
@@ -521,6 +602,10 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 					ShouldFallback:  true,
 					CooldownMs:      GetQuotaCooldown(newLevel),
 					NewBackoffLevel: newLevel,
+					Banned:          rule.Banned,
+					Fatal:           rule.Fatal,
+					RequestRejected: rule.RequestRejected,
+					RequestTooLarge: rule.RequestTooLarge,
 				}
 			}
 			// A verdict that is not a burst does not advance the exponential
@@ -534,6 +619,10 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 				CooldownMs:      rule.CooldownMs,
 				NewBackoffLevel: 0,
 				Quota:           rule.Quota,
+				Banned:          rule.Banned,
+				Fatal:           rule.Fatal,
+				RequestRejected: rule.RequestRejected,
+				RequestTooLarge: rule.RequestTooLarge,
 			}
 		}
 
@@ -545,6 +634,10 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 					ShouldFallback:  true,
 					CooldownMs:      GetQuotaCooldown(newLevel),
 					NewBackoffLevel: newLevel,
+					Banned:          rule.Banned,
+					Fatal:           rule.Fatal,
+					RequestRejected: rule.RequestRejected,
+					RequestTooLarge: rule.RequestTooLarge,
 				}
 			}
 			// Same as the text path: a non-burst verdict resets the ladder.
@@ -553,6 +646,10 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 				CooldownMs:      rule.CooldownMs,
 				NewBackoffLevel: 0,
 				Quota:           rule.Quota,
+				Banned:          rule.Banned,
+				Fatal:           rule.Fatal,
+				RequestRejected: rule.RequestRejected,
+				RequestTooLarge: rule.RequestTooLarge,
 			}
 		}
 	}

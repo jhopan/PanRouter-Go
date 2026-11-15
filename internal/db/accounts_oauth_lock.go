@@ -126,6 +126,7 @@ func ConnectionBlockedUntilAt(rawData string, now time.Time) (time.Time, bool) {
 		"oauthLockedUntil",
 		"accountLockedUntil",
 		"quotaExhaustedUntil",
+		"bannedUntil",
 	} {
 		until, ok := readTimestampField(raw, key)
 		if !ok || !until.After(now) {
@@ -344,6 +345,45 @@ func (r *Repo) RecordConnectionAccountBanFailure(connID string) (time.Time, int,
 		return time.Time{}, 0, fmt.Errorf("lock connection account ban %s: %w", connID, err)
 	}
 	return until, failures, nil
+}
+
+// LockConnectionBanned parks an account the PROVIDER banned, for a window the
+// caller chooses (providers.BannedAccountCooldown). It is the writer for the
+// bannedUntil/banReason pair this package clears after a successful re-test, and
+// it is what the dashboard shows as "banned" rather than as a cooldown.
+//
+// The reason is stored so the operator learns WHY without reading the chat log —
+// "Your account has been restricted due to unusual activity" is the difference
+// between a ban to appeal and a credential to repair.
+//
+// bannedUntil is also one of the account-scoped parks ConnectionBlockedUntilAt
+// reads, so the selector skips the account without a second mechanism.
+func (r *Repo) LockConnectionBanned(connID, reason string, until time.Time) error {
+	if connID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	if !until.After(now) {
+		until = now.Add(24 * time.Hour)
+	}
+	if len(reason) > 300 {
+		reason = reason[:300]
+	}
+	_, err := r.db.ExecContext(context.Background(),
+		`UPDATE providerConnections
+		SET data = json_set(data,
+			'$.bannedUntil', ?,
+			'$.banReason', ?,
+			'$.testStatus', ?,
+			'$.status', 'error'),
+			updatedAt = ?
+		WHERE id = ?`,
+		until.UTC().Format(time.RFC3339), reason, providers.StatusUnavailable, now.Format(time.RFC3339), connID,
+	)
+	if err != nil {
+		return fmt.Errorf("lock connection banned %s: %w", connID, err)
+	}
+	return nil
 }
 
 // ClearConnectionAccountBanLock releases the account-ban park and resets the

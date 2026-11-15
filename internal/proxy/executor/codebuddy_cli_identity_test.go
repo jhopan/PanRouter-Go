@@ -37,9 +37,10 @@ func codebuddyTestToken(sub string) string {
 	return "eyJhbGciOiJIUzI1NiJ9." + payload + ".sig"
 }
 
-// codebuddyCLIHeaderKeys is the complete header set the request builder emits.
-// Exact equality (not containment) keeps a stale header from creeping back in.
-var codebuddyCLIHeaderKeys = []string{
+// codebuddyCLIHeaderKeysCN is the complete header set the CN lane's request
+// builder emits. Exact equality (not containment) keeps a stale header from
+// creeping back in.
+var codebuddyCLIHeaderKeysCN = []string{
 	"Accept",
 	"Content-Encoding",
 	"Content-Type",
@@ -69,6 +70,22 @@ var codebuddyCLIHeaderKeys = []string{
 	"X-Stainless-Runtime-Version",
 	"X-User-Id",
 }
+
+// codebuddyCLIHeaderKeysIntl adds what the intl capture carries on top of the
+// shared set: the root request id and the OpenTelemetry/B3 tracing family
+// (open-sse/executors/codebuddy-intl.js buildHeaders). The CN executor sends no
+// tracing — the CLI it mirrors does not — so this list is intl-only.
+var codebuddyCLIHeaderKeysIntl = append(append([]string(nil), codebuddyCLIHeaderKeysCN...),
+	"X-Root-Request-ID",
+	"traceparent",
+	"b3",
+	"X-B3-TraceId",
+	"X-B3-SpanId",
+	"X-B3-ParentSpanId",
+	"X-B3-Sampled",
+	"X-Trace-ID",
+	"baggage",
+)
 
 func TestCodeBuddyHeadersCLIIdentityPerLane(t *testing.T) {
 	tests := []struct {
@@ -106,7 +123,10 @@ func TestCodeBuddyHeadersCLIIdentityPerLane(t *testing.T) {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
-			want := append([]string(nil), codebuddyCLIHeaderKeys...)
+			want := append([]string(nil), codebuddyCLIHeaderKeysCN...)
+			if tt.provider == "codebuddy-intl" {
+				want = append([]string(nil), codebuddyCLIHeaderKeysIntl...)
+			}
 			sort.Strings(want)
 			if strings.Join(keys, ",") != strings.Join(want, ",") {
 				t.Fatalf("header set mismatch\n got: %v\nwant: %v", keys, want)
@@ -186,13 +206,13 @@ func TestCodeBuddyForwardGzipBodyAndCLIHeaders(t *testing.T) {
 		{name: "cn lane", provider: "codebuddy-cn"},
 	}
 	input := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"ping"}]}`)
-	wantPlain, err := transformCodebuddyBody(input)
-	if err != nil {
-		t.Fatalf("transform body: %v", err)
-	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			wantPlain, err := transformCodebuddyBodyFor(tt.provider, input)
+			if err != nil {
+				t.Fatalf("transform body: %v", err)
+			}
 			var gotHeader http.Header
 			var rawBody []byte
 			var contentLength int64

@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha1"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -34,14 +33,6 @@ const codebuddySystemPrompt = "You are CodeBuddy Code."
 // (internal/proxy/deterministic_body.go).
 var codebuddyJSONOpts = json.Deterministic(true)
 
-var channelMarkers = []string{
-	"You are Claude Code, Anthropic's official CLI for Claude.",
-	"x-anthropic-billing-header",
-	"Main branch (you will usually use this for PRs):",
-}
-
-var channelMarkerRegex = regexp.MustCompile(`(?i)you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|OhMyOpenCode`)
-
 var codebuddyRateLimitRegex = regexp.MustCompile(`(?i)超出频率限制|frequency limit|限额`)
 
 // ForwardCodebuddyCN forwards to Tencent CodeBuddy with force-stream
@@ -63,7 +54,7 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 	if req != nil && req.Provider == "" {
 		req.Provider = "codebuddy-cn"
 	}
-	body, err := transformCodebuddyBody(req.Body)
+	body, err := transformCodebuddyBodyFor(req.Provider, req.Body)
 	if err != nil {
 		return fmt.Errorf("transform codebuddy body: %w", err)
 	}
@@ -152,40 +143,6 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 	return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
 }
 
-func sanitizeChannelMarkers(text string) string {
-	if text == "" {
-		return text
-	}
-	result := text
-	for _, marker := range channelMarkers {
-		if strings.Contains(result, marker) {
-			result = strings.ReplaceAll(result, marker, "[external-client-identity]")
-		}
-	}
-	return channelMarkerRegex.ReplaceAllString(result, "[external-client-identity]")
-}
-
-func extractMessageText(content any) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []any:
-		var parts []string
-		for _, b := range v {
-			if s, ok := b.(string); ok {
-				parts = append(parts, s)
-			} else if bm, ok := b.(map[string]any); ok {
-				if t, ok := bm["text"].(string); ok {
-					parts = append(parts, t)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	default:
-		return ""
-	}
-}
-
 func copyMap(m map[string]any) map[string]any {
 	cp := make(map[string]any, len(m))
 	for k, v := range m {
@@ -219,101 +176,168 @@ func isCodebuddyRateLimit(body []byte) bool {
 	return data.Code == 6004 || codebuddyRateLimitRegex.MatchString(msg)
 }
 
-// transformCodebuddyBody forces stream=true, normalizes system prompt and caller
-// instructions, sanitizes external client markers, and handles reasoning params.
+// transformCodebuddyBody applies the CN lane's body rules.
 func transformCodebuddyBody(body []byte) ([]byte, error) {
+	return transformCodebuddyBodyFor("codebuddy-cn", body)
+}
+
+// transformCodebuddyBodyFor applies the body rules of one CodeBuddy lane.
+//
+// Both lanes force stream=true (the gateway answers 11101 "Non-stream chat
+// request is currently not supported" otherwise) and both mirror the CLI's
+// reasoning parameters. They differ in how the system prompt is handled: the CN
+// gateway rejects agent-harness prompts outright, while the intl gateway requires
+// exactly ONE leading system message and takes user content as typed blocks.
+func transformCodebuddyBodyFor(provider string, body []byte) ([]byte, error) {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
 		return nil, fmt.Errorf("parse body: %w", err)
 	}
 
-	// Force stream — CodeBuddy rejects non-stream (HTTP 400, code 11101)
 	reqMap["stream"] = true
+	applyCodebuddyReasoningParams(reqMap)
 
-	// Handle reasoning_effort / reasoning_summary
-	if eff, ok := reqMap["reasoning_effort"].(string); ok {
-		switch eff {
-		case "none", "off":
-			delete(reqMap, "reasoning_effort")
-		default:
-			reqMap["reasoning_summary"] = "auto"
+	if provider == "codebuddy-intl" || provider == "codebuddy" || provider == "cbai" {
+		foldCodebuddyIntlMessages(reqMap)
+	} else {
+		neutraliseCodebuddyCNSystemMessages(reqMap)
+	}
+
+	return json.Marshal(reqMap, codebuddyJSONOpts)
+}
+
+// withCodebuddyReasoning renames a history turn's reasoning_content to the
+// `reasoning` field CodeBuddy reads, so a replayed turn keeps the reasoning the
+// client already received. The field is dropped rather than duplicated: sending
+// both spellings is one more thing the gateway has to reconcile.
+func withCodebuddyReasoning(message map[string]any) map[string]any {
+	reasoning, _ := message["reasoning_content"].(string)
+	if reasoning == "" {
+		return message
+	}
+	renamed := copyMap(message)
+	renamed["reasoning"] = reasoning
+	delete(renamed, "reasoning_content")
+	return renamed
+}
+
+// applyCodebuddyReasoningParams mirrors the CLI's OpenAI-style reasoning params.
+// The gateway only surfaces model reasoning when the request carries
+// reasoning_effort + reasoning_summary:"auto"; a request with neither gets
+// reasoning_effort:"medium" forced, which trips its content filter (#2071), so
+// nothing is added when the client asked for no reasoning.
+func applyCodebuddyReasoningParams(reqMap map[string]any) {
+	effort, ok := reqMap["reasoning_effort"].(string)
+	if !ok {
+		return
+	}
+	switch effort {
+	case "none", "off":
+		// The gateway has no "none" value: omit the field.
+		delete(reqMap, "reasoning_effort")
+	default:
+		reqMap["reasoning_summary"] = "auto"
+	}
+}
+
+// neutraliseCodebuddyCNSystemMessages replaces an agent-harness system prompt with
+// the neutral one, preserving the content shape the client sent (string or typed
+// blocks). The CN gateway answers 11128 to agent identity strings and restricts
+// the account (11140) on repetition.
+//
+// The length catch-all exists because the pattern cannot know every harness
+// prompt: a system prompt past the limit is treated as one.
+func neutraliseCodebuddyCNSystemMessages(reqMap map[string]any) {
+	messages, ok := reqMap["messages"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(messages))
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			out = append(out, raw)
+			continue
 		}
+		if role, _ := message["role"].(string); role != "system" {
+			out = append(out, withCodebuddyReasoning(message))
+			continue
+		}
+		text := flattenCodebuddySystemContent(message["content"])
+		if text == "" {
+			out = append(out, message)
+			continue
+		}
+		if len(text) <= codebuddySystemPromptLengthLimit && !codebuddyAgentIdentityPattern.MatchString(text) {
+			out = append(out, message)
+			continue
+		}
+		replaced := copyMap(message)
+		if _, isString := message["content"].(string); isString {
+			replaced["content"] = codebuddyNeutralSystemPrompt
+		} else {
+			replaced["content"] = []any{map[string]any{"type": "text", "text": codebuddyNeutralSystemPrompt}}
+		}
+		out = append(out, replaced)
 	}
+	reqMap["messages"] = out
+}
 
-	var inputMessages []any
-	if arr, ok := reqMap["messages"].([]any); ok {
-		inputMessages = arr
-	}
+// foldCodebuddyIntlMessages folds every system/developer message into ONE leading
+// system message and turns string user content into typed blocks, which is the
+// shape the intl gateway requires (it answers 11128 to anything else).
+//
+// The client's own system text is preserved — only a third-party agent identity is
+// replaced. Dropping the prompt instead lost every user and project instruction on
+// every request; the default below is used only when the client sent none.
+func foldCodebuddyIntlMessages(reqMap map[string]any) {
+	messages, _ := reqMap["messages"].([]any)
 
-	systemParts := []string{codebuddySystemPrompt}
-	var otherMessages []any
-
-	for _, raw := range inputMessages {
-		m, ok := raw.(map[string]any)
+	clientPrompts := make([]string, 0, 2)
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		role, _ := m["role"].(string)
-		if role == "system" || role == "developer" {
-			rawText := extractMessageText(m["content"])
-			cleaned := strings.TrimSpace(sanitizeChannelMarkers(rawText))
-			if cleaned != "" && cleaned != codebuddySystemPrompt {
-				systemParts = append(systemParts, cleaned)
-			}
+		role, _ := message["role"].(string)
+		if role != "system" && role != "developer" {
 			continue
 		}
+		text := strings.TrimSpace(neutraliseCodebuddySystemText(flattenCodebuddySystemContent(message["content"])))
+		if text != "" {
+			clientPrompts = append(clientPrompts, text)
+		}
+	}
+	leading := codebuddySystemPrompt
+	if len(clientPrompts) > 0 {
+		leading = strings.Join(clientPrompts, "\n\n")
+	}
+
+	out := make([]any, 0, len(messages)+1)
+	out = append(out, map[string]any{"role": "system", "content": leading})
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			out = append(out, raw)
+			continue
+		}
+		role, _ := message["role"].(string)
+		if role == "system" || role == "developer" {
+			continue
+		}
+		forwarded := withCodebuddyReasoning(message)
+		role, _ = forwarded["role"].(string)
 		if role == "user" {
-			if s, ok := m["content"].(string); ok {
-				cp := copyMap(m)
-				if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
-					cp["reasoning"] = rc
-					delete(cp, "reasoning_content")
-				}
-				cp["content"] = []any{map[string]any{"type": "text", "text": s}}
-				otherMessages = append(otherMessages, cp)
+			if text, isString := forwarded["content"].(string); isString {
+				typed := copyMap(forwarded)
+				typed["content"] = []any{map[string]any{"type": "text", "text": text}}
+				out = append(out, typed)
 				continue
 			}
 		}
-		if role == "assistant" {
-			cp := copyMap(m)
-			if rc, ok := cp["reasoning_content"].(string); ok && rc != "" {
-				cp["reasoning"] = rc
-				delete(cp, "reasoning_content")
-			}
-			switch v := cp["content"].(type) {
-			case string:
-				cp["content"] = sanitizeChannelMarkers(v)
-			case []any:
-				var newBlocks []any
-				for _, b := range v {
-					if bm, ok := b.(map[string]any); ok {
-						if t, ok := bm["text"].(string); ok {
-							cpBlock := copyMap(bm)
-							cpBlock["text"] = sanitizeChannelMarkers(t)
-							newBlocks = append(newBlocks, cpBlock)
-							continue
-						}
-					}
-					newBlocks = append(newBlocks, b)
-				}
-				cp["content"] = newBlocks
-			}
-			otherMessages = append(otherMessages, cp)
-			continue
-		}
-		otherMessages = append(otherMessages, m)
+		out = append(out, forwarded)
 	}
-
-	leadingSystem := map[string]any{
-		"role":    "system",
-		"content": strings.Join(systemParts, "\n\n"),
-	}
-	messages := make([]any, 0, len(otherMessages)+1)
-	messages = append(messages, leadingSystem)
-	messages = append(messages, otherMessages...)
-	reqMap["messages"] = messages
-
-	return json.Marshal(reqMap, codebuddyJSONOpts)
+	reqMap["messages"] = out
 }
 
 func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) map[string]string {
@@ -329,11 +353,14 @@ func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) 
 	if sessionKey == "" {
 		sessionKey = firstUserText(body)
 	}
+	// A time-based id pinned per conversation, like the CLI's: a content hash or a
+	// random id would carry neither the opening time nor a stable value across the
+	// turns of one conversation.
 	var convID string
 	if sessionKey != "" {
-		convID = stableConversationUUID("codebuddy:" + sessionKey)
+		convID = codebuddyStableConversationID("codebuddy:" + sessionKey)
 	} else {
-		convID = uuid.NewString()
+		convID = codebuddyPerTurnID()
 	}
 
 	domain := "www.codebuddy.ai"
@@ -406,8 +433,33 @@ func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) 
 		// X-Product-Version and X-Stainless-Helper-Method are never sent by the
 		// official client on either lane — sending a header the real CLI does
 		// not send is itself the tell.
-		h["X-Request-ID"] = uuid.NewString()
-		h["X-Conversation-Message-ID"] = h["X-Request-ID"]
+		// One per-turn uuid for the whole family: the CLI reuses the same value for
+		// the conversation request id, the message id, the request id and the root
+		// request id, and only the baggage carries it without dashes.
+		turnID := codebuddyPerTurnID()
+		h["X-Conversation-Request-ID"] = turnID
+		h["X-Request-ID"] = turnID
+		h["X-Conversation-Message-ID"] = turnID
+		h["X-Root-Request-ID"] = turnID
+
+		// ── OpenTelemetry distributed tracing ─────────────────────────────
+		// The CLI sends Zipkin B3 + W3C traceparent on every chat call. The ids
+		// are per-request randoms and are not validated server-side, but their
+		// absence is one more thing a non-SDK caller does not have.
+		traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
+		spanID := traceID[:16]
+		parentSpanID := traceID[16:]
+		h["traceparent"] = "00-" + traceID + "-" + spanID + "-01"
+		h["b3"] = traceID + "-" + spanID + "-1-" + parentSpanID
+		h["X-B3-TraceId"] = traceID
+		h["X-B3-SpanId"] = spanID
+		h["X-B3-ParentSpanId"] = parentSpanID
+		h["X-B3-Sampled"] = "1"
+		h["X-Trace-ID"] = traceID
+		// baggage carries the stable session id and the per-turn id in the CLI's
+		// format: codebuddy.session_id=<uuid>,codebuddy.conversation_request_id=<hex>
+		h["baggage"] = "codebuddy.session_id=" + h["X-Conversation-ID"] +
+			",codebuddy.conversation_request_id=" + strings.ReplaceAll(h["X-Conversation-Message-ID"], "-", "")
 	}
 	if req != nil && strings.HasPrefix(req.APIKey, "ck_") {
 		h["Authorization"] = "Bearer " + req.APIKey
@@ -479,22 +531,6 @@ func last8(s string) string {
 
 func codebuddyConversationHeaders(req *Request, body []byte) map[string]string {
 	return codebuddyHeaders(req, nil, body)
-}
-
-// stableConversationUUID derives an RFC-4122-v5-shaped UUID from key via
-// SHA-1, matching the JS executor's derivation so the same session key maps
-// to the same conversation id across implementations.
-func stableConversationUUID(key string) string {
-	sum := sha1.Sum([]byte(key))
-	var b [16]byte
-	copy(b[:], sum[:16])
-	b[6] = (b[6] & 0x0f) | 0x50 // version 5
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	u, err := uuid.FromBytes(b[:])
-	if err != nil {
-		return uuid.NewString()
-	}
-	return u.String()
 }
 
 // firstUserText extracts the opening user message text from an OpenAI-shaped

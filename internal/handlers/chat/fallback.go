@@ -181,7 +181,10 @@ func (h *ChatHandler) handleAccountFallback(
 	// of burning a healthy account.
 	excludedPools := map[string]bool{}
 	var lastErr error
-	for _, c := range allConns {
+	for connIndex, c := range allConns {
+		// The last candidate cannot be rotated away from, so the ban pacing below
+		// must not delay an answer that is already going to fail.
+		lastConn := connIndex == len(allConns)-1
 		if slices.Contains(excludeIDs, c.ID) {
 			continue
 		}
@@ -322,12 +325,52 @@ func (h *ChatHandler) handleAccountFallback(
 			currentBackoffLevel := h.Repo.GetConnectionBackoffLevel(connObj.ID)
 			// Classify error to get dynamic cooldown; provider-scoped rules
 			// key off the canonical provider the request routed to.
-			classification := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, currentBackoffLevel, provider)
-			cooldownSec := h.cooldownSecFor(connObj.ID, provider, ue, errorText, classification)
+			classification := providers.ClassifyErrorForProvider(ue.StatusCode, codebuddyClassificationText(provider, errorText, ue.Body), currentBackoffLevel, provider)
 			errMsg := errorText
 			if errMsg == "" {
 				errMsg = fmt.Sprintf("%d upstream error", ue.StatusCode)
 			}
+			// A fatal verdict is about the REQUEST, not the account: the provider
+			// refused this payload (a malformed request, a prompt past the model's
+			// context window) and nothing about the credential is wrong. Locking the
+			// account would park a healthy one, and rotating would lock every account
+			// in the pool for a request that can never succeed — an 18-account pool
+			// was walked that way on one oversized prompt (upstream chat.js returns
+			// immediately on `result.fatal === true`, before markAccountUnavailable).
+			if classification.Fatal {
+				log.Warn("fallback", "request-level refusal, not locking or rotating", append([]any{
+					"conn", connObj.ID, "provider", provider, "model", model,
+					"status", ue.StatusCode, "rejected", classification.RequestRejected,
+					"too_large", classification.RequestTooLarge, "message", errMsg,
+				}, connIdentityKV(connObj)...)...)
+				return lastErr
+			}
+			// A provider BAN is not a cooldown: there is no reset to wait for, and
+			// re-dialling the account is more of the automation pattern that earned
+			// the ban. Park it for the ban window, keep the rest of the pool in
+			// rotation — the ban says nothing about the other accounts, and stopping
+			// after a few of them failed a request the pool could still serve.
+			if classification.Banned {
+				until := time.Now().UTC().Add(providers.BannedAccountCooldown)
+				if banErr := h.Repo.LockConnectionBanned(connObj.ID, errMsg, until); banErr != nil {
+					log.Warn("fallback", "record account ban failed", "conn", connObj.ID, "error", banErr)
+				}
+				h.getSessionAffinity().EvictConnection(connObj.ID)
+				log.Warn("fallback", "account banned by the provider", append([]any{
+					"conn", connObj.ID, "provider", provider, "model", model,
+					"status", ue.StatusCode, "until", until.Format(time.RFC3339), "message", errMsg,
+				}, connIdentityKV(connObj)...)...)
+				excludeIDs = append(excludeIDs, connObj.ID)
+				// Space the rotation: the ban is what the provider does when the
+				// request pattern looks automated, and answering it by dialling the
+				// next account in the same millisecond is that pattern again
+				// (upstream ACCOUNT_ROTATION_DELAY_MS = 3000).
+				if !lastConn {
+					time.Sleep(accountRotationDelay)
+				}
+				continue
+			}
+			cooldownSec := h.cooldownSecFor(connObj.ID, provider, ue, errorText, classification)
 			lockKey := canonicalLockModel(provider, model)
 			h.Repo.LockConnectionModel(connObj.ID, lockKey, cooldownSec, classification.NewBackoffLevel)
 			if lockKey != model {
@@ -1681,13 +1724,22 @@ func extractErrorText(body []byte) string {
 			} `json:"details"`
 		} `json:"error"`
 		Message string `json:"message"`
+		// CodeBuddy (and Tencent's other gateways) word their refusals as
+		// `{"code":N,"msg":"...","displayMsg":{"en":"..."}}`: without this the
+		// classifier saw an empty string and fell through to the bare status rule,
+		// so a ban wore the generic 403 cooldown.
+		Msg        string         `json:"msg"`
+		DisplayMsg map[string]any `json:"displayMsg"`
 	}
 	if err := json.Unmarshal(body, &parsed); err == nil {
 		var parts []string
-		if parsed.Error.Message != "" {
-			parts = append(parts, parsed.Error.Message)
-		} else if parsed.Message != "" {
-			parts = append(parts, parsed.Message)
+		// Upstream order (open-sse/executors/codebuddy-intl.js parseError):
+		// msg, then message, then error.message.
+		for _, candidate := range []string{parsed.Msg, parsed.Message, parsed.Error.Message} {
+			if candidate != "" {
+				parts = append(parts, candidate)
+				break
+			}
 		}
 		if parsed.Error.Status != "" {
 			parts = append(parts, parsed.Error.Status)
@@ -1695,6 +1747,13 @@ func extractErrorText(body []byte) string {
 		for _, d := range parsed.Error.Details {
 			if d.Reason != "" {
 				parts = append(parts, d.Reason)
+			}
+		}
+		// Every language the provider supplied: the ban sentence may only be in
+		// one of them, and reading them all is what the WAF's own check does.
+		for _, value := range parsed.DisplayMsg {
+			if text, ok := value.(string); ok && text != "" {
+				parts = append(parts, text)
 			}
 		}
 		if len(parts) > 0 {
@@ -2052,6 +2111,40 @@ func mentionsGate(lower string) bool {
 		strings.Contains(lower, "model access is disabled") ||
 		strings.Contains(lower, "endpoint is unavailable")
 }
+
+// codebuddyClassificationText returns the text the rule table classifies a
+// failure against.
+//
+// CodeBuddy's refusals are `{"code":N,"msg":"..."}` and the rules key on those
+// numeric codes (11140 banned, 11128 refused, 11115 too large), but the
+// extraction above keeps only the human text — so the code would never reach the
+// table and every verdict would collapse into the bare 403 rule. The lanes
+// therefore classify against the body itself, which is what upstream's parseError
+// does with the parsed object (`data?.code === 11140`, `JSON.stringify(data)`).
+//
+// Scoped to those two providers: for every other lane the extracted text is the
+// deterministic input, and widening this would let an arbitrary body steer the
+// verdict. The body is bounded so a hostile one cannot turn classification into
+// a large scan.
+func codebuddyClassificationText(provider, errorText string, body []byte) string {
+	if !providers.IsCodeBuddyLane(provider) || len(body) == 0 {
+		return errorText
+	}
+	const maxBody = 8 << 10
+	if len(body) > maxBody {
+		body = body[:maxBody]
+	}
+	if errorText == "" {
+		return string(body)
+	}
+	return errorText + " " + string(body)
+}
+
+// accountRotationDelay is how long the router waits before dialling the next
+// account after one was banned (upstream ACCOUNT_ROTATION_DELAY_MS). A ban is
+// what a provider issues when the request pattern looks automated; answering it
+// by hitting the next account in the same millisecond is that pattern again.
+const accountRotationDelay = 3 * time.Second
 
 // isModelScopedError reports whether an upstream retryable error is
 // specific to the requested model (e.g. 429 model quota, 402 insufficient funds
