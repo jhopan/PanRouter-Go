@@ -99,21 +99,46 @@ func ConnectionRequiresReauth(rawData string) bool {
 }
 
 // ConnectionBlockedUntil returns the earliest instant the account becomes
-// selectable again across the account-scoped cooldowns, so the selector can
-// ask one question instead of one per park.
+// selectable again across the account-scoped parks, so the selector can ask one
+// question instead of one per park. The whole-account quota park the chat path
+// writes on a spent-budget verdict (quotaExhaustedUntil) is one of them: the
+// provider is not serving that account again before the window it named, and
+// upstream reads the same field when it decides an account is parked
+// (open-sse/services/routerQuotaState.js:56, src/shared/utils/cooldown.js:42).
+//
+// Only parks that are still live count. A lapsed value names an account that is
+// usable again: it must neither park the connection itself nor hide a live park
+// behind it.
 func ConnectionBlockedUntil(rawData string) (time.Time, bool) {
+	return ConnectionBlockedUntilAt(rawData, time.Now())
+}
+
+// ConnectionBlockedUntilAt is ConnectionBlockedUntil with the clock injected, so
+// a test can place the parks either side of "now" without waiting them out.
+func ConnectionBlockedUntilAt(rawData string, now time.Time) (time.Time, bool) {
 	raw, ok := parseConnData(rawData)
 	if !ok {
 		return time.Time{}, false
 	}
-	earliest, found := readTimestampField(raw, "rateLimitedUntil")
-	if until, ok := readTimestampField(raw, "oauthLockedUntil"); ok && (!found || until.Before(earliest)) {
-		return until, true
+	var earliest time.Time
+	for _, key := range []string{
+		"rateLimitedUntil",
+		"oauthLockedUntil",
+		"accountLockedUntil",
+		"quotaExhaustedUntil",
+	} {
+		until, ok := readTimestampField(raw, key)
+		if !ok || !until.After(now) {
+			continue
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
 	}
-	if until, ok := readTimestampField(raw, "accountLockedUntil"); ok && (!found || until.Before(earliest)) {
-		return until, true
+	if earliest.IsZero() {
+		return time.Time{}, false
 	}
-	return earliest, found
+	return earliest, true
 }
 
 // ConnectionAccountLockUntil reads the account-ban lockout timestamp a

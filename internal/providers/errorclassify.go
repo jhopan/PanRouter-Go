@@ -463,6 +463,14 @@ type ErrorClassification struct {
 	ShouldFallback  bool
 	CooldownMs      int
 	NewBackoffLevel int // only meaningful when the matched rule has Backoff=true
+	// Quota reports whether the rule that matched is a spent-budget verdict
+	// (ErrorRule.Quota): the account's credit or quota allowance is gone rather
+	// than being briefly throttled. Carried out of the classifier because the
+	// caller has to record a different park for it — the quota window itself,
+	// which upstream persists as quotaExhaustedUntil (src/sse/services/auth.js:552)
+	// — and re-deriving it from the rule table would be a second copy of the
+	// same decision.
+	Quota bool
 }
 
 // ClassifyError classifies an upstream error by matching text and status against ErrorRules.
@@ -502,6 +510,7 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 				ShouldFallback:  true,
 				CooldownMs:      rule.CooldownMs,
 				NewBackoffLevel: backoffLevel,
+				Quota:           rule.Quota,
 			}
 		}
 
@@ -519,6 +528,7 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 				ShouldFallback:  true,
 				CooldownMs:      rule.CooldownMs,
 				NewBackoffLevel: backoffLevel,
+				Quota:           rule.Quota,
 			}
 		}
 	}

@@ -1893,8 +1893,13 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 		}
 	} else {
 		until := time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second)
-		if err := h.Repo.LockConnectionRateLimit(connID, until, cls.NewBackoffLevel, ue.StatusCode, extractErrorText(ue.Body)); err != nil {
-			log.Warn("combo", "rate limit lock failed", "conn", connID, "error", err)
+		// Same split as the single-provider loop: a spent budget records the quota
+		// window it named, a throttle keeps the generic cooldown. One deadline for
+		// both writes.
+		if !h.parkQuotaExhausted(connID, ue, provider, extractErrorText(ue.Body), cls, until) {
+			if err := h.Repo.LockConnectionRateLimit(connID, until, cls.NewBackoffLevel, ue.StatusCode, extractErrorText(ue.Body)); err != nil {
+				log.Warn("combo", "rate limit lock failed", "conn", connID, "error", err)
+			}
 		}
 	}
 	*excludeIDs = append(*excludeIDs, connID)

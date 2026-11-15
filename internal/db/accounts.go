@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"panrouter/proxy/internal/providers"
 )
 
 const modelLockPrefix = "modelLock_"
@@ -37,10 +39,17 @@ func (r *Repo) LockConnectionModel(connID, model string, durationSec int, backof
 	return nil
 }
 
-// ConnectionCooldownUntil reads the account-scoped quota cooldown a connection
-// carries in its data blob, mirroring upstream filterAvailableAccounts
-// (open-sse/services/accountFallback.js:180), which skips any account whose
-// rateLimitedUntil is still in the future.
+// ConnectionCooldownUntil reads the account-scoped cooldown a connection
+// carries in its data blob and when it ends: the whole-account quota park the
+// chat path writes for a spent-budget verdict (quotaExhaustedUntil, upstream
+// src/sse/services/auth.js:552) while it is still live, the generic account
+// cooldown otherwise (rateLimitedUntil). Mirrors upstream
+// filterAvailableAccounts (open-sse/services/accountFallback.js:180), which
+// skips any account whose rateLimitedUntil is still in the future, plus
+// buildRouterQuotaState (open-sse/services/routerQuotaState.js:56), which reads
+// the quota field first because a quota refusal does not have to write a model
+// lock or a generic cooldown at all: that field can be the only record of the
+// park.
 //
 // Unlike the model lock this cooldown is not keyed by model, which is what
 // catches a quota spent account-wide, and it is the only quota cooldown the
@@ -48,14 +57,30 @@ func (r *Repo) LockConnectionModel(connID, model string, durationSec int, backof
 // parked for a rejected OAuth grant carries its own timestamp instead; read
 // both through ConnectionBlockedUntil.
 //
-// A missing, empty or unparseable value reports "not in cooldown" so a
-// malformed field can never take routing down.
+// A missing, empty, unparseable or already lapsed value reports "not in
+// cooldown" so neither a malformed field nor a stale one can move an account
+// in or out of rotation.
 func ConnectionCooldownUntil(rawData string) (time.Time, bool) {
+	return ConnectionCooldownUntilAt(rawData, time.Now())
+}
+
+// ConnectionCooldownUntilAt is ConnectionCooldownUntil with the clock injected,
+// so a test can place a park either side of "now" without waiting it out.
+func ConnectionCooldownUntilAt(rawData string, now time.Time) (time.Time, bool) {
 	raw, ok := parseConnData(rawData)
 	if !ok {
 		return time.Time{}, false
 	}
-	return readTimestampField(raw, "rateLimitedUntil")
+	// A lapsed quota park is not a park: falling back rather than returning it
+	// keeps a stale date from hiding a live generic cooldown behind it.
+	if until, ok := readTimestampField(raw, "quotaExhaustedUntil"); ok && until.After(now) {
+		return until, true
+	}
+	until, ok := readTimestampField(raw, "rateLimitedUntil")
+	if !ok || !until.After(now) {
+		return time.Time{}, false
+	}
+	return until, true
 }
 
 // RecordConnectionError stores the error message, status, and backoffLevel on
@@ -136,16 +161,22 @@ func (r *Repo) LockConnectionRateLimit(connID string, until time.Time, backoffLe
 
 // ClearConnectionRateLimit drops the account-scoped cooldown after a request
 // was served, mirroring upstream resetAccountState
-// (open-sse/services/accountFallback.js:198). Without it a recovered account
-// would stay skipped until the cooldown expired on its own. The per-model
-// locks are deliberately left alone: a success on one model must not unlock a
-// model that is still in cooldown.
+// (open-sse/services/accountFallback.js:198) and clearAccountError
+// (src/sse/services/auth.js:620-627). Without it a recovered account would stay
+// skipped until the cooldown expired on its own. The per-model locks are
+// deliberately left alone: a success on one model must not unlock a model that
+// is still in cooldown.
+//
+// The quota park goes with it: a served request is the same proof of a usable
+// account whether the park was a throttle or a spent budget, and upstream drops
+// quotaExhaustedUntil in the same update.
 func (r *Repo) ClearConnectionRateLimit(connID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := r.db.Exec(
 		`UPDATE providerConnections
 		 SET data = json_set(data,
 		   '$.rateLimitedUntil', NULL,
+		   '$.quotaExhaustedUntil', NULL,
 		   '$.lastError', NULL,
 		   '$.status', 'active',
 		   '$.backoffLevel', 0),
@@ -155,6 +186,63 @@ func (r *Repo) ClearConnectionRateLimit(connID string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("clear connection rate limit %s: %w", connID, err)
+	}
+	return nil
+}
+
+// LockConnectionQuotaExhausted parks a connection whose provider reported the
+// account's quota or credit budget is spent, mirroring the quota branch of
+// upstream markAccountUnavailable (src/sse/services/auth.js:539-566).
+//
+// It writes the account cooldown LockConnectionRateLimit writes — the selector
+// already skips on that — and beside it the fields upstream records for the same
+// verdict: quotaExhaustedUntil, testStatus "unavailable", the
+// "Quota exhausted — resets <iso>" message, errorCode, lastErrorAt and
+// backoffLevel. One statement, one reset instant for all of them, because
+// upstream is explicit that the lock, the error text and the persisted
+// until-date agree: "the dashboard shows one date while the router unparks the
+// account at another" is the bug that comment exists for.
+//
+// The park is whole-account on purpose. A spent budget refuses every model on
+// the connection, so nothing else there is worth dialling until the window the
+// provider named.
+//
+// The fields live in providerConnections.data because the shared Next.js
+// dashboard reads the same blob (open-sse/services/routerQuotaState.js:56,
+// src/shared/utils/cooldown.js:42); no column is added. The message is stored
+// in this codebase's lastError shape — an object with a message field, which
+// providers.errorTextOf flattens back to the bare string upstream writes — so
+// every writer of this field stays readable by the same readers.
+func (r *Repo) LockConnectionQuotaExhausted(connID string, until time.Time, backoffLevel, status int) error {
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339)
+	resetAt := until.UTC().Format(time.RFC3339)
+	lastError, err := json.Marshal(map[string]any{
+		"status":    status,
+		"message":   "Quota exhausted — resets " + resetAt,
+		"timestamp": stamp,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal last error for %s: %w", connID, err)
+	}
+	_, err = r.db.Exec(
+		`UPDATE providerConnections
+		 SET data = json_set(data,
+		   '$.rateLimitedUntil', ?,
+		   '$.quotaExhaustedUntil', ?,
+		   '$.backoffLevel', ?,
+		   '$.lastError', json(?),
+		   '$.errorCode', ?,
+		   '$.lastErrorAt', ?,
+		   '$.testStatus', ?,
+		   '$.status', 'error'),
+		     updatedAt = ?
+		 WHERE id = ?`,
+		resetAt, resetAt, backoffLevel, string(lastError), status, stamp,
+		providers.StatusUnavailable, stamp, connID,
+	)
+	if err != nil {
+		return fmt.Errorf("lock connection quota exhausted %s: %w", connID, err)
 	}
 	return nil
 }
@@ -307,6 +395,11 @@ func (r *Repo) ResetConnectionHealthState(connID string) error {
 	dataMap["errorCode"] = nil
 	dataMap["rateLimitedUntil"] = nil
 	dataMap["oauthLockedUntil"] = nil
+	// The quota park is a lock like the other two: leaving it behind would keep
+	// an account the operator just reset out of rotation until the provider's own
+	// window passes, which is exactly what the reset button is for (the Claude
+	// and Codex credit-reset panels call this).
+	dataMap["quotaExhaustedUntil"] = nil
 	dataMap["oauthFailureCount"] = 0
 	dataMap["backoffLevel"] = 0
 

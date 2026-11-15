@@ -330,8 +330,16 @@ func (h *ChatHandler) handleAccountFallback(
 				}
 			} else {
 				until := time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second)
-				if lockErr := h.Repo.LockConnectionRateLimit(connObj.ID, until, classification.NewBackoffLevel, ue.StatusCode, errorText); lockErr != nil {
-					log.Warn("fallback", "rate limit lock failed", "conn", connObj.ID, "error", lockErr)
+				// A spent budget is parked as a quota: upstream records the window
+				// the provider named in quotaExhaustedUntil, which is what the
+				// dashboard's cooldown readout and the router's quota state read.
+				// Every other account-scoped refusal keeps the generic cooldown.
+				// Both writes take the same deadline, so the park and the lock can
+				// never name different dates.
+				if !h.parkQuotaExhausted(connObj.ID, ue, provider, errorText, classification, until) {
+					if lockErr := h.Repo.LockConnectionRateLimit(connObj.ID, until, classification.NewBackoffLevel, ue.StatusCode, errorText); lockErr != nil {
+						log.Warn("fallback", "rate limit lock failed", "conn", connObj.ID, "error", lockErr)
+					}
 				}
 				h.getSessionAffinity().EvictConnection(connObj.ID)
 			}

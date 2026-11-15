@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"panrouter/proxy/internal/constants"
+	"panrouter/proxy/internal/errclass"
+	"panrouter/proxy/internal/log"
 	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/translator"
 )
@@ -271,6 +273,69 @@ func retryableCooldownSecAt(statusCode int, base time.Duration, ue *upstreamErro
 		cooldown = park
 	}
 	return ceilSeconds(min(cooldown, maxCooldownFor(provider)))
+}
+
+// isQuotaExhaustionVerdict reports whether a failure the classifier already
+// called retryable is a spent-budget verdict rather than a throttle. It decides
+// which park the account gets: a spent budget is recorded with the quota window
+// itself — upstream writes quotaExhaustedUntil from exactly this judgement,
+// `quotaExhausted = isQuotaExhaustedError(errorText) || !!thResetAtMs`
+// (src/sse/services/auth.js:422) — while a throttle only cools the account down.
+//
+// Four carriers answer it, because a provider may carry only one of them:
+//
+//   - the rule table's own spent-budget rows (providers.ErrorClassification.Quota:
+//     "insufficient balance", CodeBuddy's "frequency limit", Token Harbor's
+//     "free allowance"), which are what the cooldown was built from;
+//   - the shared quota wording list (providers.LooksLikeQuotaExhausted, the port
+//     of upstream's QUOTA_EXHAUSTED_PATTERNS): it names spent budgets the
+//     cooldown table spells differently — "monthly quota", "plan limit", "out
+//     of credits" — so a provider wording the rule table has not been taught
+//     still parks as a quota rather than as a blip;
+//   - the Token Harbor allowance sentence. That 429 body is prose, not JSON, so
+//     no error text reaches the rule table at all (extractErrorText returns "");
+//     the park resolver that already reads the sentence is what identifies it;
+//   - the errclass taxonomy, which names the verdict a cooldown table states as
+//     a bare status: a 402 payment-required is a spent balance, not a
+//     request-scoped refusal.
+//
+// A plain 429 matching none of them stays a throttle, which is the case
+// upstream's own suite pins ("generic rate limits keep the short backoff path").
+func isQuotaExhaustionVerdict(statusCode int, provider, errorText string, ue *upstreamError, cls providers.ErrorClassification) bool {
+	if cls.Quota || providers.LooksLikeQuotaExhausted(errorText) {
+		return true
+	}
+	var body []byte
+	if ue != nil {
+		body = ue.Body
+	}
+	if isTokenharborAllowance(statusCode, provider, body) {
+		return true
+	}
+	return errclass.ClassifyDetail("", statusCode, "", errorText).Kind == errclass.KindQuotaExhausted
+}
+
+// parkQuotaExhausted records the whole-account quota park for a failure when —
+// and only when — the verdict is a spent budget, and reports whether it wrote
+// one. until is the deadline the cooldown computation produced, handed in
+// rather than recomputed so the park and the account cooldown name the same
+// instant (upstream builds both from one reset timestamp).
+//
+// A failure that is not a quota verdict is left to the caller's ordinary
+// account lock: a throttle says nothing about the account's balance, and
+// persisting one as a spent budget would tell the operator to top up an account
+// that only has to wait.
+func (h *ChatHandler) parkQuotaExhausted(connID string, ue *upstreamError, provider, errorText string, cls providers.ErrorClassification, until time.Time) bool {
+	if ue == nil {
+		return false
+	}
+	if !isQuotaExhaustionVerdict(ue.StatusCode, provider, errorText, ue, cls) {
+		return false
+	}
+	if err := h.Repo.LockConnectionQuotaExhausted(connID, until, cls.NewBackoffLevel, ue.StatusCode); err != nil {
+		log.Warn("chat", "quota park failed", "conn", connID, "provider", provider, "error", err)
+	}
+	return true
 }
 
 // passRetry is the rate-limit bookkeeping for one combo pass. The OpenAI and

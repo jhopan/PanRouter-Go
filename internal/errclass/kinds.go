@@ -11,8 +11,11 @@
 // (providers.ClassifyError) plus focused detectors for the two model-level
 // conditions it acts on directly (providers.IsModelFitError,
 // providers.IsModelDeprecation) and for a provider-injected error event inside
-// an HTTP 200 stream (proxy.DetectInbandSSEError). None of those need the
-// vocabulary here, so nothing in the request path calls into this package yet.
+// an HTTP 200 stream (proxy.DetectInbandSSEError). The one decision it takes
+// from here is the Kind of a failure the cooldown table states as a bare
+// status: a 402 is a spent balance rather than a request-scoped refusal, so
+// the chat path parks the account as quota-exhausted on that verdict
+// (handlers/chat/retry_after.go, isQuotaExhaustionVerdict).
 //
 // errclass exists for the routing decision that layer deliberately does not
 // make: not "how long", but "what kind of failure is this, and what does it

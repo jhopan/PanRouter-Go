@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/fetchgate"
 	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlerutil"
@@ -148,10 +149,18 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 	// Fallback for connections with rate limit or locks in data
 	respQuotas := make(map[string]any)
 	if data != nil {
-		if rateLimitedUntil, ok := data["rateLimitedUntil"].(string); ok && rateLimitedUntil != "" {
+		// The account's own park, read through the same predicate routing uses so
+		// the panel and the selector cannot disagree about when the account is
+		// usable again. That reader answers with the whole-account quota park the
+		// chat path recorded when the provider said the budget was spent
+		// (quotaExhaustedUntil), falling back to the generic cooldown, and it
+		// reports nothing for a date that has already lapsed — upstream's
+		// cooldown readout reads the same field first and ignores an expired one
+		// (src/shared/utils/cooldown.js:42, open-sse/services/routerQuotaState.js:56).
+		if until, ok := db.ConnectionCooldownUntil(conn.Data); ok {
 			respQuotas["default"] = map[string]any{
 				"remainingPercentage": 0,
-				"resetAt":             rateLimitedUntil,
+				"resetAt":             until.UTC().Format(time.RFC3339),
 				"displayName":         conn.Provider,
 			}
 		}
