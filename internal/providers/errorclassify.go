@@ -97,6 +97,13 @@ var ErrorRules = []ErrorRule{
 	// the spent account was re-dialled all window. The allowance is spent for
 	// days, which is what this cooldown family is for.
 	{Text: "free allowance", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	// Kiro's monthly cap refuses EVERY model on the account, and its body names
+	// no reset of its own — the account comes back at nextDateReset. Classifying
+	// it quota-class is what lets the park read that date from the usage API and
+	// what keeps the backoff ladder out of it (upstream auth.js `kiroMonthly`,
+	// which is also the flag that marks the cap cache).
+	{Provider: "kiro", Text: "monthly_request_count", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Provider: "kiro", Text: "you have reached the limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 
 	// --- Text-based rules (checked first, order = priority) ---
 	// Intl gateway blocks affect the account/IP, so let the connection back
@@ -214,6 +221,16 @@ var quotaExhaustedPatterns = []string{
 	"billing required",
 	"payment required",
 	"balance=0",
+	// Kiro's monthly cap is `{"message":"You have reached the limit.",
+	// "reason":"MONTHLY_REQUEST_COUNT"}` on a 402. Neither word is a quota
+	// keyword, so it classified as a plain 402 and the account was re-dialled
+	// every two minutes for the rest of the month (upstream
+	// open-sse/config/quotaWindows.js:271-279 matches exactly these two
+	// spellings, provider-agnostically). Kiro declares a MONTHLY scope and its
+	// usage API reports nextDateReset, so the verdict parks the account until
+	// the real reset instead of guessing.
+	"monthly_request_count",
+	"you have reached the limit",
 	// CodeBuddy words a spent model quota as a frequency limit and states when
 	// it resets: "usage exceeds frequency limit ... reset at <timestamp>". It is
 	// not a transient throttle, so it belongs with the exhausted budgets rather

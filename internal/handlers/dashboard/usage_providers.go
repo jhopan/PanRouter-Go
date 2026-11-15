@@ -1241,6 +1241,10 @@ func parseKiroQuotaData(data map[string]any) usageResult {
 	}
 	resetAt := usageResetTime(firstNonEmptyAny(data["nextDateReset"], data["resetDate"]))
 	quotas := map[string]any{}
+	// limitReached mirrors upstream: a bucket reading used >= total means the
+	// monthly cap refuses every model on the account, which the tracker shows as
+	// an exhausted row instead of a stale "used 0 / limit 0" that looks healthy.
+	limitReached := false
 	for _, item := range list {
 		b, ok := item.(map[string]any)
 		if !ok {
@@ -1253,6 +1257,9 @@ func parseKiroQuotaData(data map[string]any) usageResult {
 		}
 		used := usageNum(b["currentUsageWithPrecision"], 0)
 		total := usageNum(b["usageLimitWithPrecision"], 0)
+		if total > 0 && used >= total {
+			limitReached = true
+		}
 		quotas[rt] = map[string]any{
 			"used": used, "total": total, "remaining": total - used,
 			"resetAt": usageResetTimeToNil(resetAtStr(resetAt)), "unlimited": false,
@@ -1270,13 +1277,31 @@ func parseKiroQuotaData(data map[string]any) usageResult {
 			}
 		}
 	}
+	// The monthly window is always present as a row, even when Kiro reports no
+	// breakdown of its own: without it the card goes blank exactly when the
+	// account is out of quota, instead of saying "exhausted, resets <date>"
+	// (upstream usage/kiro.js:55-70).
+	if _, ok := quotas["monthly"]; !ok {
+		usedFlag := 0.0
+		remaining := 1.0
+		if limitReached {
+			usedFlag, remaining = 1, 0
+		}
+		quotas["monthly"] = map[string]any{
+			"used": usedFlag, "total": 1.0, "remaining": remaining,
+			"resetAt": resetAtStr(resetAt), "unlimited": false,
+		}
+	}
 	plan := "Kiro"
 	if sub, ok := data["subscriptionInfo"].(map[string]any); ok {
 		if title, _ := sub["subscriptionTitle"].(string); title != "" {
 			plan = title
 		}
 	}
-	return usageResult{plan: plan, quotas: quotas}
+	return usageResult{plan: plan, quotas: quotas, extra: map[string]any{
+		"limitReached": limitReached,
+		"resetAt":      resetAtStr(resetAt),
+	}}
 }
 
 func resetAtStr(s string) any {
@@ -1337,8 +1362,13 @@ func fetchKiroUsage(ctx context.Context, accessToken string, psd map[string]any)
 	for k, v := range base {
 		cwGetHeaders[k] = v
 	}
-	cwGetHeaders["x-amz-user-agent"] = "aws-sdk-js/1.0.0 KiroIDE"
-	cwGetHeaders["user-agent"] = "aws-sdk-js/1.0.0 KiroIDE"
+	// The quota read presents the same client as chat and model discovery: Kiro
+	// parses the IDE version out of the user agent and refuses stale builds, and a
+	// different identity on one hop is a fingerprint anomaly on its own
+	// (upstream usage/kiro.js imports kiroUserAgents for exactly this call).
+	ua, amzUA := providers.KiroUserAgents(psd, accessToken, "codewhispererruntime")
+	cwGetHeaders["x-amz-user-agent"] = amzUA
+	cwGetHeaders["user-agent"] = ua
 	for k, v := range extra {
 		cwGetHeaders[k] = v
 	}
@@ -1726,7 +1756,6 @@ var antigravityDashboardBaseURL = "https://cloudcode-pa.googleapis.com"
 // with the real reset time. Dashboard calls must use DAILY; chat routing
 // intentionally stays on PROD and is untouched.
 var antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
-
 
 var antigravityImportantModels = map[string]bool{
 	"gemini-4-carbon-high": true, "gemini-4-carbon-medium": true, "gemini-4-carbon-low": true,

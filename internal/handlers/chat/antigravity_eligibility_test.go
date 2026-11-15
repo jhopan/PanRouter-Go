@@ -80,12 +80,12 @@ func (f *fakeAntigravityKV) set(scope, key, value string) {
 func installAntigravityKV(t *testing.T) *fakeAntigravityKV {
 	t.Helper()
 	store := newFakeAntigravityKV()
-	SetAntigravityKVStore(store)
+	SetKVStore(store)
 	ClearAntigravityIneligibleCache()
 	ClearAntigravityQuotaCache()
 	ClearAntigravityRevalidateState()
 	t.Cleanup(func() {
-		SetAntigravityKVStore(nil)
+		SetKVStore(nil)
 		ClearAntigravityIneligibleCache()
 		ClearAntigravityQuotaCache()
 		ClearAntigravityRevalidateState()

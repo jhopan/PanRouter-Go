@@ -880,6 +880,20 @@ type kiroToolCall struct {
 type kiroStreamState struct {
 	toolCallIndex int
 	tools         []*kiroToolCall
+	// stopReason is what Kiro said, merged across messageStopEvent and
+	// metadataEvent. Empty means the stream ended without naming one, which is
+	// not the same as "stop": the caller maps it.
+	stopReason string
+	// inputTokens/outputTokens come from metricsEvent — Kiro's own count. Without
+	// them the usage record was an estimate (len(content)/4), which understated a
+	// tool-only turn and every non-ASCII answer.
+	inputTokens  int
+	outputTokens int
+	hasMetrics   bool
+	// inThinking drops the model's inline <thinking> markup: Kiro some times
+	// wraps its reasoning in those tags inside assistantResponseEvent, and the
+	// client gets the raw tag otherwise.
+	inThinking bool
 }
 
 // tool returns the buffer for id, creating it on first sight.
@@ -914,6 +928,34 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 	flusher, _ := w.(http.Flusher)
 	esr := providers.NewEventStreamReader(upstream)
 
+	// A /v1/messages client cannot read OpenAI chunks, so every frame goes through
+	// the Claude adapter on the way out (the same transformation upstream's
+	// direct kiro:claude route performs). One session key for the whole stream:
+	// the adapter keeps block indices and the open message there.
+	claudeStream := req.ClaudeClient || req.TranslateResp
+	sessionKey := translator.NewSessionKey("kiro-stream")
+	if claudeStream {
+		defer translator.ClearStreamState(sessionKey)
+	}
+	emit := func(chunk map[string]any) error {
+		if !claudeStream {
+			return writeSSE(w, chunk)
+		}
+		encoded, err := json.Marshal(chunk)
+		if err != nil {
+			return err
+		}
+		out, err := translator.TranslateOpenAIToClaudeStreamSession(sessionKey, encoded)
+		if err != nil {
+			return err
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		_, err = w.Write(out)
+		return err
+	}
+
 	responseID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	created := time.Now().Unix()
 	state := &kiroStreamState{}
@@ -932,6 +974,28 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 			break
 		}
 
+		// An EventStream error/exception frame is the upstream failing mid-answer.
+		// Ignoring it made a failed turn look like a short successful one.
+		if messageType := frame.Headers[":message-type"]; messageType == "error" || messageType == "exception" {
+			var payload struct {
+				Message string `json:"message"`
+			}
+			_ = json.Unmarshal(frame.Payload, &payload)
+			message := payload.Message
+			if message == "" {
+				message = "Kiro upstream sent an EventStream " + messageType
+			}
+			_ = emit(map[string]any{"error": map[string]any{
+				"type":    "upstream_error",
+				"code":    "kiro_upstream_eventstream_error",
+				"message": message,
+			}})
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return nil
+		}
+
 		eventType := frame.Headers[":event-type"]
 
 		switch eventType {
@@ -942,10 +1006,13 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 			if err := json.Unmarshal(frame.Payload, &payload); err != nil {
 				continue
 			}
-			if payload.Content == "" {
+			content := kiroStripThinkingMarkup(payload.Content, state)
+			// Fragments carry their own spacing ("Hey" then " there"); trimming each
+			// one welded the answer into "Heythere".
+			if content == "" {
 				continue
 			}
-			accumulatedContent.WriteString(payload.Content)
+			accumulatedContent.WriteString(content)
 
 			chunk := map[string]any{
 				"id":      responseID,
@@ -953,14 +1020,14 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 				"created": created,
 				"choices": []map[string]any{{
 					"index": 0,
-					"delta": map[string]any{"content": payload.Content},
+					"delta": map[string]any{"content": content},
 				}},
 			}
 			markTTFT(req, req.StartTime)
 			if req.ResponseBuf != nil {
 				_, _ = fmt.Fprintf(req.ResponseBuf, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", responseID, created, payload.Content)
 			}
-			if err := writeSSE(w, chunk); err != nil {
+			if err := emit(chunk); err != nil {
 				return err
 			}
 			if flusher != nil {
@@ -990,7 +1057,7 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 			if req.ResponseBuf != nil {
 				_, _ = fmt.Fprintf(req.ResponseBuf, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":%q},\"finish_reason\":null}]}\n\n", responseID, created, payload.Text)
 			}
-			if err := writeSSE(w, chunk); err != nil {
+			if err := emit(chunk); err != nil {
 				return err
 			}
 			if flusher != nil {
@@ -1024,6 +1091,11 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 				if strings.TrimSpace(toolUseID) == "" {
 					toolUseID = fmt.Sprintf("call_%d_%d", created, len(state.tools)+1)
 				}
+				// The request sanitized the catalog's names (mcp__a__b → mcp_a_b);
+				// the client can only dispatch the name it declared.
+				if original, ok := req.ToolNameMap[name]; ok && original != "" {
+					name = original
+				}
 				call := state.tool(toolUseID, name)
 				switch input := value["input"].(type) {
 				case string:
@@ -1033,6 +1105,43 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 						call.inputs.Write(encoded)
 					}
 				}
+			}
+
+		case "messageStopEvent":
+			// Kiro names how the turn ended; without it every answer finished as
+			// "stop" and a truncated turn looked complete.
+			var payload struct {
+				StopReason string `json:"stopReason"`
+				StopSnake  string `json:"stop_reason"`
+			}
+			if err := json.Unmarshal(frame.Payload, &payload); err == nil {
+				reason := payload.StopReason
+				if reason == "" {
+					reason = payload.StopSnake
+				}
+				state.stopReason = kiroMergeStopReason(state.stopReason, kiroNormalizeStopReason(reason, len(state.tools) > 0))
+			}
+
+		case "metadataEvent", "MetadataEvent":
+			var payload map[string]any
+			if err := json.Unmarshal(frame.Payload, &payload); err == nil {
+				metadata, _ := payload["metadataEvent"].(map[string]any)
+				if metadata == nil {
+					metadata, _ = payload["metadata"].(map[string]any)
+				}
+				if metadata == nil {
+					metadata = payload
+				}
+				reason, _ := metadata["stopReason"].(string)
+				if reason == "" {
+					reason, _ = metadata["stop_reason"].(string)
+				}
+				state.stopReason = kiroMergeStopReason(state.stopReason, kiroNormalizeStopReason(reason, len(state.tools) > 0))
+			}
+
+		case "metricsEvent":
+			if in, out, ok := kiroMetricsTokens(frame.Payload); ok {
+				state.inputTokens, state.outputTokens, state.hasMetrics = in, out, true
 			}
 		}
 	}
@@ -1076,10 +1185,7 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 		}
 	}
 
-	finishReason := "stop"
-	if state.toolCallIndex > 0 {
-		finishReason = "tool_calls"
-	}
+	finishReason := kiroFinishReason(state.stopReason, state.toolCallIndex > 0)
 	done := map[string]any{
 		"id":      responseID,
 		"object":  "chat.completion.chunk",
@@ -1090,8 +1196,18 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 			"finish_reason": finishReason,
 		}},
 	}
-	if err := writeSSE(w, done); err != nil {
+	if err := emit(done); err != nil {
 		return err
+	}
+	if claudeStream {
+		// The finish chunk opened the closing sequence; EnsureStreamClosed writes
+		// the message_delta/message_stop pair the client waits for, including for a
+		// turn that carried no finish reason of its own.
+		if tail := translator.EnsureStreamClosed(sessionKey); len(tail) > 0 {
+			if _, err := w.Write(tail); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := w.Write([]byte("data: [DONE]\n\n")); err != nil {
 		return err
@@ -1100,8 +1216,13 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 		flusher.Flush()
 	}
 
-	inputTokens := 0
-	outputTokens := len(accumulatedContent.String()) / 4
+	inputTokens := state.inputTokens
+	outputTokens := state.outputTokens
+	if !state.hasMetrics {
+		// No metrics event: fall back to the estimate rather than reporting zero,
+		// which read as a free turn on the dashboard.
+		outputTokens = len(accumulatedContent.String()) / 4
+	}
 	translator.SetUsage(req.Ctx, &translator.OpenAIUsage{
 		PromptTokens:     inputTokens,
 		CompletionTokens: outputTokens,
@@ -1129,10 +1250,17 @@ func (w *sseCollectWriter) Write(b []byte) (int, error) { return w.buf.Write(b) 
 // JSON.parse could not read (issue #41).
 func handleKiroNonStream(w http.ResponseWriter, req *Request, upstream io.Reader) error {
 	collect := &sseCollectWriter{}
+	// The folding below reads OpenAI chunks, so the inner stream must emit that
+	// shape even for a Claude client: the Claude translation happens once, on the
+	// folded document (jsonResponse), not frame by frame into a collector that
+	// cannot parse it.
+	inner := *req
+	inner.ClaudeClient = false
+	inner.TranslateResp = false
 	// A clean end of stream surfaces as io.EOF once the last frame is
 	// consumed, which is the normal case here and not a failure; anything
 	// else is a real read error and must not be answered as a completion.
-	if err := handleKiroStream(collect, req, upstream); err != nil && !errors.Is(err, io.EOF) {
+	if err := handleKiroStream(collect, &inner, upstream); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 	folded, ok := sseToOpenAIJSON(collect.buf.Bytes())

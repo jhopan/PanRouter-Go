@@ -36,6 +36,7 @@ type Request struct {
 	ConnData       map[string]any    // connection providerSpecificData (e.g. fingerprintId for client cloaking)
 	Leases         LeaseStore        // cross-process lease backend (nil = memory only)
 	ModelName      string            // extracted model name
+	Headers        http.Header       // inbound client headers (some wires read a beta header)
 	Endpoint       string            // custom URL override (azure)
 	ToolNameMap    map[string]string // claude OAuth tool-cloak map (suffixed -> original)
 	UpstreamClaude bool              // upstream responds in Claude format while client sent OpenAI format

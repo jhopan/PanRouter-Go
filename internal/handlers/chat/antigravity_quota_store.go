@@ -9,7 +9,6 @@
 package chat
 
 import (
-	"sync"
 	"time"
 
 	json "panrouter/proxy/internal/fastjson"
@@ -19,42 +18,10 @@ import (
 // AgQuotaScope is the KV scope holding the persisted exhausted buckets.
 const AgQuotaScope = "ag_quota"
 
-// AntigravityKV is the key-value surface the Antigravity caches persist through.
-// *db.Repo satisfies it; tests inject a fake. A nil store is the fail-open path:
-// nothing is read or written and no request notices.
-//
-// The methods carry no context because the repository's KV API has none — a
-// per-key upsert on local SQLite, not a caller-cancellable round trip.
-type AntigravityKV interface {
-	GetKVScope(scope string) (map[string]string, error)
-	SetKV(scope, key, value string) error
-	DeleteKV(scope, key string) error
-}
-
-var (
-	agKVMu sync.RWMutex
-	agKV   AntigravityKV
-
-	// agNow is the clock every Antigravity TTL decision reads: the eligibility
-	// flag's 15m window, the exhausted buckets' reset comparison and the
-	// re-verification cooldown. A var so tests move time instead of sleeping.
-	agNow = func() time.Time { return time.Now().UTC() }
-)
-
-// SetAntigravityKVStore wires the store the Antigravity caches persist through.
-// Called once at startup; tests point it at a fake.
-func SetAntigravityKVStore(kv AntigravityKV) {
-	agKVMu.Lock()
-	defer agKVMu.Unlock()
-	agKV = kv
-}
-
-// agKVStore reads the wired store, or nil when none was set.
-func agKVStore() AntigravityKV {
-	agKVMu.RLock()
-	defer agKVMu.RUnlock()
-	return agKV
-}
+// agNow is the clock every Antigravity TTL decision reads: the eligibility
+// flag's 15m window, the exhausted buckets' reset comparison and the
+// re-verification cooldown. A var so tests move time instead of sleeping.
+var agNow = func() time.Time { return time.Now().UTC() }
 
 // agPersistedQuota is one persisted exhausted bucket. resetAt is RFC3339 text,
 // the same shape the Node writer stores, so either side can read the row.
@@ -67,7 +34,7 @@ type agPersistedQuota struct {
 // exhausted buckets of a reading to the connection's KV row. Fail-open — a KV
 // write failure must never block the request path.
 func persistAntigravityExhausted(connectionID string, quotas map[string]AntigravityModelQuota) {
-	kv := agKVStore()
+	kv := kvStore()
 	if kv == nil || connectionID == "" {
 		return
 	}
@@ -88,7 +55,7 @@ func persistAntigravityExhausted(connectionID string, quotas map[string]Antigrav
 // once nothing is exhausted the row goes away, so a recovered account does not
 // come back blocked after the next restart.
 func removeAntigravityPersistedIfHealthy(connectionID string, quotas map[string]AntigravityModelQuota) {
-	kv := agKVStore()
+	kv := kvStore()
 	if kv == nil || connectionID == "" {
 		return
 	}
@@ -105,7 +72,7 @@ func removeAntigravityPersistedIfHealthy(connectionID string, quotas map[string]
 // empty is deleted. Returns how many buckets were restored. Fail-open: a KV error
 // never prevents startup.
 func LoadPersistedAntigravityQuota() int {
-	kv := agKVStore()
+	kv := kvStore()
 	if kv == nil {
 		return 0
 	}

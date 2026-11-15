@@ -299,15 +299,10 @@ func kiroUpstreamBody(req *Request) ([]byte, error) {
 	if _, after, ok := strings.Cut(model, "/"); ok {
 		model = after
 	}
-	// -thinking / -agentic are panrouter fictions, stripped before upstream.
-	model = strings.TrimSuffix(model, "-thinking")
-	model = strings.TrimSuffix(model, "-agentic")
-	if idx := strings.IndexByte(model, '('); idx > 0 {
-		model = model[:idx]
-	}
-	// Anthropic spellings (claude-sonnet-4-5-20250929) 400 on Kiro's data
-	// plane; fold them onto the dotted upstream alias.
-	model = normalizeKiroUpstreamModelId(model)
+	// -thinking / -agentic are panrouter fictions: they pick the system material
+	// and the native effort envelope, then they are stripped. Rendering them
+	// first keeps `...-thinking-agentic` from leaving a suffix on the wire.
+	intent := kiroResolveIntent(model)
 
 	profileArn, authMethod := "", ""
 	if req.ConnData != nil {
@@ -317,10 +312,31 @@ func kiroUpstreamBody(req *Request) ([]byte, error) {
 		authMethod, _ = req.ConnData["authMethod"].(string)
 	}
 
-	out, err := translator.OpenAIToKiro(req.Body, translator.KiroTranslateOptions{
-		Model:      model,
-		ProfileArn: providers.KiroEffectiveProfileARN(authMethod, profileArn),
-	})
+	// A /v1/messages client sends Anthropic blocks, not OpenAI messages: the
+	// direct claude→kiro translator reads them (including the `system` blocks)
+	// and keeps what the pivot would lose — screenshots inside tool results and
+	// Anthropic tool ids.
+	if req.ToolNameMap == nil {
+		req.ToolNameMap = map[string]string{}
+	}
+	opts := translator.KiroTranslateOptions{
+		Model:            intent.Upstream,
+		ProfileArn:       providers.KiroEffectiveProfileARN(authMethod, profileArn),
+		ContentPrefix:    kiroContentPrefix(intent, probe, req.Headers, ""),
+		AdditionalFields: kiroAdditionalFields(probe, intent.Upstream),
+		ConversationID:   req.SessionID,
+		ConnectionID:     req.ConnectionID,
+		ToolNameMap:      req.ToolNameMap,
+	}
+	// The router pivots a Messages body to OpenAI before the executor runs, so the
+	// body that arrives here is usually Chat Completions even for a Claude client.
+	// Only the body's own shape can decide: a top-level `system` is the Messages
+	// dialect, and feeding it to the OpenAI converter would drop it.
+	translate := translator.OpenAIToKiro
+	if req.ClaudeClient && translator.IsClaudeRequestBody(req.Body) {
+		translate = translator.ClaudeToKiro
+	}
+	out, err := translate(req.Body, opts)
 	if err != nil {
 		log.Error("executor", "kiro translation failed", "model", model, "error", err)
 		return nil, &proxy.UpstreamError{

@@ -4,20 +4,16 @@ import (
 	"encoding/base64"
 	json "encoding/json/v2"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
+
+	proxyoauth "panrouter/proxy/internal/proxy/oauth"
 )
 
 // Port of src/lib/oauth/kiroExternalIdp.js normalizeKiroExternalIdpAuth:
 // validates CLIProxyAPI external_idp auth JSON for Microsoft accounts.
 
-var microsoftTokenEndpointHosts = map[string]bool{
-	"login.microsoftonline.com": true,
-	"login.microsoft.com":       true,
-	"login.windows.net":         true,
-}
-
+// kiroExternalIDPToken is the normalized auth JSON the importer stores.
 type kiroExternalIDPToken struct {
 	AccessToken          string
 	RefreshToken         string
@@ -26,48 +22,23 @@ type kiroExternalIDPToken struct {
 	ProviderSpecificData map[string]any
 }
 
+// kiroIDPStr reads the first non-empty string under any accepted spelling.
 func kiroIDPStr(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+	for _, key := range keys {
+		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
 			return strings.TrimSpace(s)
 		}
 	}
 	return ""
 }
 
-func validateMicrosoftTokenEndpoint(raw string) (string, error) {
-	endpoint := strings.TrimSpace(raw)
-	if endpoint == "" {
-		return "", fmt.Errorf("token_endpoint is required")
-	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("token_endpoint must be a valid URL")
-	}
-	if !strings.EqualFold(parsed.Scheme, "https") {
-		return "", fmt.Errorf("token_endpoint must use https")
-	}
-	if !microsoftTokenEndpointHosts[strings.ToLower(parsed.Hostname())] {
-		return "", fmt.Errorf("token_endpoint must be a Microsoft login endpoint")
-	}
-	return parsed.String(), nil
-}
+// The Microsoft-endpoint rules and the scope spelling live in the refresher
+// package, so the import path and the refresh path can never disagree about which
+// endpoint may receive a refresh token.
+func normalizeKiroIDPScope(v any) string { return proxyoauth.NormalizeKiroIDPScope(v) }
 
-func normalizeKiroIDPScope(v any) string {
-	switch t := v.(type) {
-	case string:
-		fields := strings.Fields(t)
-		return strings.Join(fields, " ")
-	case []any:
-		parts := make([]string, 0, len(t))
-		for _, p := range t {
-			if s, ok := p.(string); ok && strings.TrimSpace(s) != "" {
-				parts = append(parts, strings.TrimSpace(s))
-			}
-		}
-		return strings.Join(parts, " ")
-	}
-	return ""
+func validateMicrosoftTokenEndpoint(raw string) (string, error) {
+	return proxyoauth.ValidateMicrosoftTokenEndpoint(raw)
 }
 
 func decodeKiroIDPExpiry(accessToken string) string {

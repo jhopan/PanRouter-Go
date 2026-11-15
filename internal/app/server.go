@@ -133,9 +133,15 @@ func ProvideServer(p ServerParams) *http.Server {
 			// buckets already spent (which can block for days). Both restores are
 			// fail-open — a KV error never prevents startup — and both drop the
 			// rows whose TTL or reset has already passed.
-			chat.SetAntigravityKVStore(p.Repo)
+			chat.SetKVStore(p.Repo)
 			chat.RestoreAntigravityIneligible()
 			chat.LoadPersistedAntigravityQuota()
+			// Kiro's monthly cap is the same shape of fact: an account that hit
+			// MONTHLY_REQUEST_COUNT is out until nextDateReset, so a restart that
+			// forgot it would spend a request per model re-learning it.
+			if restored := chat.LoadPersistedKiroCaps(); restored > 0 {
+				log.Printf("[KIRO_QUOTA] restored %d monthly cap(s)", restored)
+			}
 			// Which Antigravity identity this process sends. The default is the
 			// captured Hub descriptor and needs no announcement; a non-default one
 			// is an operator decision that changes what Google sees on every call,

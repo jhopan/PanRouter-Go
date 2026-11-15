@@ -27,8 +27,13 @@ var kiroRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]+$`)
 // refreshKiro ports upstream refreshKiroToken (open-sse/services/tokenRefresh/providers.js):
 // AWS SSO OIDC device-code tokens refresh via the per-account clientId/clientSecret
 // against https://oidc.<region>.amazonaws.com/token (camelCase JSON contract);
-// Kiro social tokens refresh via the desktop refresh endpoint (upstream tokenUrl).
-// External IdP is not ported — no Go-side config exists for it yet.
+// enterprise (Microsoft Entra) accounts refresh at their own IdP token endpoint as
+// an OAuth refresh_token grant (upstream buildExternalIdpRefreshParams); everything
+// else is a Kiro social token, refreshed at the desktop endpoint (upstream tokenUrl).
+//
+// The authMethod decides first: an external_idp connection carries a Microsoft
+// tokenEndpoint, and sending its refresh token to the Kiro endpoint would fail with
+// an opaque 401 and rotate nothing.
 func refreshKiro(ctx context.Context, p *Params) (*TokenResult, error) {
 	if p.RefreshToken == "" {
 		return nil, fmt.Errorf("kiro: refresh_token is required")
@@ -40,6 +45,9 @@ func refreshKiro(ctx context.Context, p *Params) (*TokenResult, error) {
 	}
 
 	if psd := p.ProviderSpecificData; psd != nil {
+		if strings.EqualFold(strings.TrimSpace(psd["authMethod"]), "external_idp") {
+			return refreshKiroExternalIDP(ctx, client, p.RefreshToken, psd)
+		}
 		if cid, cs := strings.TrimSpace(psd["clientId"]), strings.TrimSpace(psd["clientSecret"]); cid != "" && cs != "" {
 			return refreshKiroAWS(ctx, client, p.RefreshToken, cid, cs, strings.TrimSpace(psd["region"]))
 		}

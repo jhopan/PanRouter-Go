@@ -193,7 +193,7 @@ func ClearAntigravityIneligibleCache() {
 // is dropped together with its row, so the next probe decides again. Fail-open:
 // a KV error never prevents startup, and returns how many entries were kept.
 func RestoreAntigravityIneligible() int {
-	kv := agKVStore()
+	kv := kvStore()
 	if kv == nil {
 		return 0
 	}
@@ -231,7 +231,7 @@ func RestoreAntigravityIneligible() int {
 // agPersistIneligible mirrors upstream persistEntry: the flag survives a restart,
 // and clearing it removes the row. Fail-open.
 func agPersistIneligible(connectionID string, entry *AntigravityIneligibleEntry) {
-	kv := agKVStore()
+	kv := kvStore()
 	if kv == nil {
 		return
 	}

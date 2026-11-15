@@ -475,15 +475,27 @@ var ProviderRegistry = map[string]ProviderMeta{
 		Notice:       &Notice{Text: "Risk Notice: This provider uses a personal OAuth session not officially licensed for proxy gateways. Account may be restricted or suspended by the upstream provider. Use at your own risk.", SignupURL: "https://github.com/google-gemini/gemini-cli"},
 	},
 	"kiro": {
-		ID:           "kiro",
-		Name:         "Kiro AI",
-		Alias:        "kr",
-		Category:     CategoryFree,
-		Color:        "#FF6B35",
-		Icon:         "psychology_alt",
+		ID:       "kiro",
+		Name:     "Kiro AI",
+		Alias:    "kr",
+		Category: CategoryFree,
+		Color:    "#FF6B35",
+		Icon:     "psychology_alt",
+		// Upstream priority 10 (open-sse/providers/registry/kiro.js): the lowest
+		// of the free providers, because its subscription is the one AWS is most
+		// explicit about not licensing for a gateway.
+		Priority:     10,
 		ServiceKinds: []string{"llm"},
 		Website:      "https://kiro.dev",
-		Notice:       &Notice{SignupURL: "https://kiro.dev"},
+		// Upstream marks the provider deprecated with deprecationNotice
+		// RISK_NOTICE, which src/shared/constants/providersDisplay.js resolves to
+		// this sentence and the dashboard shows as a warning before the
+		// connection is added. The local registry carries risk warnings as
+		// Notice.Text, so the same words reach the operator here.
+		Notice: &Notice{
+			Text:      "Risk Notice: This provider uses a subscription/OAuth session not officially licensed for proxy/router use. Account may be restricted or banned. Use at your own risk.",
+			SignupURL: "https://kiro.dev",
+		},
 	},
 	"mimo-free": {
 		ID:            "mimo-free",

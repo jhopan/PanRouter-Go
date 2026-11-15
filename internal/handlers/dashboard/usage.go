@@ -109,12 +109,14 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 			log.Warn("usage", "forced credential refresh failed", "provider", conn.Provider, "conn", connID, "error", retry.err)
 		} else if retry.refreshed {
 			if retried, retryOK := fetchProviderUsage(r.Context(), conn.Provider, data); retryOK {
+				recordProviderUsageReading(conn, retried)
 				handlerutil.WriteJSON(w, http.StatusOK, retried.toResponse())
 				return
 			}
 		}
 	}
 	if ok {
+		recordProviderUsageReading(conn, res)
 		handlerutil.WriteJSON(w, http.StatusOK, res.toResponse())
 		return
 	}
@@ -183,6 +185,23 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 		quotas:     respQuotas,
 		ineligible: antigravityCachedVerdict(conn),
 	}.toResponse())
+}
+
+// recordProviderUsageReading feeds the per-provider pre-filters from the reading
+// the dashboard is about to show, so routing and the panel never disagree about
+// whether an account still has quota. Upstream records at exactly this point
+// (open-sse/services/usage.js: `if (provider === "kiro") recordKiroUsage(...)`).
+//
+// Kiro only: its monthly cap refuses every model on the account, and the 402 that
+// says so arrives after a request has already been spent. Remembering the
+// reading lets the next request skip the account before it goes upstream.
+func recordProviderUsageReading(conn *models.ProviderConnection, res usageResult) {
+	if conn == nil {
+		return
+	}
+	if providers.ResolveAlias(conn.Provider) == "kiro" {
+		chat.RecordKiroUsage(conn.ID, res.quotas)
+	}
 }
 
 // antigravityCachedVerdict returns the eligibility flag this deployment already

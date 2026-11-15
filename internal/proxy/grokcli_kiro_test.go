@@ -107,8 +107,8 @@ func TestKiroEndpointFallbackStatus(t *testing.T) {
 func TestKiroIdentity_FingerprintAndMachineID(t *testing.T) {
 	t.Run("stable machine id per clientId", func(t *testing.T) {
 		psd := map[string]any{"clientId": "client-12345"}
-		id1 := resolveKiroMachineID(psd, "")
-		id2 := resolveKiroMachineID(psd, "different-token")
+		id1 := providers.KiroMachineID(psd, "")
+		id2 := providers.KiroMachineID(psd, "different-token")
 		if id1 != id2 {
 			t.Errorf("machine ID must be stable across token refreshes: %q != %q", id1, id2)
 		}
@@ -117,20 +117,48 @@ func TestKiroIdentity_FingerprintAndMachineID(t *testing.T) {
 		}
 	})
 
-	t.Run("user agent carries KiroIDE version and machine id", func(t *testing.T) {
+	t.Run("user agent carries the captured 1.4.178 identity", func(t *testing.T) {
 		psd := map[string]any{"clientId": "client-test"}
-		ua, amzUA := kiroServiceUserAgent(psd, "token")
-		machineID := resolveKiroMachineID(psd, "token")
+		ua, amzUA := providers.KiroUserAgents(psd, "token", "codewhispererruntime")
+		machineID := providers.KiroMachineID(psd, "token")
 
-		expectedSuffix := "KiroIDE-" + KiroIDEVersion + "-" + machineID
-		if !strings.HasSuffix(ua, expectedSuffix) {
-			t.Errorf("User-Agent must end with %q, got %q", expectedSuffix, ua)
+		// The captured client ends every UA with
+		//   KiroIDE-1.4.178-<machineId>-KAS/0.66.102-hotfix.1 acp-client/kiro-ide
+		// and the version gate reads exactly the KiroIDE-<version>-<machineId> part.
+		tail := "KiroIDE-" + providers.KiroIDEVersion + "-" + machineID +
+			"-KAS/" + providers.KiroAgentServerVersion + " " + providers.KiroClientAttribution
+		if !strings.HasSuffix(ua, " "+tail) {
+			t.Errorf("User-Agent must end with %q, got %q", tail, ua)
 		}
-		if !strings.Contains(ua, "api/codewhispererstreaming#1.0.0") {
-			t.Errorf("User-Agent missing codewhispererstreaming surface, got %q", ua)
+		if !strings.Contains(ua, "api/codewhispererruntime#"+providers.KiroRuntimeSDKVersion) {
+			t.Errorf("User-Agent missing the codewhispererruntime surface token, got %q", ua)
 		}
-		if amzUA != "aws-sdk-js/1.0.0 "+expectedSuffix {
-			t.Errorf("X-Amz-User-Agent = %q, want %q", amzUA, "aws-sdk-js/1.0.0 "+expectedSuffix)
+		if !strings.Contains(ua, " m/N,E ") {
+			t.Errorf("User-Agent missing the m/N,E capability pair, got %q", ua)
+		}
+		if want := "aws-sdk-js/" + providers.KiroRuntimeSDKVersion + " " + tail; amzUA != want {
+			t.Errorf("X-Amz-User-Agent = %q, want %q", amzUA, want)
+		}
+		// The host token must describe this host: the constants this replaces
+		// claimed os/windows#10.0.26200 from every platform.
+		if !strings.Contains(ua, "os/"+providers.KiroOSPlatform()+"#") {
+			t.Errorf("User-Agent os token does not name this host's platform, got %q", ua)
+		}
+		if strings.Contains(ua, "os/windows#") {
+			t.Errorf("User-Agent must not claim the Windows platform token, got %q", ua)
+		}
+	})
+
+	t.Run("service id follows the surface", func(t *testing.T) {
+		tests := map[string]string{
+			"https://runtime.us-east-1.kiro.dev/generateAssistantResponse":            "kiroruntime",
+			"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse": "codewhispererstreaming",
+			"https://q.us-east-1.amazonaws.com/generateAssistantResponse":             "codewhispererruntime",
+		}
+		for url, want := range tests {
+			if got := providers.KiroServiceIDForURL(url); got != want {
+				t.Errorf("KiroServiceIDForURL(%q) = %q, want %q", url, got, want)
+			}
 		}
 	})
 }
@@ -168,7 +196,7 @@ func TestForwardKiro_TargetAndProfileArn(t *testing.T) {
 
 	// User-Agent must carry KiroIDE version
 	ua := receivedHeaders.Get("User-Agent")
-	if !strings.Contains(ua, "KiroIDE-"+KiroIDEVersion) {
+	if !strings.Contains(ua, "KiroIDE-"+providers.KiroIDEVersion) {
 		t.Errorf("User-Agent missing KiroIDE version, got %q", ua)
 	}
 }

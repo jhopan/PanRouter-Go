@@ -84,6 +84,12 @@ var quotaWindowScopes = map[string]quotaScope{
 	"cbai":           scopeMonthly,
 	"cbcn":           scopeMonthly,
 	"tokenharbor":    scopeWeekly,
+	// Kiro's free tier refills on a calendar month and its usage API reports
+	// that date as nextDateReset (upstream quotaWindows.js:34
+	// `kiro: { scope: QUOTA_SCOPES.MONTHLY }`). Without the entry a 402 naming
+	// no reset was clamped to the generic two-hour ceiling, so a monthly-capped
+	// account returned to rotation the same afternoon.
+	"kiro": scopeMonthly,
 }
 
 // scopeFor resolves a provider id (or one of its aliases) to the quota scope it
@@ -273,6 +279,31 @@ func retryableCooldownSecAt(statusCode int, base time.Duration, ue *upstreamErro
 		cooldown = park
 	}
 	return ceilSeconds(min(cooldown, maxCooldownFor(provider)))
+}
+
+// cooldownSecFor turns one upstream failure into the number of seconds its
+// account must stay out of rotation. It exists so every fallback loop (the
+// OpenAI walk, the combo pass) reads the same provider windows: a provider whose
+// quota refills on a calendar can name a reset the rule table cannot compute.
+//
+// Kiro is the case that needs it. Its monthly cap says
+// `MONTHLY_REQUEST_COUNT` and names no reset, so the window comes from the usage
+// reading (nextDateReset) or the calendar — and the cap is recorded here, because
+// from the next request on the account is skipped before it goes upstream. That
+// is the difference between one 402 per account per month and one per model per
+// retry (upstream auth.js `kiroMonthly` + markKiroCapped).
+func (h *ChatHandler) cooldownSecFor(connID, provider string, ue *upstreamError, errorText string, cls providers.ErrorClassification) int {
+	cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(cls.CooldownMs)*time.Millisecond, ue, provider)
+	if !KiroMonthlyVerdict(provider, ue.StatusCode, errorText) {
+		return cooldownSec
+	}
+	now := time.Now().UTC()
+	until := KiroMonthlyReset(connID, now)
+	if secs := ceilSeconds(min(until.Sub(now), maxCooldownFor(provider))); secs > 0 {
+		cooldownSec = secs
+	}
+	MarkKiroCapped(connID, &until)
+	return cooldownSec
 }
 
 // isQuotaExhaustionVerdict reports whether a failure the classifier already

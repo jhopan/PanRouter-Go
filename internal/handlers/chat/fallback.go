@@ -185,6 +185,19 @@ func (h *ChatHandler) handleAccountFallback(
 		if slices.Contains(excludeIDs, c.ID) {
 			continue
 		}
+		// A Kiro account under its monthly cap refuses every model, so a request
+		// sent to it burns a round trip and a request from a hard monthly
+		// allowance to learn what the last 402 already said. The cap is
+		// remembered from the usage reading (or the 402 itself) and the account
+		// stays out of rotation until its reset — unless this IS the probe that
+		// is asking, in which case the answer is exactly what it came for.
+		if provider == "kiro" && !handlerutil.IsProbeContext(ctx) {
+			if skip, until, reason := ShouldSkipKiroAccount(c.ID); skip {
+				log.Debug("KIRO_QUOTA", "monthly cap reached — skip upstream",
+					"conn", c.ID, "reason", reason, "until", until.Format(time.RFC3339))
+				continue
+			}
+		}
 		connObj, connData, err := h.getBestConnectionWithContext(ctx, provider, c.ID, nil, model, excludedPools)
 		if err != nil || connObj == nil {
 			if lastErr == nil && err != nil {
@@ -310,7 +323,7 @@ func (h *ChatHandler) handleAccountFallback(
 			// Classify error to get dynamic cooldown; provider-scoped rules
 			// key off the canonical provider the request routed to.
 			classification := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, currentBackoffLevel, provider)
-			cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(classification.CooldownMs)*time.Millisecond, ue, provider)
+			cooldownSec := h.cooldownSecFor(connObj.ID, provider, ue, errorText, classification)
 			errMsg := errorText
 			if errMsg == "" {
 				errMsg = fmt.Sprintf("%d upstream error", ue.StatusCode)
@@ -343,9 +356,13 @@ func (h *ChatHandler) handleAccountFallback(
 				}
 				h.getSessionAffinity().EvictConnection(connObj.ID)
 			}
+			// The reset instant belongs in the line, not just the duration: "locked
+			// for 406715s" leaves the operator working out whether that is a month
+			// or a year (upstream prints `until <iso>` next to the seconds).
 			log.Warn("fallback", "connection locked", append([]any{
 				"conn", connObj.ID, "provider", provider, "model", model,
 				"lockKey", lockKey, "status", ue.StatusCode, "cooldown_s", cooldownSec,
+				"until", time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second).Format(time.RFC3339),
 			}, connIdentityKV(connObj)...)...)
 			if stopsRotationOnRateLimit(provider, ue) {
 				log.Warn("fallback", "rate limit stops the rotation",

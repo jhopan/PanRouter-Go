@@ -124,7 +124,10 @@ func TestOpenAIToKiro_MultiTurnHistoryAlternates(t *testing.T) {
 }
 
 func TestOpenAIToKiro_ToolCallsAndResults(t *testing.T) {
-	body := []byte(`{"messages":[
+	// The catalog is what makes a call shippable: CodeWhisperer rejects a toolUse
+	// whose name the request never declared, so a body without `tools` has its
+	// calls flattened to text instead (upstream canonicalizeKiroConversation).
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}],"messages":[
 		{"role":"user","content":"weather?"},
 		{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"NYC\"}"}}]},
 		{"role":"tool","tool_call_id":"call_1","content":"sunny"}

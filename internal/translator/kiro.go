@@ -40,9 +40,25 @@ type KiroTranslateOptions struct {
 	Model string
 	// ProfileArn is the connection's resolved CodeWhisperer profile ARN.
 	ProfileArn string
-	// ContentPrefix is prepended to the first user turn (system prompt, time
-	// context). Empty means only the timestamp is added.
+	// ContentPrefix is the stable system material prepended to the session's
+	// opening turn (thinking prefix, agentic protocol). Empty means only the
+	// time context is added.
 	ContentPrefix string
+	// ConversationID ties consecutive turns of one client session together, so
+	// the frozen opening turn can be replayed (upstream resolveSessionIdentity).
+	// Empty means every request gets a fresh conversation.
+	ConversationID string
+	// ConnectionID scopes the replay store to the account that serves the
+	// session: two accounts must not share a cache prefix they never had.
+	ConnectionID string
+	// ToolNameMap receives the reverse of the catalog's name sanitization
+	// (sanitized → original), so the response side can restore the client's own
+	// tool names. Nil when the caller has no such map.
+	ToolNameMap map[string]string
+	// AdditionalFields is the native effort envelope the newer Claude/GPT models
+	// accept (upstream buildKiroAdditionalModelRequestFieldsForModel). Nil means
+	// the model takes none.
+	AdditionalFields map[string]any
 }
 
 // OpenAIToKiro converts an OpenAI chat-completions body into the Kiro
@@ -65,18 +81,44 @@ func OpenAIToKiro(body []byte, opts KiroTranslateOptions) ([]byte, error) {
 		return nil, err
 	}
 
-	// history excludes currentMessage upstream; the gateway takes the last
-	// user turn separately in currentMessage.
-	kiroStampModelIDs(history, opts.Model)
+	maxTokens := kiroDefaultMaxTokens
+	return kiroEnvelope(history, current, in.Tools, opts, maxTokens, in.Temperature, in.TopP)
+}
 
-	conversationID := newKiroConversationID()
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	prefix := strings.TrimSpace(strings.Join([]string{
-		opts.ContentPrefix,
-		"[Context: Current time is " + timestamp + "]",
-	}, "\n\n"))
-	currentContent := kiroApplyContentPrefix(current, prefix)
+// kiroEnvelope assembles the conversationState payload both request directions
+// send: session replay freezes the opening turn, the canonicalizer makes the
+// conversation structurally shippable, and the Kiro fields travel where the
+// gateway reads them.
+//
+// A conversation that still cannot be shaped fails here rather than upstream:
+// Kiro answers 400 REQUEST_BODY_INVALID for it, and that 400 costs a request and a
+// per-account cooldown for a body this process already knew was malformed.
+func kiroEnvelope(history []map[string]any, current map[string]any, tools []map[string]any, opts KiroTranslateOptions, maxTokens int, temperature, topP *float64) ([]byte, error) {
+	conversationID := opts.ConversationID
+	if conversationID == "" {
+		conversationID = newKiroConversationID()
+	}
+	// The time context is the volatile part of the prefix, so the session replay
+	// freezes the opening turn with the time it was built and puts the fresh one
+	// only on the current turn. That is what keeps the upstream cache prefix
+	// byte-identical across turns of one conversation.
+	timePrefix := "[Context: Current time is " + time.Now().UTC().Format(time.RFC3339) + "]"
+	// The replay works on wrapped turns (upstream's currentMessage shape); the
+	// converter hands the inner userInputMessage, so wrap, replay, unwrap.
+	replayedHistory, replayedCurrent := kiroApplySessionReplay(conversationID, opts.ConnectionID, opts.Model, opts.ContentPrefix, timePrefix,
+		history, map[string]any{"userInputMessage": current})
+	history = replayedHistory
+	if user, ok := replayedCurrent["userInputMessage"].(map[string]any); ok {
+		current = user
+	}
 
+	specs, nameMap := kiroNormalizeToolSpecs(tools)
+	history, current, _, valid, canonErrs := KiroCanonicalizeConversation(history, current, opts.Model, specs, nameMap)
+	if !valid {
+		return nil, fmt.Errorf("kiro: refusing invalid conversation: %s", strings.Join(canonErrs, ", "))
+	}
+
+	currentContent, _ := current["content"].(string)
 	userInput := map[string]any{
 		"content": currentContent,
 		"modelId": opts.Model,
@@ -85,19 +127,12 @@ func OpenAIToKiro(body []byte, opts KiroTranslateOptions) ([]byte, error) {
 	if imgs, ok := current["images"].([]any); ok && len(imgs) > 0 {
 		userInput["images"] = imgs
 	}
+	// Kiro has no top-level `tools` array: the catalogue travels on the current
+	// user turn, which the canonicalizer placed there. Without it the model
+	// invents tools in plain text instead of emitting toolUseEvent, and clients
+	// never get tool_calls.
 	if ctx, ok := current["userInputMessageContext"].(map[string]any); ok && len(ctx) > 0 {
 		userInput["userInputMessageContext"] = ctx
-	}
-	// Kiro has no top-level `tools` array: the catalogue travels on the last
-	// user turn. Without it the model invents tools in plain text instead of
-	// emitting toolUseEvent, and clients never get tool_calls.
-	if specs, _ := kiroNormalizeToolSpecs(in.Tools); len(specs) > 0 {
-		userCtx, _ := userInput["userInputMessageContext"].(map[string]any)
-		if userCtx == nil {
-			userCtx = map[string]any{}
-			userInput["userInputMessageContext"] = userCtx
-		}
-		userCtx["tools"] = specs
 	}
 
 	payload := map[string]any{
@@ -113,15 +148,29 @@ func OpenAIToKiro(body []byte, opts KiroTranslateOptions) ([]byte, error) {
 	if opts.ProfileArn != "" {
 		payload["profileArn"] = opts.ProfileArn
 	}
-
-	inference := map[string]any{"maxTokens": kiroDefaultMaxTokens}
-	if in.Temperature != nil {
-		inference["temperature"] = *in.Temperature
+	if len(opts.AdditionalFields) > 0 {
+		payload["additionalModelRequestFields"] = opts.AdditionalFields
 	}
-	if in.TopP != nil {
-		inference["topP"] = *in.TopP
+
+	inference := map[string]any{"maxTokens": maxTokens}
+	if temperature != nil {
+		inference["temperature"] = *temperature
+	}
+	if topP != nil {
+		inference["topP"] = *topP
 	}
 	payload["inferenceConfig"] = inference
+
+	// Kiro sanitizes tool names (`mcp__a__b` → `mcp_a_b`), so the reverse map has
+	// to travel with the payload: the response side restores the client's own
+	// names, or the client cannot dispatch a call it never declared.
+	for original, sanitized := range nameMap {
+		if original != sanitized {
+			if opts.ToolNameMap != nil {
+				opts.ToolNameMap[sanitized] = original
+			}
+		}
+	}
 
 	out, err := json.Marshal(payload, json.Deterministic(true))
 	if err != nil {
@@ -240,7 +289,9 @@ func kiroConvertMessages(messages []map[string]any, model string) ([]map[string]
 	if current == nil {
 		current = map[string]any{"content": "", "modelId": model}
 	}
-	return mergeKiroConsecutiveUsers(history), current, nil
+	// Merging same-role turns is the canonicalizer's job; returning them raw keeps
+	// the repair accounting in one place.
+	return history, current, nil
 }
 
 // kiroUserContent flattens one user/tool message into text, Kiro image blocks
@@ -453,81 +504,6 @@ func kiroImageBlock(mediaType, base64Data string) map[string]any {
 		"format": format,
 		"source": map[string]any{"bytes": base64Data},
 	}
-}
-
-// kiroStampModelIDs backfills modelId on history user turns (Kiro rejects
-// turns without it) and drops empty tool contexts.
-func kiroStampModelIDs(history []map[string]any, model string) {
-	for _, turn := range history {
-		uim, ok := turn["userInputMessage"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if s, _ := uim["modelId"].(string); s == "" {
-			uim["modelId"] = model
-		}
-		if ctx, ok := uim["userInputMessageContext"].(map[string]any); ok && len(ctx) == 0 {
-			delete(uim, "userInputMessageContext")
-		}
-	}
-}
-
-// kiroApplyContentPrefix prepends the system/time context to the current user
-// turn, because a top-level systemPrompt is rejected by the gateway.
-func kiroApplyContentPrefix(current map[string]any, prefix string) string {
-	if prefix == "" {
-		if s, ok := current["content"].(string); ok {
-			return s
-		}
-		return ""
-	}
-	existing, _ := current["content"].(string)
-	return prefix + "\n\n" + existing
-}
-
-// mergeKiroConsecutiveUsers folds adjacent user turns into one; Kiro requires
-// strict user/assistant alternation. Tool results and images are carried over
-// so nothing is silently dropped.
-func mergeKiroConsecutiveUsers(history []map[string]any) []map[string]any {
-	var merged []map[string]any
-	for _, turn := range history {
-		cur, isUser := turn["userInputMessage"].(map[string]any)
-		if !isUser || len(merged) == 0 {
-			merged = append(merged, turn)
-			continue
-		}
-		prevUser, prevIsUser := merged[len(merged)-1]["userInputMessage"].(map[string]any)
-		if !prevIsUser {
-			merged = append(merged, turn)
-			continue
-		}
-		a, _ := prevUser["content"].(string)
-		b, _ := cur["content"].(string)
-		prevUser["content"] = a + "\n\n" + b
-
-		prevCtx, _ := prevUser["userInputMessageContext"].(map[string]any)
-		curCtx, _ := cur["userInputMessageContext"].(map[string]any)
-		if curCtx != nil {
-			if prevCtx == nil {
-				prevUser["userInputMessageContext"] = curCtx
-			} else {
-				for _, key := range []string{"toolResults", "tools"} {
-					extra, _ := curCtx[key].([]any)
-					if len(extra) == 0 {
-						continue
-					}
-					existing, _ := prevCtx[key].([]any)
-					prevCtx[key] = append(existing, extra...)
-				}
-			}
-		}
-		curImgs, _ := cur["images"].([]any)
-		if len(curImgs) > 0 {
-			prevImgs, _ := prevUser["images"].([]any)
-			prevUser["images"] = append(prevImgs, curImgs...)
-		}
-	}
-	return merged
 }
 
 func newKiroUUID() string {

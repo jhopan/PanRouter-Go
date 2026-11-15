@@ -198,17 +198,32 @@ func TestMergeKiroConsecutiveUsers_AndUUID(t *testing.T) {
 		t.Errorf("expected 36 chars uuid, got %q", u)
 	}
 
+	// Adjacent same-role turns are merged by the canonicalizer, which is also
+	// what guarantees the strict alternation Kiro validates.
 	history := []map[string]any{
-		{"userInputMessage": map[string]any{"content": "first", "userInputMessageContext": map[string]any{"tools": []any{"t1"}}}},
-		{"userInputMessage": map[string]any{"content": "second", "userInputMessageContext": map[string]any{"tools": []any{"t2"}}}},
+		{"userInputMessage": map[string]any{"content": "first"}},
+		{"assistantResponseMessage": map[string]any{"content": "ok"}},
+		{"userInputMessage": map[string]any{"content": "second"}},
+		{"userInputMessage": map[string]any{"content": "third"}},
 	}
-	merged := mergeKiroConsecutiveUsers(history)
-	if len(merged) != 1 {
-		t.Fatalf("expected 1 merged user turn, got %d", len(merged))
+	canonHistory, current, _, valid, errs := KiroCanonicalizeConversation(history, nil, "claude-opus-5", nil, nil)
+	if !valid {
+		t.Fatalf("canonical conversation invalid: %v", errs)
 	}
-	content := merged[0]["userInputMessage"].(map[string]any)["content"].(string)
-	if content != "first\n\nsecond" {
-		t.Errorf("merged content = %q", content)
+	if len(canonHistory) != 2 {
+		t.Fatalf("expected the leading pair to stay in history, got %d turns", len(canonHistory))
+	}
+	content, _ := current["content"].(string)
+	if content != "second\n\nthird" {
+		t.Errorf("merged current content = %q", content)
+	}
+	// Every user turn the gateway sees must carry origin and modelId.
+	if origin, _ := current["origin"].(string); origin != "AI_EDITOR" {
+		t.Errorf("origin = %q, want AI_EDITOR", origin)
+	}
+	firstUser, _ := canonHistory[0]["userInputMessage"].(map[string]any)
+	if origin, _ := firstUser["origin"].(string); origin != "AI_EDITOR" {
+		t.Errorf("history origin = %q, want AI_EDITOR on every user turn", origin)
 	}
 }
 
