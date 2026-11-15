@@ -1266,6 +1266,23 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		// the daily totals counted a token bill that was never metered
 		// (#280). Every other probe side effect here is already gated on the
 		// context; this is the one that was not.
+		// This attempt's completion line, from the usage the path has already
+		// parsed and the latency it has already measured — the same three figures
+		// upstream prints from (requestDetail.js:86-101). It is emitted before the
+		// probe branch below because it is console-only: a dashboard "Test" must
+		// stay out of the usage ledger, not out of the operator's log. Printing
+		// the request line and then no result is the one thing the log is read for.
+		if usage == nil {
+			usage = &translator.OpenAIUsage{}
+		}
+		log.Line(reqTag, "📊", log.FormatDoneLine(log.DoneLine{
+			TotalMs:    latencyMs,
+			TTFTMs:     metrics.TTFT,
+			InTokens:   usage.PromptTokens,
+			OutTokens:  usage.CompletionTokens,
+			CacheRead:  usage.GetCachedTokens(),
+			CacheWrite: usage.CacheCreationInputTokens,
+		}))
 		if handlerutil.IsProbeContext(ctx) {
 			fwdErr = nil
 			return nil
@@ -1292,9 +1309,6 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		// A served request proves the model is alive, so a badge recorded by
 		// an earlier 410 must not outlive it (#179).
 		h.clearModelDeprecation(provider, model)
-		if usage == nil {
-			usage = &translator.OpenAIUsage{}
-		}
 		reqModel := f.RequestedModel
 		if reqModel == "" {
 			reqModel = translator.RequestedModelFromContext(ctx)
@@ -1330,17 +1344,6 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 		logInfo.ConnName, logInfo.ConnEmail = identityNames(h.connIdentityKVOr(f, connectionID))
 		h.logUsage(ctx, logInfo, usage, latencyMs, body, metrics)
-		// This attempt's completion line, from the usage the path has already
-		// parsed and the latency it has already measured — the same three
-		// figures upstream prints from (requestDetail.js:86-101).
-		log.Line(reqTag, "📊", log.FormatDoneLine(log.DoneLine{
-			TotalMs:    latencyMs,
-			TTFTMs:     metrics.TTFT,
-			InTokens:   usage.PromptTokens,
-			OutTokens:  usage.CompletionTokens,
-			CacheRead:  usage.GetCachedTokens(),
-			CacheWrite: usage.CacheCreationInputTokens,
-		}))
 		metrics.ResponseBuf.Reset()
 		fwdErr = nil
 		return nil
