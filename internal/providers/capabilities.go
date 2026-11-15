@@ -1013,6 +1013,29 @@ var providerTokenLimits = map[string]map[string][2]int{
 		"deepseek-v4-pro":     {1000000, 393216},
 		"deepseek-v4.1-flash": {1000000, 393216},
 	},
+	// devin-cli's registry declares a contextLength per model
+	// (registry/devin-cli.js), and these are the ids whose published figure
+	// differs from what the name-based tables resolve: the GPT-5.2/5.3-Codex
+	// rows the substring table reads as 128k, the Gemini rows it reads as 1.05M,
+	// and the Kimi/GLM/DeepSeek rows it reads as 131k. They are limits-only on
+	// purpose: a providerCapabilities row would drag each family's thinking
+	// shape off the pattern table with it.
+	"devin-cli": {
+		"claude-sonnet-4.6-thinking-1m": {1000000, 0},
+		"gpt-5.3-codex-high":            {200000, 0},
+		"gpt-5.3-codex-medium":          {200000, 0},
+		"gpt-5.3-codex-low":             {200000, 0},
+		"gpt-5.2-high":                  {200000, 0},
+		"gpt-5.2-medium":                {200000, 0},
+		"gpt-5.2-low":                   {200000, 0},
+		"gemini-3.1-pro-high":           {1000000, 0},
+		"gemini-3.1-pro-low":            {1000000, 0},
+		"gemini-3.0-flash-high":         {1000000, 0},
+		"gemini-2.5-pro":                {1000000, 0},
+		"deepseek-v4":                   {1048576, 0},
+		"kimi-k2.6":                     {262144, 0},
+		"glm-5.1":                       {204800, 0},
+	},
 }
 
 // lookupProviderTokenLimits returns the limits a provider declares for a model,

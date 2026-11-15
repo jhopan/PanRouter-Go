@@ -17,6 +17,7 @@ import (
 
 	"panrouter/proxy/internal/app"
 	"panrouter/proxy/internal/daemon"
+	"panrouter/proxy/internal/proxy/executor"
 	"panrouter/proxy/internal/shutdown"
 	"panrouter/proxy/internal/updater"
 )
@@ -70,6 +71,13 @@ var rootFlagNames = map[string]bool{
 }
 
 func main() {
+	// The devin-cli lane exposes the caller's OpenAI tools to the CLI as a
+	// stdio MCP server. Upstream spawns a node script for that; here the same
+	// server is a mode of this binary, so it has to be recognised before the
+	// CLI parser sees an argument it does not know.
+	if executor.ServeDevinClientToolsMCP(os.Args[1:]) {
+		return
+	}
 	self := binaryName()
 	app := newApp(self)
 	if err := app.Run(os.Args); err != nil {

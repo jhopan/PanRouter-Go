@@ -123,6 +123,7 @@ var ProviderAliasMap = map[string]string{
 	"bm":             "bluesminds",
 	"cbcn":           "codebuddy-cn",
 	"dv":             "devin-cli",
+	"devin":          "devin-cli",
 	"hunyuan":        "tencent",
 	"kgw":            "kilo-gateway",
 	"ps":             "poolside",

@@ -1416,10 +1416,16 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 		Hidden:     true,
 	},
+	// devin-cli's "upstream" is the local `devin` CLI spawned in ACP mode and
+	// spoken to over stdio (devin-cli.js), so there is no HTTP endpoint and no
+	// bearer header to build: the CLI authenticates from the credentials
+	// `devin auth login` stored. NoAuth is what routes it — with no connection
+	// row configured, the fallback path dispatches it on the registry entry's
+	// own default key (fallback.go), and an AuthHeader here would be a lie the
+	// dashboard's probe and the model listing both repeat.
 	"devin-cli": {
-		BaseURL:    "devin://acp/stdio",
-		AuthHeader: "Authorization",
-		AuthScheme: "bearer",
+		BaseURL: "devin://acp/stdio",
+		NoAuth:  true,
 	},
 	"kilo-gateway": {
 		BaseURL:    "https://api.kilo.ai/api/gateway/chat/completions",

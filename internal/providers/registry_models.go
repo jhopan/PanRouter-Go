@@ -87,6 +87,14 @@ var ProviderModels = map[string][]string{
 	// API-key `deepseek` row above: a request naming one of them must reach the
 	// browser-login provider, never the API-key one.
 	"deepseek-web": {"deepseek-v4-pro", "deepseek-v4-pro-think", "deepseek-v4-pro-search", "deepseek-v4-pro-think-search", "deepseek-v4-flash", "deepseek-v4-flash-think", "deepseek-v4-flash-search", "deepseek-v4-flash-think-search", "deepseek-chat", "deepseek-reasoner", "DeepSeek-R1", "DeepSeek-R1-Search", "DeepSeek-V3.2", "DeepSeek-Search"},
+	// devin-cli's catalogue is the CLI's own model list, verbatim from
+	// registry/devin-cli.js. The lane is a hidden noAuth entry with no
+	// connection row, so without these rows every `swe-*` request resolved to
+	// no model at all and died before the CLI was ever spawned.
+	"devin-cli": {"swe-1.6-fast", "swe-1.6", "swe-1.5-fast", "swe-1.5", "claude-opus-4.7-max", "claude-opus-4.7-high", "claude-opus-4.7-medium", "claude-opus-4.7-low", "claude-sonnet-4.6-thinking-1m", "claude-sonnet-4.6-thinking", "claude-sonnet-4.6", "claude-opus-4.6-thinking", "claude-opus-4.6", "claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.5-xhigh", "gpt-5.5-high", "gpt-5.5-medium", "gpt-5.5-low", "gpt-5.4-high", "gpt-5.4-medium", "gpt-5.4-low", "gpt-5.3-codex-high", "gpt-5.3-codex-medium", "gpt-5.3-codex-low", "gpt-5.2-high", "gpt-5.2-medium", "gpt-5.2-low", "gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3.0-flash-high", "gemini-2.5-pro", "deepseek-v4", "kimi-k2.6", "glm-5.1"},
+	// The alias the registry publishes (`uiAlias: "dv"`), so a `dv/<model>`
+	// request resolves the same catalogue as `devin-cli/<model>`.
+	"dv": {"swe-1.6-fast", "swe-1.6", "swe-1.5-fast", "swe-1.5", "claude-opus-4.7-max", "claude-opus-4.7-high", "claude-opus-4.7-medium", "claude-opus-4.7-low", "claude-sonnet-4.6-thinking-1m", "claude-sonnet-4.6-thinking", "claude-sonnet-4.6", "claude-opus-4.6-thinking", "claude-opus-4.6", "claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.5-xhigh", "gpt-5.5-high", "gpt-5.5-medium", "gpt-5.5-low", "gpt-5.4-high", "gpt-5.4-medium", "gpt-5.4-low", "gpt-5.3-codex-high", "gpt-5.3-codex-medium", "gpt-5.3-codex-low", "gpt-5.2-high", "gpt-5.2-medium", "gpt-5.2-low", "gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3.0-flash-high", "gemini-2.5-pro", "deepseek-v4", "kimi-k2.6", "glm-5.1"},
 	"hcnsec": {
 		"auto",
 		"DeepSeek-V4-Flash",

@@ -364,6 +364,27 @@ ada di `ProviderRegistry` (Go) — termasuk 13 yang hanya ada di PanRouter lewat
 `internal/handlers/chat/mimofree.go`. Node memakai `api.xiaomimimo.com`; host yang
 salah berarti seluruh lane itu gagal dial. Sudah diperbaiki dan dites.
 
+**Lane `devin-cli` (stdio/ACP) — port penuh, 2026-11-15.** Entry registry-nya
+sebelumnya berbohong dua kali: `AuthHeader: "Authorization"` + `AuthScheme:
+"bearer"` untuk transport yang tidak pernah mengirim HTTP, dan tanpa `NoAuth`
+sehingga jalur `cfg.NoAuth` di `fallback.go` tidak pernah mengambil alih.
+Akibatnya setiap request `swe-*` mati sebagai
+`HTTP 502: upstream error: no active connections for provider: devin-cli`, atau —
+kalau pun lolos — mengirim body OpenAI ke URL `devin://`. Modelnya juga tidak ada
+di katalog, jadi id-nya tidak pernah resolve.
+
+Sekarang (lihat `.changes/905-devin-cli-lane.md`): `executor.ForwardDevinCLI`
+men-spawn `devin acp` per request, bicara JSON-RPC 2.0 di stdio
+(`initialize` → `session/new` dengan `cwd`+`model`+`mcpServers` → `session/prompt`
+dengan `prompt` sebagai sequence), meneruskan `session/update` sebagai chunk
+OpenAI (atau satu `chat.completion` untuk non-streaming), mengekspos `body.tools`
+sebagai MCP `clientTools` beserta seeding `DEVIN_MCP_RESULTS`, dan mematikan child
+saat context cancel maupun selesai. Child di-reap, stderr dibatasi 8 KiB dan
+dikutip di error, frame ACP dibatasi 4 MiB. Semua 35 model registry
+(`swe-1.6-fast` … `glm-5.1`) ada di `registry_models.go` untuk `devin-cli` dan
+`dv`, dengan context window registry di `providerTokenLimits`. Prasyarat:
+binary `devin` terpasang + `devin auth login`; override lewat `CLI_DEVIN_BIN`.
+
 **Status route dashboard setelah gelombang port (2026-11-15).** Dari 178 route
 `src/app/api/**/route.js`, semuanya kini punya padanan Go kecuali yang tercantum
 di tabel "Sisa" di bawah.
