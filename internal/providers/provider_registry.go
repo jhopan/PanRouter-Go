@@ -119,10 +119,16 @@ var ProviderRegistry = map[string]ProviderMeta{
 		AuthType:      "apikey",
 		Color:         "#0F766E",
 		Icon:          "anchor",
+		Priority:      65,
 		ServiceKinds:  []string{"llm"},
 		Website:       "https://tokenharbor.ai",
-		Notice:        &Notice{Text: "OpenAI-compatible aggregator. One API key reaches every model, billed per-token from a prepaid wallet. Model ids are bare (e.g. claude-opus-5.5, gpt-6-astra, qwen3.8-flash:free) and are fetched live from the provider.", APIKeyURL: "https://tokenharbor.ai/dashboard"},
+		Notice:        &Notice{Text: "TokenHarbor - OpenAI chat-completions transport. Free models use the :free suffix. Key from the dashboard.", APIKeyURL: "https://tokenharbor.ai/dashboard/api-keys"},
 		ModelsFetcher: &Fetcher{URL: "https://tokenharbor.ai/v1/models", Type: "openai"},
+		// The lane forwards an id it does not know: tokenharbor answers 404 with
+		// its own message rather than the gateway refusing to route. The reference
+		// declares this as passthroughModels; the resolver already behaved this
+		// way (verified live), so the flag documents it.
+		PassthroughModels: true,
 	},
 	"sumopod": {
 		ID:            "sumopod",
