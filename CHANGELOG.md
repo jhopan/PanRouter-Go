@@ -1,5 +1,34 @@
 # Changelog
 
+## [v1.0.0] - 2026-11-16
+
+### release: first release on the standalone version scheme
+
+`1.0.0` is the first release under a version scheme of this repository's own.
+Upstream PanRouter's four-part `0.5.x.x` is a parity target, not this binary's
+version: `internal/updater/semver.go` parses three numeric fields, and a `0.5.x`
+manifest would read as a downgrade to every installed `1.x`, silently ending
+updates for them.
+
+Each release now publishes two artifacts, and `panrouter-go update` follows the
+second one:
+
+- an immutable `vX.Y.Z` release — five platform binaries plus `SHA256SUMS.txt`, docker `:X.Y` and `:X.Y.Z`
+- a rolling `latest` pointer — GitHub `releases/latest`, `version.json` on `main`, docker `:latest`
+
+Update is one command (`panrouter-go update`) and the same thing is in the
+dashboard: sidebar version, `New version available` banner, **Update now** →
+**Auto Update**. Details: [`docs/RELEASING.md`](docs/RELEASING.md).
+
+This is the first tag in the repository, so it also carries everything merged
+since the fork — the per-PR write-ups remain in [`.changes/`](.changes/) and are
+rendered by the dashboard's changelog view; they are folded into `CHANGELOG.md`
+at the next `make changelog-merge`.
+
+Installs still on `1.9.x` are **not** offered `1.0.0` automatically: as semver it
+is a downgrade. Reinstall once from the release assets (or `install.sh` /
+`install.ps1`); every release after this one is a normal forward step.
+
 ## [v1.9.15] - 2026-10-31
 
 ### feat(zed): serve Zed's hosted models through the OpenAI-compatible API

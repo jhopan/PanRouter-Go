@@ -286,6 +286,11 @@ panrouter-go version     # current version + latest available (check only, chang
 panrouter-go update      # apply the latest stable release, then restart
 ```
 
+Release notes for the newest release are shown in the dashboard's update dialog,
+on the [releases page](https://github.com/jhopan/PanRouter-Go/releases), and in
+[`CHANGELOG.md`](CHANGELOG.md); each release also carries `SHA256SUMS.txt` so a
+manual download can be verified before it replaces anything.
+
 What `update` actually does (`internal/updater`): asks GitHub for the newest
 release, picks the asset matching this OS/arch, downloads `SHA256SUMS.txt` and
 **verifies the digest before touching the binary**, extracts it (raw ELF/Mach-O/PE,
@@ -571,12 +576,20 @@ PRs follow the checks CI runs: `go vet ./...`, `go test -count=1 ./...`, `make t
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — routing, providers, runtime layout
 - [`DATABASE.md`](DATABASE.md) — SQLite schema & operator contract
 - [`ROADMAP.md`](ROADMAP.md) — proposals only, not current behavior
-- [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.9**, upstream baseline PanRouter). Work merged since the last tag lives in [`.changes/`](.changes/) and is folded in at the next release; the dashboard's changelog modal shows both.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — version scheme, the two artifacts of a release, `-exp` channel, bump → tag procedure
+- [`CHANGELOG.md`](CHANGELOG.md) — release history (newest release: standalone scheme, `v1.0.0`; older entries cover the pre-reset `1.x` line). Work merged since the last tag lives in [`.changes/`](.changes/) and is folded in at the next release; the dashboard's changelog modal shows both.
 - [`docs/TELEGRAM_RELEASE_NOTIFICATIONS.md`](docs/TELEGRAM_RELEASE_NOTIFICATIONS.md) — one-time setup for the release notice posted to Telegram
 
 ## Credits
 
-- [PanRouter](https://github.com/jhopan/PanRouter) — the behaviour reference this Go port reproduces
+This gateway stands on four MIT-licensed projects. The two it descends from keep
+their copyright notices in [`LICENSE`](LICENSE) — that notice is the whole
+attribution, and it is never removed.
+
+- [**PanRouter**](https://github.com/jhopan/PanRouter) — the **behaviour reference**. Every provider wire format, header set, error class, combo rule and dashboard contract this Go port reproduces is PanRouter's; where the two differ, that is a bug here, not a design choice.
+- [**9router**](https://github.com/decolua/9router) — the original router (MIT, decolua and contributors) that PanRouter and this project descend from. Licence credit only; not a sync source.
+- [**9router-go**](https://github.com/luqman-v1/9router-go) — the Go port by Luqmanul Hakim that this repository started from (MIT). Its git history was intentionally dropped; its notice stays in `LICENSE`. Not a sync source either.
+- [**OmniRoute**](https://github.com/diegosouzapw/OmniRoute) — secondary reference. A few ported features (usage analytics and dashboard parity items) are specified by the file an issue cites in that repository; where it conflicts with PanRouter, PanRouter wins.
 
 ## 📄 License
 
