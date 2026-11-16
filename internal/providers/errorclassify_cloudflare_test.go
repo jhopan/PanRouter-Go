@@ -42,6 +42,37 @@ func TestClassifyError_HTMLBodyIsShortCooldown(t *testing.T) {
 	}
 }
 
+// A provider that meters a free tier states the spent WINDOW rather than a code
+// (upstream QUOTA_EXHAUSTED_SIGNALS). Each wording has to classify as a spent
+// budget, or the empty account takes the burst ladder and is re-dialled all day
+// instead of being skipped.
+func TestClassifyError_FreeWindowWordingsAreSpentBudgets(t *testing.T) {
+	for _, text := range []string{
+		`{"success":false,"errors":[{"code":3036,"message":"daily limit exceeded"}]}`,
+		`daily quota reached`,
+		`weekly limit reached`,
+		`weekly quota reached`,
+		`monthly quota reached`,
+		`usage will resume when the quota will reset`,
+		`quota exhausted`,
+		`free limit reached`,
+		`daily free limit reached`,
+		`usage limit has been reached`,
+		`individual quota reached`,
+		`upgrade your subscription to increase your limits`,
+		`You exceeded your current quota`,
+		`{"code":"inference_cap_error"}`,
+	} {
+		cls := ClassifyError(http.StatusTooManyRequests, text, 0)
+		if !cls.Quota {
+			t.Errorf("%q classified %+v, want the quota verdict", text, cls)
+		}
+		if cls.NewBackoffLevel != 0 {
+			t.Errorf("%q climbed the burst ladder to level %d, want 0", text, cls.NewBackoffLevel)
+		}
+	}
+}
+
 // A plain rate limit keeps the exponential ladder: the Cloudflare rows must not
 // have widened into every 429.
 func TestClassifyError_GenericRateLimitStillBacksOff(t *testing.T) {

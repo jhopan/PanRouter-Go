@@ -97,6 +97,13 @@ var quotaWindowScopes = map[string]quotaScope{
 	// Agnes AI's free tier counts text requests per calendar day, and its reset is
 	// the next 00:00 UTC.
 	"agnes": scopeDaily,
+	// Cloudflare Workers AI meters a free allocation per calendar day, and its
+	// 429 states the daily cap rather than naming an instant. Upstream leaves the
+	// provider out of quotaWindows.js on purpose and relies on the resolver's
+	// `default: { scope: DAILY, resetUtcHour: 0 }`, so an undeclared provider parks
+	// on the UTC day; declaring it here is the same answer without widening that
+	// default to every other lane (a burned budget elsewhere may be a burst).
+	"cloudflare-ai": scopeDaily,
 	// MiniMax Code (both regions) reports a session-scoped plan window
 	// (quotaWindows.js:46-47) and its exhaustion rule pins a flat 24h.
 	"minimax-code":        scopeSession,

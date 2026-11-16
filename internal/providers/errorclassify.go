@@ -308,6 +308,37 @@ var ErrorRules = []ErrorRule{
 	{Text: "gousagelimiterror", CooldownMs: cooldownLong},
 	{Text: "free_pi_token_expired", CooldownMs: cooldownAuthDead},
 
+	// ── Free-window refusals (upstream QUOTA_EXHAUSTED_SIGNALS) ────────────
+	// A provider that meters a free tier names the spent WINDOW rather than the
+	// account ("daily limit exceeded", "weekly quota reached"), and those wordings
+	// contain neither "quota exceeded" nor "insufficient" — so without these rows
+	// the refusal falls through to the generic 429 backoff, the ladder climbs
+	// 2s→5min, and the empty account is re-dialled all day instead of being
+	// skipped. Classifying them as quota is what lets the park reach the
+	// provider's calendar (retry_after.go cooldownSecFor) rather than hand the
+	// account back mid-window.
+	//
+	// Cloudflare Workers AI is what prompted this: its free allocation is a
+	// calendar day and its 429 states the daily cap, with no code of its own.
+	//
+	// Placed after the explicit code rows above on purpose — an exact provider
+	// code is more specific than prose, and free-pi's own taxonomy keeps its
+	// fixed cooldown for `{"code":"insufficient_quota"}`.
+	{Text: "daily free limit reached", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "inference_cap_error", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "daily limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "daily quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "weekly limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "weekly quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "monthly quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "quota will reset", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "quota exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "free limit reached", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "usage limit has been reached", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "individual quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "upgrade your subscription to increase", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "exceeded your current quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+
 	{Text: "no credentials", CooldownMs: cooldownLong},
 	{Text: "request not allowed", CooldownMs: cooldownShort},
 	{Text: "rate limit", Backoff: true},
@@ -372,7 +403,22 @@ var quotaExhaustedPatterns = []string{
 	"hard limit",
 	"plan limit",
 	"resource exhausted",
-	"individual quota reached",
+	// Upstream QUOTA_EXHAUSTED_SIGNALS wordings that name a spent free window.
+	// They have to agree with the rule table above, or a body the classifier
+	// already called quota would not be written as a quota park
+	// (isQuotaExhaustionVerdict reads this list as one of its carriers).
+	"daily free limit reached",
+	"inference_cap_error",
+	"daily limit",
+	"daily quota",
+	"weekly limit",
+	"weekly quota",
+	"quota will reset",
+	"quota exhausted",
+	"free limit reached",
+	"usage limit has been reached",
+	"individual quota",
+	"upgrade your subscription to increase",
 	"enable overages",
 	"billing required",
 	"payment required",
