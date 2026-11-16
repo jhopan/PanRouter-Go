@@ -358,7 +358,7 @@ func (r *Repo) RecordConnectionAccountBanFailure(connID string) (time.Time, int,
 //
 // bannedUntil is also one of the account-scoped parks ConnectionBlockedUntilAt
 // reads, so the selector skips the account without a second mechanism.
-func (r *Repo) LockConnectionBanned(connID, reason string, until time.Time) error {
+func (r *Repo) LockConnectionBanned(connID, reason string, until time.Time, status int) error {
 	if connID == "" {
 		return nil
 	}
@@ -369,16 +369,35 @@ func (r *Repo) LockConnectionBanned(connID, reason string, until time.Time) erro
 	if len(reason) > 300 {
 		reason = reason[:300]
 	}
+	// lastError is what the dashboard renders for a parked account, and the ban
+	// has to say WHEN it lifts: without it the operator sees an account in error
+	// with no reason, and the ban reads like a transient fault.
+	banMessage := "Banned by the provider until " + until.UTC().Format(time.RFC3339)
+	if reason != "" {
+		banMessage += ": " + reason
+	}
+	lastError, marshalErr := json.Marshal(map[string]any{
+		"status":    status,
+		"message":   banMessage,
+		"timestamp": now.Format(time.RFC3339),
+	})
+	if marshalErr != nil {
+		return fmt.Errorf("marshal ban error for %s: %w", connID, marshalErr)
+	}
 	_, err := r.db.ExecContext(context.Background(),
 		`UPDATE providerConnections
 		SET data = json_set(data,
 			'$.bannedUntil', ?,
 			'$.banReason', ?,
+			'$.lastError', json(?),
+			'$.errorCode', ?,
+			'$.lastErrorAt', ?,
 			'$.testStatus', ?,
 			'$.status', 'error'),
 			updatedAt = ?
 		WHERE id = ?`,
-		until.UTC().Format(time.RFC3339), reason, providers.StatusUnavailable, now.Format(time.RFC3339), connID,
+		until.UTC().Format(time.RFC3339), reason, string(lastError), status,
+		now.Format(time.RFC3339), providers.StatusUnavailable, now.Format(time.RFC3339), connID,
 	)
 	if err != nil {
 		return fmt.Errorf("lock connection banned %s: %w", connID, err)

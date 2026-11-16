@@ -146,6 +146,14 @@ func TestHandleAccountFallback_AccountBanParksAndKeepsRotating(t *testing.T) {
 	if !strings.Contains(raw, "bannedUntil") || !strings.Contains(raw, "unusual activity") {
 		t.Errorf("the ban was not recorded with its reason: %s", raw)
 	}
+	// The dashboard renders lastError and errorCode, so a ban has to carry both —
+	// otherwise the operator sees an account in error with no cause.
+	if !strings.Contains(raw, "Banned by the provider until") {
+		t.Errorf("the ban is not visible to the dashboard: %s", raw)
+	}
+	if !strings.Contains(raw, `"errorCode":403`) {
+		t.Errorf("the upstream status is missing from the row: %s", raw)
+	}
 	until, ok := db.ConnectionBlockedUntil(raw)
 	if !ok {
 		t.Fatalf("banned account is not excluded from rotation: %s", raw)

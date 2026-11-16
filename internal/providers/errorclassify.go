@@ -596,6 +596,18 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 			if rule.Provider != "" && rule.Provider != provider {
 				continue
 			}
+			if rule.Banned {
+				// The verdict carries the ban window itself, not zero: a caller
+				// that only reads the cooldown must still park the account for the
+				// ban rather than hand it straight back to the pool
+				// (upstream errorConfig.js:53 BANNED_ACCOUNT_COOLDOWN_MS).
+				return ErrorClassification{
+					ShouldFallback:  true,
+					CooldownMs:      int(BannedAccountCooldown / time.Millisecond),
+					NewBackoffLevel: 0,
+					Banned:          true,
+				}
+			}
 			if rule.Backoff {
 				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
 				return ErrorClassification{

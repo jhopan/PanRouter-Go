@@ -39,10 +39,14 @@ func TestClassifyErrorForProvider_CodebuddyBans(t *testing.T) {
 			if cls.Fatal {
 				t.Errorf("a ban is not a fatal request verdict: %+v", cls)
 			}
-			// A ban has no reset: parking it on a timer is the retry pattern that
-			// earned it. The caller uses BannedAccountCooldown instead.
-			if cls.CooldownMs != 0 {
-				t.Errorf("cooldown = %d, want none (the ban window is the caller's)", cls.CooldownMs)
+			// The verdict carries the ban window rather than a reset the provider
+			// never named: a caller that reads only the cooldown still parks the
+			// account for the ban instead of releasing it.
+			if want := int(BannedAccountCooldown / time.Millisecond); cls.CooldownMs != want {
+				t.Errorf("cooldown = %d, want the %dms ban window", cls.CooldownMs, want)
+			}
+			if cls.CooldownMs < 7*24*60*60*1000 {
+				t.Errorf("cooldown = %dms, want weeks rather than hours", cls.CooldownMs)
 			}
 		})
 	}

@@ -63,6 +63,23 @@ conversation id is now a version-1 (time-based) uuid with the CLI's constant nod
 id and a timestamp pinned per conversation — a content hash carried neither the
 opening time nor a stable value across turns.
 
+**Follow-ups from the second pass over the reference:**
+
+- The conversation key now reads the body's own session fields first
+  (`session_id` → `prompt_cache_key` → `conversation_id`), which is the order the
+  intl executor uses: a client that names its session was being given an id derived
+  from its opening message, so the id changed whenever the message did.
+- A ban verdict carries the 30-day window in its own cooldown, so a caller that
+  reads only `CooldownMs` still parks the account rather than releasing it.
+- `LockConnectionBanned` also writes `lastError`/`errorCode`/`lastErrorAt`. The
+  dashboard renders those, so without them an operator saw an account in error with
+  no cause and no reset date.
+- The quota read presents the same CLI identity as chat. It carried
+  `IDE/2.108.1 CodeBuddy/2.108.1`, an older build than the one the chat path
+  advertises — one account, two identities, which is the thing the identity work
+  exists to prevent (upstream's own registries disagree with their executors on this
+  version; the executor is authoritative).
+
 Verified: `go test ./internal/translator/ ./internal/proxy/... ./internal/handlers/...
 ./internal/providers/ ./internal/db/ ./internal/schedule/ ./internal/app/`, plus the
 new fallback tests that drive a real 403 through the loop: a 11128 refusal must

@@ -352,7 +352,7 @@ func (h *ChatHandler) handleAccountFallback(
 			// after a few of them failed a request the pool could still serve.
 			if classification.Banned {
 				until := time.Now().UTC().Add(providers.BannedAccountCooldown)
-				if banErr := h.Repo.LockConnectionBanned(connObj.ID, errMsg, until); banErr != nil {
+				if banErr := h.Repo.LockConnectionBanned(connObj.ID, errMsg, until, ue.StatusCode); banErr != nil {
 					log.Warn("fallback", "record account ban failed", "conn", connObj.ID, "error", banErr)
 				}
 				h.getSessionAffinity().EvictConnection(connObj.ID)

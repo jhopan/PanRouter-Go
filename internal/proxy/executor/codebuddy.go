@@ -344,7 +344,15 @@ func codebuddyHeaders(req *Request, cfg *providers.ProviderConfig, body []byte) 
 	reqID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	convReqID := strings.ReplaceAll(uuid.NewString(), "-", "")
 
-	sessionKey := req.SessionID
+	// The conversation key, in upstream's order (codebuddy-intl.js buildHeaders):
+	// the body's own session fields first — the CLI sends session_id — then the
+	// request's session id, then the connection's, and only then the opening user
+	// message. The key decides the conversation id, so a client that names its
+	// session must not be given an id derived from its first message.
+	sessionKey := codebuddyBodySessionKey(body)
+	if sessionKey == "" {
+		sessionKey = req.SessionID
+	}
 	if sessionKey == "" && req.ConnData != nil {
 		if m, ok := req.ConnData["sessionId"].(string); ok {
 			sessionKey = m
@@ -531,6 +539,24 @@ func last8(s string) string {
 
 func codebuddyConversationHeaders(req *Request, body []byte) map[string]string {
 	return codebuddyHeaders(req, nil, body)
+}
+
+// codebuddyBodySessionKey reads the session identifier the client put in the body,
+// under any of the spellings the CLI and its wrappers use.
+func codebuddyBodySessionKey(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ""
+	}
+	for _, key := range []string{"session_id", "prompt_cache_key", "conversation_id"} {
+		if value, ok := parsed[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // firstUserText extracts the opening user message text from an OpenAI-shaped

@@ -116,6 +116,29 @@ func TestCodeBuddyConversationAndTurnIDs(t *testing.T) {
 	}
 }
 
+func TestCodeBuddyConversationKeyPrefersTheBodySession(t *testing.T) {
+	// The CLI names its session in the body; a client that does must keep one
+	// conversation id across turns even though its opening message changes.
+	first := codebuddyIntlHeaders(t, `{"session_id":"sess-123","messages":[{"role":"user","content":"turn one"}]}`)["X-Conversation-ID"]
+	second := codebuddyIntlHeaders(t, `{"session_id":"sess-123","messages":[{"role":"user","content":"turn one"},{"role":"assistant","content":"ok"},{"role":"user","content":"turn two"}]}`)["X-Conversation-ID"]
+	if first != second {
+		t.Errorf("the body's session_id must keep one conversation id: %q vs %q", first, second)
+	}
+	other := codebuddyIntlHeaders(t, `{"session_id":"sess-456","messages":[{"role":"user","content":"turn one"}]}`)["X-Conversation-ID"]
+	if other == first {
+		t.Error("a different session_id must be a different conversation")
+	}
+
+	// prompt_cache_key and conversation_id are the other spellings the wrappers use.
+	for _, key := range []string{"prompt_cache_key", "conversation_id"} {
+		a := codebuddyIntlHeaders(t, `{"`+key+`":"k-1","messages":[{"role":"user","content":"hi"}]}`)["X-Conversation-ID"]
+		b := codebuddyIntlHeaders(t, `{"`+key+`":"k-1","messages":[{"role":"user","content":"a different message"}]}`)["X-Conversation-ID"]
+		if a != b {
+			t.Errorf("%s must key the conversation: %q vs %q", key, a, b)
+		}
+	}
+}
+
 func TestCodeBuddyConversationIDIsTimeBasedV1(t *testing.T) {
 	codebuddyResetConversationStarts()
 	t.Cleanup(codebuddyResetConversationStarts)

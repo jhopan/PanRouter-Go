@@ -1063,15 +1063,24 @@ func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageR
 
 // ---------- codebuddy-intl: POST billing meter ----------
 
-var codebuddyIntlHeaders = map[string]string{
-	"User-Agent":          "IDE/2.108.1 CodeBuddy/2.108.1",
-	"X-Product":           "SaaS",
-	"X-IDE-Type":          "IDE",
-	"X-IDE-Name":          "IDE",
-	"X-Requested-With":    "XMLHttpRequest",
-	"X-Codebuddy-Request": "1",
-	"Content-Type":        "application/json",
-	"Accept":              "application/json",
+// codebuddyUsageHeaders is the identity the quota read presents. It is the same
+// CLI identity chat uses, from the same constants: the registry a reader compares
+// the request against serves one build, and a quota call advertising an older one
+// (`IDE/2.108.1`, which this map carried) reads as a parked client — the very
+// signal the identity work exists to avoid. Both lanes share it because both
+// gateways serve the same CLI build (upstream's own registries disagree with their
+// executors on the version; the executor is authoritative here).
+func codebuddyUsageHeaders() map[string]string {
+	return map[string]string{
+		"User-Agent":          providers.CodeBuddyUserAgent,
+		"X-Product":           "SaaS",
+		"X-IDE-Type":          "CLI",
+		"X-IDE-Name":          "CLI",
+		"X-Requested-With":    "XMLHttpRequest",
+		"X-Codebuddy-Request": "1",
+		"Content-Type":        "application/json",
+		"Accept":              "application/json",
+	}
 }
 
 func codebuddyNum(precise, plain any) float64 {
@@ -1127,7 +1136,7 @@ func fetchCodeBuddyIntlUsage(ctx context.Context, accessToken, apiKey string) us
 		return usageResult{message: "CodeBuddy (codebuddy-intl) credential not available."}
 	}
 	headers := map[string]string{"Authorization": "Bearer " + token}
-	for k, v := range codebuddyIntlHeaders {
+	for k, v := range codebuddyUsageHeaders() {
 		headers[k] = v
 	}
 	status, _, out, err := usageDo(ctx, http.MethodPost, "https://www.codebuddy.ai/v2/billing/meter/get-user-resource", headers, []byte("{}"))

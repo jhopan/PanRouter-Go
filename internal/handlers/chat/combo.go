@@ -1880,7 +1880,7 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 	// the combo in play — the ban says nothing about the other members.
 	if cls.Banned {
 		until := time.Now().UTC().Add(providers.BannedAccountCooldown)
-		if banErr := h.Repo.LockConnectionBanned(connID, extractErrorText(ue.Body), until); banErr != nil {
+		if banErr := h.Repo.LockConnectionBanned(connID, extractErrorText(ue.Body), until, ue.StatusCode); banErr != nil {
 			log.Warn("combo", "record account ban failed", "conn", connID, "error", banErr)
 		}
 		*excludeIDs = append(*excludeIDs, connID)
