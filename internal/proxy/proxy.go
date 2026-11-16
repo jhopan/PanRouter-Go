@@ -121,30 +121,27 @@ func InsecureClientFor(proxyURL string) *http.Client {
 // isProxyFailure reports whether an attempt failed because of the PROXY rather
 // than because of the upstream application.
 //
-// The response half is deliberately narrow. A 403 is the provider's own answer
-// unless the proxy says otherwise: `X-Proxy-Error` is the proxy speaking for
-// itself, and the text/plain sniff only means anything when a proxy was actually
-// consulted for this request. Without that gate a provider 403 served as
-// text/plain was read as a proxy refusal and the SAME request was replayed twice
-// more (measured: one call, three upstream requests), from a different egress and
-// with the identical per-turn ids — for a lane that bans accounts over repeated
-// request patterns, three copies of one turn is the pattern.
+// This mirrors PanRouter's proxyAwareFetch, which decides the same question in two
+// places and nowhere else:
+//
+//   - a proxied attempt that THREW told us nothing about the upstream, so it is
+//     replayed on the direct egress (its `catch` branch);
+//   - a response is never read as a proxy refusal. The one response-driven replay
+//     it has is OpenCode's 403 FreeTierError, which is a provider verdict and is
+//     handled as such here (pool rotation), not as a transport failure.
+//
+// An earlier local version also sniffed a 403 whose body looked like text/plain,
+// which turned a provider's own refusal into two extra upstream requests — for a
+// lane that bans accounts over repeated request patterns, three copies of one turn.
+// `X-Proxy-Error` is kept because a proxy that names itself is unambiguous, and
+// losing that would only cost a replay the proxy asked for.
 func isProxyFailure(err error, resp *http.Response, proxyInUse bool) bool {
-	if resp != nil && resp.StatusCode == http.StatusForbidden {
-		if resp.Header.Get("X-Proxy-Error") != "" {
-			return true
-		}
-		if proxyInUse && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/plain") {
-			return true
-		}
+	if resp != nil {
+		return resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-Proxy-Error") != ""
 	}
-	if err != nil {
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "proxy") || strings.Contains(errStr, "connect tunnel failed") || strings.Contains(errStr, "blocked-by-allowlist") || strings.Contains(errStr, "forbidden") {
-			return true
-		}
-	}
-	return false
+	// A direct attempt's error is the upstream's or the network's own; only a
+	// proxied attempt has an egress to route around.
+	return err != nil && proxyInUse
 }
 
 // strictProxyCtxKey carries the strict-proxy decision down to DoRequest.

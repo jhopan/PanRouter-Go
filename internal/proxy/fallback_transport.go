@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"reflect"
 	"sync"
 )
 
@@ -72,36 +71,29 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
-// transportConsultedAProxy reports whether this request went through a proxy on
-// the base leg. A proxy can only refuse a request that reached it: with no proxy
-// configured the direct leg is the same path, so a 403 from the application is the
-// application's answer and must not be replayed.
+// transportConsultedAProxy reports whether a proxy was in play for this request.
 //
-// A base transport that does not expose a Proxy func is reported as proxied —
-// pool-backed and tls-client transports route through whatever the operator
-// assigned, and their refusals are exactly what this transport exists to recover
-// from.
+// It only gates the ERROR path (a proxied attempt that threw may be retried
+// direct, an unproxied one may not). A response is never replayed on this
+// question — see isProxyFailure.
+//
+// A transport that does not expose a Proxy func is reported as proxied: pool-backed
+// and tls-client transports route through whatever the operator assigned, and their
+// failures are what this wrapper exists to recover from.
 func transportConsultedAProxy(base http.RoundTripper, req *http.Request) bool {
-	transport, ok := base.(*http.Transport)
-	if !ok {
-		// A pool-backed or tls-client transport routes through whatever the
-		// operator assigned; its refusals are what this wrapper exists to recover
-		// from, so it keeps the sniff.
-		return true
+	// *http.Transport carries Proxy as a func FIELD, not a method, so it has to be
+	// read directly: a nil field means this request never had a proxy to fail.
+	if transport, ok := base.(*http.Transport); ok {
+		if transport.Proxy == nil {
+			return false
+		}
+		proxyURL, err := transport.Proxy(req)
+		return err == nil && proxyURL != nil
 	}
-	if transport.Proxy == nil {
-		return false
-	}
-	// The ambient environment is not an assignment. This repo already reads an
-	// env-inherited proxy as "not assigned" when it decides whether a refusal may
-	// be answered directly (proxiesViaAssignment), and the same distinction
-	// matters here: an application 403 served as text/plain must not be replayed
-	// just because HTTP_PROXY happens to be set in the process.
-	if reflect.ValueOf(transport.Proxy).Pointer() == reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
-		return false
-	}
-	proxyURL, err := transport.Proxy(req)
-	return err == nil && proxyURL != nil
+	// Anything else (pool-backed, tls-client, an opaque wrapper) may be routing
+	// through a proxy it does not describe; treat it as proxied so its failures
+	// still get the direct leg.
+	return true
 }
 
 // NewFallbackTransport wraps a transport with automatic direct fallback on proxy refusal.

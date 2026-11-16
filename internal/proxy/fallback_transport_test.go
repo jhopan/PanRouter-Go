@@ -80,6 +80,76 @@ func TestFallbackTransportStillReplaysAProxyRefusal(t *testing.T) {
 	}
 }
 
+// TestIsProxyFailure_MatchesPanRouter pins the two questions PanRouter answers,
+// and only those. The third case is the residual one an earlier local version got
+// wrong: an assigned proxy plus a plain 403 from an application is NOT a proxy
+// refusal, so nothing is replayed.
+func TestIsProxyFailure_MatchesPanRouter(t *testing.T) {
+	plain := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": {"text/plain"}}}
+	tests := []struct {
+		name       string
+		err        error
+		resp       *http.Response
+		proxyInUse bool
+		want       bool
+	}{
+		{name: "a proxied attempt that threw", err: errors.New("socket hang up"), proxyInUse: true, want: true},
+		{name: "a direct attempt that threw", err: errors.New("socket hang up"), proxyInUse: false, want: false},
+		{name: "an application 403 as text/plain", resp: plain, proxyInUse: true, want: false},
+		{
+			name:       "a proxy that names itself",
+			resp:       &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"X-Proxy-Error": {"blocked-by-allowlist"}}},
+			proxyInUse: true, want: true,
+		},
+		{
+			name:       "a provider's 403 with a JSON body",
+			resp:       &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": {"application/json"}}},
+			proxyInUse: true, want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isProxyFailure(tt.err, tt.resp, tt.proxyInUse); got != tt.want {
+				t.Errorf("isProxyFailure = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// failingTransport stands in for a proxy leg that died before answering.
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connect tunnel failed")
+}
+
+// TestFallbackTransportReplaysAProxiedAttemptThatThrew is PanRouter's `catch`
+// branch: the attempt never reached the application, so the direct egress gets a
+// turn.
+func TestFallbackTransportReplaysAProxiedAttemptThatThrew(t *testing.T) {
+	t.Setenv("ALLOW_PRIVATE_NETWORKING", "true")
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Transport: &FallbackTransport{Base: failingTransport{}, Direct: http.DefaultTransport}}
+	resp, err := DoRequest(context.Background(), client, http.MethodPost, srv.URL, nil, []byte(`{"model":"x"}`))
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("the direct replay should have served the turn: %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("upstream requests = %d, want the single direct replay", got)
+	}
+}
+
 func TestTransportConsultedAProxy(t *testing.T) {
 	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "upstream.invalid"}}
 
@@ -89,10 +159,16 @@ func TestTransportConsultedAProxy(t *testing.T) {
 		want bool
 	}{
 		{name: "no proxy func at all", base: &http.Transport{}, want: false},
-		{name: "the ambient environment is not an assignment", base: NewSafeTransport(), want: false},
 		{
 			name: "an explicitly assigned proxy",
 			base: NewSafeTransportForProxy("http://proxy.example:3128"),
+			want: true,
+		},
+		{
+			name: "an ambient proxy still counts for the error path",
+			base: &http.Transport{Proxy: func(*http.Request) (*url.URL, error) {
+				return url.Parse("http://proxy.example:3128")
+			}},
 			want: true,
 		},
 		// A pool-backed transport is not an *http.Transport, so it keeps the sniff.

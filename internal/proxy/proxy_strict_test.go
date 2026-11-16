@@ -31,12 +31,16 @@ func poolClient(proxyURL string) *http.Client {
 
 // newDeadProxy returns an HTTP proxy that refuses everything — the shape
 // upstream's strictProxy branch exists for: a pool that is assigned but dead.
-// It answers 403 as text/plain, the refusal isProxyFailure recognises.
+//
+// It names itself with X-Proxy-Error, which is how a proxy refusal is identified:
+// a 403 alone is the application's answer, and reading one as a transport failure
+// replayed provider refusals twice more (see isProxyFailure).
 func newDeadProxy(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
+		w.Header().Set("X-Proxy-Error", "refused-to-tunnel")
 		http.Error(w, "proxy refuses to tunnel", http.StatusForbidden)
 	}))
 	t.Cleanup(srv.Close)

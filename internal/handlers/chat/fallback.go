@@ -181,6 +181,13 @@ func (h *ChatHandler) handleAccountFallback(
 	// of burning a healthy account.
 	excludedPools := map[string]bool{}
 	var lastErr error
+	// CodeBuddy's prompt cache is bound to the ACCOUNT: when this request rotates
+	// to a different account than the one that just ran, that account has no cache
+	// for the conversation and the FULL history is uploaded — the payload shape that
+	// gets accounts flagged. The body is trimmed once, at the first such rotation
+	// (upstream TRIM_ON_COLD_ACCOUNT; trimming again would keep eating history).
+	lastAttemptConnID := ""
+	coldTrimmed := false
 	for connIndex, c := range allConns {
 		// The last candidate cannot be rotated away from, so the ban pacing below
 		// must not delay an answer that is already going to fail.
@@ -229,6 +236,13 @@ func (h *ChatHandler) handleAccountFallback(
 		// to a different account (force fallback), and the usage row, the logs
 		// and the exclusion below must all name the account that was dialled.
 		log.Debug("fallback", "connection", "conn", connObj.ID, "candidate", c.ID)
+		if provider == "codebuddy-intl" && !coldTrimmed && lastAttemptConnID != "" && lastAttemptConnID != connObj.ID {
+			if trimmed, changed := codebuddyColdAccountTrim(provider, model, body, lastAttemptConnID, connObj.ID); changed {
+				body = trimmed
+				coldTrimmed = true
+			}
+		}
+		lastAttemptConnID = connObj.ID
 		attemptStart := time.Now()
 		if err := h.tryForwardWithConnection(forwardRequestParams{
 			Ctx: ctx, W: w, Provider: provider, Model: model,
