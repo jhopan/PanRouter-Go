@@ -67,6 +67,40 @@ func IsCodeBuddyLane(provider string) bool {
 	}
 }
 
+// minimaxPlanBlock is the flat park for a spent MiniMax Code plan
+// (errorConfig.js:128-129). It is not a burst limit: the 24h keeps the account out
+// for the rest of the working day, and the usage tracker overwrites the entry the
+// moment the plan refills.
+const minimaxPlanBlock = 24 * time.Hour
+
+// MaxOutputCapFor returns a lane's hard request-side output cap: the largest
+// max_tokens the endpoint accepts, or 0 when it accepts what the client asks.
+//
+// Agnes AI answers HTTP 400 "max_tokens exceeds the limit of 4096" above its cap, so
+// the request is clamped before it is sent (upstream paramSupport STRIP_RULES
+// `{ provider: "agnes", maxOutputCap: 4096 }`). The model's advertised ceiling is a
+// different number and stays in the catalogue.
+func MaxOutputCapFor(provider string) int {
+	switch ResolveAlias(provider) {
+	case "agnes":
+		return 4096
+	default:
+		return 0
+	}
+}
+
+// IsMinimaxCodeLane reports whether a provider id (or alias) is one of the two
+// MiniMax Code regions. Their plan window refuses every model on the account, so the
+// router keeps a per-connection block for them (minimaxCapCache).
+func IsMinimaxCodeLane(provider string) bool {
+	switch ResolveAlias(provider) {
+	case "minimax-code", "minimax-code-global":
+		return true
+	default:
+		return false
+	}
+}
+
 // BannedAccountCooldown is how long a provider-banned account stays out of
 // rotation (upstream BANNED_ACCOUNT_COOLDOWN_MS, errorConfig.js:53). A ban is not
 // a cooldown: the provider lifts it when it lifts it, and a shorter retry timer
@@ -148,6 +182,24 @@ var ErrorRules = []ErrorRule{
 	{Text: "11140", CooldownMs: cooldownAddressRefused},
 	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
 	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
+	// ── Agnes AI daily text quota (2026-11-06 field body) ──
+	// "You have used up today's text quota and are now limited to 1 request every 3
+	// minutes." The body also carries code "rate_limit_exceeded", which the generic
+	// row below reads as a 5-second burst — and Agnes also emits that code for a
+	// genuine per-minute burst. The spent-quota wording is what tells them apart, so
+	// its row must come first.
+	{Provider: "agnes", Text: "used up today", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+
+	// ── MiniMax Code plan exhaustion (open-sse/config/errorConfig.js:120-129) ──
+	// "usage limit reached: insufficient balance (1008)" means the M Plan window or
+	// the credit balance is spent. The window does announce a reset, but the
+	// operator asked for a flat 24-hour block: a plan that ran out while 470k tokens
+	// of conversation were being sent is not worth retrying in a few hours, and each
+	// retry is a real request. Provider-scoped on purpose — another provider's
+	// "insufficient balance" keeps the shorter generic quota cooldown.
+	{Provider: "minimax-code", Text: "insufficient balance", CooldownMs: int(minimaxPlanBlock / time.Millisecond), Quota: true},
+	{Provider: "minimax-code-global", Text: "insufficient balance", CooldownMs: int(minimaxPlanBlock / time.Millisecond), Quota: true},
+
 	// --- Quota / credit exhaustion (checked before generic rules) ---
 	// A spent budget is not a transient throttle: give it the long cooldown
 	// instead of the 30s transient default. Without this, "insufficient
@@ -297,6 +349,11 @@ var quotaExhaustedPatterns = []string{
 	"billing required",
 	"payment required",
 	"balance=0",
+	// Agnes AI's daily text quota: "You have used up today's text quota and are now
+	// limited to 1 request every 3 minutes." Without the wording the 429 read as a
+	// burst and was retried two seconds later, all day (upstream QUOTA_EXHAUSTED_
+	// SIGNALS carries `used up today`).
+	"used up today",
 	// Kiro's monthly cap is `{"message":"You have reached the limit.",
 	// "reason":"MONTHLY_REQUEST_COUNT"}` on a 402. Neither word is a quota
 	// keyword, so it classified as a plain 402 and the account was re-dialled

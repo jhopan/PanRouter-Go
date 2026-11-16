@@ -113,9 +113,43 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, responsesLite, sessionID)
-	if err != nil {
-		return fmt.Errorf("ForwardCodex: %w", err)
+	// The Codex backend can answer 200 and put the failure in the stream ("Selected
+	// model is at capacity"). Peeking the first bytes is what turns that into a
+	// rotation instead of a successful turn that emits nothing.
+	var resp *http.Response
+	sseRetries := 0
+	for {
+		resp, err = proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, responsesLite, sessionID)
+		if err != nil {
+			return fmt.Errorf("ForwardCodex: %w", err)
+		}
+		if !codexSSELooksLikeStream(resp) {
+			break
+		}
+		peek := peekCodexSSE(resp.Body)
+		if peek.matched == "" {
+			// Healthy (or unrecognised): hand the replayed stream on untouched.
+			resp.Body = replayBody{Reader: peek.reader, Closer: resp.Body}
+			break
+		}
+		resp.Body.Close()
+		if peek.accountFallback || sseRetries >= codexSSEMaxRetries {
+			log.Warn("codex", "stream refused before any output", "match", peek.matched,
+				"account_fallback", peek.accountFallback, "attempts", sseRetries+1,
+				"conn", req.ConnectionID, "model", req.ModelName)
+			return codexStreamFailure(peek)
+		}
+		// An overloaded upstream gets one more attempt on the same account before the
+		// rotation is blamed (upstream's 503 retry policy inside the executor).
+		sseRetries++
+		log.Debug("codex", "stream overloaded, retrying the same call", "match", peek.matched, "attempt", sseRetries)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer resp.Body.Close()
 	return handleCodexStream(w, req, resp.Body)

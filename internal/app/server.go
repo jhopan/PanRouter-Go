@@ -142,6 +142,12 @@ func ProvideServer(p ServerParams) *http.Server {
 			if restored := chat.LoadPersistedKiroCaps(); restored > 0 {
 				log.Printf("[KIRO_QUOTA] restored %d monthly cap(s)", restored)
 			}
+			// MiniMax Code's plan block is the same kind of fact: an account whose plan
+			// ran out stays out for 24h, and a restart that forgot it would spend a
+			// request rediscovering the refusal.
+			if restored := chat.LoadPersistedMiniMaxCaps(); restored > 0 {
+				log.Printf("[MINIMAX_CAP] restored %d plan block(s)", restored)
+			}
 			// Which Antigravity identity this process sends. The default is the
 			// captured Hub descriptor and needs no announcement; a non-default one
 			// is an operator decision that changes what Google sees on every call,

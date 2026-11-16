@@ -3,6 +3,7 @@ package providers
 // ProviderAliasMap maps short aliases to canonical provider IDs.
 var ProviderAliasMap = map[string]string{
 	"b-ai":           "bai",
+	"agnesai":        "agnes",
 	"agnes-ai":       "agnes",
 	"atria-asi":      "atria",
 	"dahl-inference": "dahl",

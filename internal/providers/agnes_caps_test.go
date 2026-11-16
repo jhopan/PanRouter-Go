@@ -1,6 +1,9 @@
 package providers
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Port of upstream tests/unit/agnes30-pro-model.test.js (decolua/9router#4587),
 // minus the registry assertions that live in registry_models.go and the pricing
@@ -83,5 +86,43 @@ func TestAgnesCatalogSeeds(t *testing.T) {
 	}
 	if slicesContains(models, "agnes-30-pro") {
 		t.Error("agnes catalog seeds the dashed page slug agnes-30-pro")
+	}
+}
+
+// TestAgnesRegistryParity pins the registry fields the reference declares
+// (open-sse/providers/registry/agnes.js): an apikey lane at priority 61 with the
+// dynamic catalogue passed through, both spellings of the alias, and the free-tier
+// notice the operator sees before adding a key.
+func TestAgnesRegistryParity(t *testing.T) {
+	meta, ok := ProviderRegistry["agnes"]
+	if !ok {
+		t.Fatal("agnes is missing from the registry")
+	}
+	if meta.Category != CategoryAPIKey {
+		t.Errorf("category = %v, want apikey", meta.Category)
+	}
+	if meta.Priority != 61 {
+		t.Errorf("priority = %d, want 61", meta.Priority)
+	}
+	if !meta.PassthroughModels {
+		t.Error("the catalogue is dynamic upstream; passthroughModels must be on")
+	}
+	if meta.Color != "#F97316" {
+		t.Errorf("color = %q, want #F97316", meta.Color)
+	}
+	if meta.Notice == nil || meta.Notice.APIKeyURL != "https://platform.agnes-ai.com/" {
+		t.Errorf("notice = %+v, want the platform key link", meta.Notice)
+	}
+	if meta.Notice.Text == "" || !strings.Contains(meta.Notice.Text, "no credit card") {
+		t.Errorf("notice text = %q, want the free-tier wording", meta.Notice.Text)
+	}
+
+	for _, alias := range []string{"agnes-ai", "agnesai"} {
+		if got := ResolveAlias(alias); got != "agnes" {
+			t.Errorf("ResolveAlias(%q) = %q, want agnes", alias, got)
+		}
+	}
+	if cfg, ok := KnownProviders["agnes"]; !ok || cfg.BaseURL != "https://apihub.agnes-ai.com/v1/chat/completions" {
+		t.Errorf("base URL = %q, want the Agnes hub", cfg.BaseURL)
 	}
 }

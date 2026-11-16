@@ -62,16 +62,24 @@ type Region struct {
 // ProviderRegistry maps canonical provider IDs to their display metadata.
 var ProviderRegistry = map[string]ProviderMeta{
 	"agnes": {
-		ID:           "agnes",
-		Name:         "Agnes AI",
-		Alias:        "agnes",
-		Category:     CategoryFreeTier,
-		AuthType:     "apikey",
-		Color:        "#7C3AED",
-		Icon:         "auto_awesome",
-		ServiceKinds: []string{"llm"},
-		Website:      "https://agnes-ai.com",
-		Notice:       &Notice{Text: "OpenAI-compatible gateway from Agnes AI, offering free API credits on sign-up. Accepts a bearer token or an x-api-key header.", APIKeyURL: "https://platform.agnes-ai.com"},
+		ID:    "agnes",
+		Name:  "Agnes AI",
+		Alias: "agnes",
+		// Upstream (open-sse/providers/registry/agnes.js): an API-key lane in the
+		// apikey category, priority 61, and `passthroughModels` because the catalogue
+		// is dynamic upstream — the pinned ids are known-good, the rest ride through.
+		Category:          CategoryAPIKey,
+		AuthType:          "apikey",
+		Priority:          61,
+		Color:             "#F97316",
+		Icon:              "auto_awesome",
+		PassthroughModels: true,
+		ServiceKinds:      []string{"llm"},
+		Website:           "https://agnes-ai.com/",
+		Notice: &Notice{
+			Text:      "Agnes AI free tier: multimodal (text/image/video), OpenAI-compatible, no credit card. Free plan: 20 RPM text (30 RPM with token plan). Key from platform.agnes-ai.com.",
+			APIKeyURL: "https://platform.agnes-ai.com/",
+		},
 	},
 	"atria": {
 		ID:           "atria",

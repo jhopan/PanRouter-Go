@@ -72,6 +72,16 @@ const (
 	// refills at the next weekly rollover (upstream
 	// `tokenharbor: { scope: QUOTA_SCOPES.WEEKLY }`).
 	scopeWeekly
+	// scopeDaily is a calendar day: Agnes AI's free text quota refills at 00:00 UTC
+	// (upstream QUOTA_SCOPES.DAILY with resetUtcHour 0).
+	scopeDaily
+	// scopeSession is a short rolling session window (upstream
+	// QUOTA_SCOPES.SESSION, a 5h fallback when the provider names no reset).
+	// MiniMax Code's M Plan and Codex/Claude's 5h windows use it. The ceiling is the
+	// generous one upstream applies to every scope (40 days), which is what lets a
+	// provider pin a flat 24h block without it being clamped to the generic two
+	// hours.
+	scopeSession
 )
 
 // quotaWindowScopes are the providers whose quota window this router knows.
@@ -84,6 +94,13 @@ var quotaWindowScopes = map[string]quotaScope{
 	"cbai":           scopeMonthly,
 	"cbcn":           scopeMonthly,
 	"tokenharbor":    scopeWeekly,
+	// Agnes AI's free tier counts text requests per calendar day, and its reset is
+	// the next 00:00 UTC.
+	"agnes": scopeDaily,
+	// MiniMax Code (both regions) reports a session-scoped plan window
+	// (quotaWindows.js:46-47) and its exhaustion rule pins a flat 24h.
+	"minimax-code":        scopeSession,
+	"minimax-code-global": scopeSession,
 	// Kiro's free tier refills on a calendar month and its usage API reports
 	// that date as nextDateReset (upstream quotaWindows.js:34
 	// `kiro: { scope: QUOTA_SCOPES.MONTHLY }`). Without the entry a 402 naming
@@ -121,10 +138,14 @@ func maxCooldownFor(provider string) time.Duration {
 		return deepSeekWebMaxMuteCooldown
 	}
 	if scope, ok := scopeFor(provider); ok {
-		if scope == scopeMonthly {
+		switch scope {
+		case scopeMonthly, scopeSession, scopeDaily:
+			// Upstream's default ceiling is 40 days for every scope; a session
+			// window only changes the CALENDAR fallback, not the ceiling.
 			return maxMonthlyResetCooldown
+		default:
+			return maxWeeklyResetCooldown
 		}
-		return maxWeeklyResetCooldown
 	}
 	return maxResetCooldown
 }
@@ -230,6 +251,13 @@ func tokenharborParkDuration(statusCode int, provider string, ue *upstreamError,
 	return clampCooldown(nextWeeklyRollover(now).Sub(now), maxWeeklyResetCooldown), true
 }
 
+// nextUTCMidnight is the calendar fallback for a DAILY quota: the first instant of
+// the next UTC day (upstream calendarResetMs with resetUtcHour 0).
+func nextUTCMidnight(now time.Time) time.Time {
+	utc := now.UTC()
+	return time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
+}
+
 // nextWeeklyRollover returns the coming weekly quota boundary: the next Monday
 // at 00:00 UTC, or the Monday after when now IS a Monday. It is upstream
 // calendarResetMs(QUOTA_SCOPES.WEEKLY) with weeklyResetWeekday = 1.
@@ -294,6 +322,17 @@ func retryableCooldownSecAt(statusCode int, base time.Duration, ue *upstreamErro
 // retry (upstream auth.js `kiroMonthly` + markKiroCapped).
 func (h *ChatHandler) cooldownSecFor(connID, provider string, ue *upstreamError, errorText string, cls providers.ErrorClassification) int {
 	cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(cls.CooldownMs)*time.Millisecond, ue, provider)
+	// A spent DAILY allowance refills at the provider's calendar boundary, not after
+	// a fixed hour: Agnes AI's free text quota resets at 00:00 UTC, and parking it
+	// for the generic quota window would hand the account back mid-day to be refused
+	// again (upstream resolveQuotaResetAt's calendar fallback, resetUtcHour 0).
+	if cls.Quota && !KiroMonthlyVerdict(provider, ue.StatusCode, errorText) {
+		if scope, ok := scopeFor(provider); ok && scope == scopeDaily {
+			if wait := ceilSeconds(min(time.Until(nextUTCMidnight(time.Now().UTC())), maxCooldownFor(provider))); wait > 0 {
+				return wait
+			}
+		}
+	}
 	if !KiroMonthlyVerdict(provider, ue.StatusCode, errorText) {
 		return cooldownSec
 	}

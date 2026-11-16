@@ -202,6 +202,12 @@ func recordProviderUsageReading(conn *models.ProviderConnection, res usageResult
 	if providers.ResolveAlias(conn.Provider) == "kiro" {
 		chat.RecordKiroUsage(conn.ID, res.quotas)
 	}
+	// MiniMax Code: the M Plan window or the credit balance running out parks the
+	// account for the rest of the working day, and the reading is what releases it
+	// when the plan refills (open-sse/services/usage.js: recordMiniMaxUsage).
+	if providers.IsMinimaxCodeLane(conn.Provider) {
+		chat.RecordMiniMaxUsage(conn.ID, res.quotas)
+	}
 }
 
 // antigravityCachedVerdict returns the eligibility flag this deployment already

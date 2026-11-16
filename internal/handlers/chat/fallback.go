@@ -208,6 +208,21 @@ func (h *ChatHandler) handleAccountFallback(
 				continue
 			}
 		}
+		// A MiniMax Code account whose plan or credit balance is spent refuses every
+		// model until it refills, so a request sent to it burns a real call to learn
+		// what the last refusal already said (upstream minimaxCapCache). The usage
+		// reading overwrites the block the moment the plan comes back.
+		if providers.IsMinimaxCodeLane(provider) && !handlerutil.IsProbeContext(ctx) {
+			if skip, until, reason := ShouldSkipMiniMaxAccount(c.ID); skip {
+				reset := "unknown"
+				if until != nil {
+					reset = until.Format(time.RFC3339)
+				}
+				log.Debug("minimax_cap", "plan exhausted — skip upstream",
+					"conn", c.ID, "reason", reason, "until", reset)
+				continue
+			}
+		}
 		connObj, connData, err := h.getBestConnectionWithContext(ctx, provider, c.ID, nil, model, excludedPools)
 		if err != nil || connObj == nil {
 			if lastErr == nil && err != nil {
@@ -383,6 +398,17 @@ func (h *ChatHandler) handleAccountFallback(
 					time.Sleep(accountRotationDelay)
 				}
 				continue
+			}
+			// The plan refusal also marks the connection, so the NEXT request skips it
+			// before going upstream instead of rediscovering the same 429
+			// (upstream auth.js: markMiniMaxExhausted on the plan-exhaustion verdict).
+			if providers.IsMinimaxCodeLane(provider) && MinimaxPlanExhaustedVerdict(ue.StatusCode, errorText) {
+				var reset *time.Time
+				if wait, ok := retryAfterWait(ue); ok {
+					at := time.Now().UTC().Add(wait)
+					reset = &at
+				}
+				MarkMiniMaxExhausted(connObj.ID, reset)
 			}
 			cooldownSec := h.cooldownSecFor(connObj.ID, provider, ue, errorText, classification)
 			lockKey := canonicalLockModel(provider, model)
@@ -954,6 +980,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		if target == "openai" && !providerCfg.IsGeminiNative() {
 			filtered, filterErr := translator.FilterToOpenAIFormatJSON(pipedBody, translator.FilterOptions{
 				PreserveCacheControl: providers.PreservesCacheControl(provider),
+				MaxTokensCap:         providers.MaxOutputCapFor(provider),
 			})
 			if filterErr != nil {
 				// The request lost every message. The upstream answers an
@@ -1751,12 +1778,20 @@ func extractErrorText(body []byte) string {
 		// so a ban wore the generic 403 cooldown.
 		Msg        string         `json:"msg"`
 		DisplayMsg map[string]any `json:"displayMsg"`
+		// MiniMax words its refusals as
+		// {"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}.
+		// Without it the plan-exhaustion verdict never fired and the account was
+		// retried instead of being parked.
+		BaseResp struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"status_message"`
+		} `json:"base_resp"`
 	}
 	if err := json.Unmarshal(body, &parsed); err == nil {
 		var parts []string
 		// Upstream order (open-sse/executors/codebuddy-intl.js parseError):
 		// msg, then message, then error.message.
-		for _, candidate := range []string{parsed.Msg, parsed.Message, parsed.Error.Message} {
+		for _, candidate := range []string{parsed.Msg, parsed.BaseResp.StatusMsg, parsed.BaseResp.Message, parsed.Message, parsed.Error.Message} {
 			if candidate != "" {
 				parts = append(parts, candidate)
 				break

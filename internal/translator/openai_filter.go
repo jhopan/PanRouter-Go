@@ -51,6 +51,11 @@ type FilterOptions struct {
 	// array content with 400 AiError: Bad input: oneOf at '/' not met ...
 	// Type mismatch of '/messages/0/content', 'array' not in 'string' (code 5006).
 	FlattenContent bool
+	// MaxTokensCap clamps the request's max_tokens to the endpoint's hard ceiling.
+	// An endpoint that answers HTTP 400 above it never needs to see the value: Agnes
+	// AI caps output at 4096 and rejects anything larger, so the request is clamped
+	// before it can reach that error path (upstream STRIP_RULES maxOutputCap).
+	MaxTokensCap int
 }
 
 // FilterToOpenAIFormat normalises a body to clean OpenAI shape — port of
@@ -64,6 +69,31 @@ func FilterToOpenAIFormat(body map[string]any, opts FilterOptions) map[string]an
 // anything. The JSON entry point needs the flag: a body the filter does not
 // touch is returned byte for byte, so a plain request pays no
 // re-serialisation on the way out.
+// clampMaxTokens lowers max_tokens to the endpoint's cap, reporting whether it moved.
+func clampMaxTokens(body map[string]any, cap int) bool {
+	if cap <= 0 {
+		return false
+	}
+	switch current := body["max_tokens"].(type) {
+	case float64:
+		if current > float64(cap) {
+			body["max_tokens"] = float64(cap)
+			return true
+		}
+	case int:
+		if current > cap {
+			body["max_tokens"] = cap
+			return true
+		}
+	case int64:
+		if current > int64(cap) {
+			body["max_tokens"] = cap
+			return true
+		}
+	}
+	return false
+}
+
 func filterToOpenAIFormat(body map[string]any, opts FilterOptions) bool {
 	changed := false
 	if msgs, ok := body["messages"].([]any); ok {
@@ -88,12 +118,20 @@ func filterToOpenAIFormat(body map[string]any, opts FilterOptions) bool {
 //
 // A body whose message list ends up empty is reported as ErrNoMessages: the
 // upstream would answer that with a 400, so the caller answers it here.
+// FilterToOpenAIFormatJSON applies the format filter and, when the lane declares a
+// hard output cap, clamps the request's max_tokens to it.
 func FilterToOpenAIFormatJSON(body []byte, opts FilterOptions) ([]byte, error) {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil || m == nil {
 		return body, nil
 	}
 	changed := filterToOpenAIFormat(m, opts)
+	// The clamp runs after the filter: a rename rule (openai's
+	// max_tokens → max_completion_tokens) has already moved the field, and a lane
+	// that renames does not declare a cap anyway.
+	if clampMaxTokens(m, opts.MaxTokensCap) {
+		changed = true
+	}
 	if msgs, ok := m["messages"].([]any); ok && len(msgs) == 0 {
 		return body, ErrNoMessages
 	}
