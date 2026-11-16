@@ -252,6 +252,12 @@ var ErrorRules = []ErrorRule{
 	{Text: "account has been restricted due to unusual activity", CooldownMs: cooldownAddressRefused},
 	{Text: "账号存在异常行为", CooldownMs: cooldownAddressRefused},
 
+	// Antigravity: a 400 is the REQUEST, not the account (Google rejects it before
+	// looking at who is asking), so it is fatal — surfaced, never locked. Walking the
+	// pool on it parked every account over a payload that can never succeed
+	// (open-sse/executors/antigravity.js parseError marks it fatal/requestRejected).
+	{Provider: "antigravity", Status: 400, Fatal: true, RequestRejected: true},
+
 	// --- Status-based rules (fallback when text doesn't match) ---
 	{Status: 401, CooldownMs: cooldownLong},
 	{Status: 402, CooldownMs: cooldownLong},
@@ -638,8 +644,14 @@ func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int
 			}
 		}
 
-		// Status-based match
+		// Status-based match. The provider scope applies here as well: a lane whose
+		// status means something specific (Antigravity answers 400 for a request
+		// Google rejected before looking at the account) must not teach the rule to
+		// every other provider.
 		if rule.Status != 0 && rule.Status == statusCode {
+			if rule.Provider != "" && rule.Provider != provider {
+				continue
+			}
 			if rule.Backoff {
 				newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
 				return ErrorClassification{

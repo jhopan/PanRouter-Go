@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"panrouter/proxy/internal/constants"
 	"panrouter/proxy/internal/handlerutil"
@@ -23,6 +24,11 @@ import (
 // projectID is non-empty for antigravity (cloudcode-pa.googleapis.com).
 func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey, bodyStr string, isStream bool, projectID, modelName string) (*http.Response, error) {
 	body := []byte(bodyStr)
+	// The Antigravity lane rejects stream_options on a non-streaming call; the
+	// streaming case keeps it (open-sse/executors/antigravity.js transformRequest).
+	if projectID != "" && cfg != nil && cfg.Format != "gemini-cli" && !isStream {
+		body = antigravityStripStreamOptions(body)
+	}
 	if projectID != "" {
 		// Body-inspecting tier resolution (upstream getModelUpstreamId): an
 		// unadorned id follows the client's reasoning effort when the catalog
@@ -139,25 +145,63 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		headers["X-Goog-Api-Client"] = translator.GeminiCLIApiClient
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(sendBody))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	// The Antigravity envelope (projectID set, not the gemini-cli lane) gets the
+	// in-place retry the reference implements in computeRetryDelay: a 429/5xx, or a
+	// 400 whose body names a transient fault, is repeated here while the provider's
+	// own wait is short. Parking the account instead fails a turn that clears in
+	// seconds on a single-account deployment.
+	antigravityLane := projectID != "" && cfg.Format != "gemini-cli"
 
-	resp, err := client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, err
+	var req *http.Request
+	var resp *http.Response
+	var err error
+	for attempt := 0; ; attempt++ {
+		req, err = http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(sendBody))
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
 		}
-		if isTransientGeminiTransportError(err) {
-			return nil, UpstreamFailure(http.StatusBadGateway, fmt.Sprintf("ForwardGemini antigravity transport: %v", err))
+		for k, v := range headers {
+			req.Header.Set(k, v)
 		}
-		return nil, fmt.Errorf("upstream request: %w", err)
+
+		resp, err = client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			if isTransientGeminiTransportError(err) {
+				return nil, UpstreamFailure(http.StatusBadGateway, fmt.Sprintf("ForwardGemini antigravity transport: %v", err))
+			}
+			return nil, fmt.Errorf("upstream request: %w", err)
+		}
+		UnwrapIdentityGzip(req, resp)
+
+		if !antigravityLane || resp.StatusCode == http.StatusOK ||
+			attempt >= antigravityMaxTransientRetries || !antigravityRetryableStatus(resp.StatusCode) {
+			break
+		}
+		// Only a retryable status is inspected, and only its error body: a normal
+		// answer is streamed to the caller untouched.
+		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
+		resp.Body.Close()
+		delay := antigravityRetryDelay(resp.StatusCode, resp.Header, string(errBody), attempt+1)
+		if readErr != nil || delay <= 0 {
+			// No repeat: hand the body back so the caller's error path sees what the
+			// provider said.
+			resp.Body = io.NopCloser(bytes.NewReader(errBody))
+			break
+		}
+		log.Warn("gemini", "antigravity transient fault, retrying the same call",
+			"model", modelName, "status", resp.StatusCode, "wait", delay, "attempt", attempt+1,
+			"error", string(errBody[:min(200, len(errBody))]))
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	UnwrapIdentityGzip(req, resp)
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		resp.Body.Close()

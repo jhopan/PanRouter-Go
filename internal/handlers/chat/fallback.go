@@ -1735,6 +1735,13 @@ func extractErrorText(body []byte) string {
 			Status  string `json:"status"`
 			Details []struct {
 				Reason string `json:"reason"`
+				// Google puts the real cause of a 400 here ("items.items: missing
+				// field.") and answers the top level with a bare "Bad request",
+				// so the fields are what an operator can act on.
+				FieldViolations []struct {
+					Field       string `json:"field"`
+					Description string `json:"description"`
+				} `json:"fieldViolations"`
 			} `json:"details"`
 		} `json:"error"`
 		Message string `json:"message"`
@@ -1761,6 +1768,11 @@ func extractErrorText(body []byte) string {
 		for _, d := range parsed.Error.Details {
 			if d.Reason != "" {
 				parts = append(parts, d.Reason)
+			}
+			for _, violation := range d.FieldViolations {
+				if violation.Field != "" || violation.Description != "" {
+					parts = append(parts, violation.Field+": "+violation.Description)
+				}
 			}
 		}
 		// Every language the provider supplied: the ban sentence may only be in

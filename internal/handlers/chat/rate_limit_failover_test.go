@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,5 +338,20 @@ func TestRateLimitCooldownParksAccountForTheNamedWindow(t *testing.T) {
 	}
 	if left := time.Until(until); left < 40*time.Second || left > 45*time.Second {
 		t.Errorf("account parked for %v, want the 45s window the upstream named (2s base backoff would read as ~%v)", left, left.Round(time.Second))
+	}
+}
+
+// TestExtractErrorText_AntigravityFieldViolations pins what an operator can act on:
+// Google answers a 400 with a bare "Bad request" and puts the real cause in
+// error.details[].fieldViolations (open-sse/executors/antigravity.js parseError).
+func TestExtractErrorText_AntigravityFieldViolations(t *testing.T) {
+	body := []byte(`{"error":{"message":"Bad request","details":[{"fieldViolations":[
+		{"field":"items.items","description":"missing field."},
+		{"field":"required","description":"must name declared properties"}]}]}}`)
+	got := extractErrorText(body)
+	for _, want := range []string{"Bad request", "items.items: missing field.", "required: must name declared properties"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("extracted text %q is missing %q", got, want)
+		}
 	}
 }

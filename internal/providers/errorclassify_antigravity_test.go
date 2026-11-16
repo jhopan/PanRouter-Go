@@ -65,3 +65,37 @@ func TestClassifyErrorForProvider_AntigravityTransientKeepsRateLimitSemantics(t 
 		}
 	}
 }
+
+// TestClassifyErrorForProvider_Antigravity400IsFatal: Google rejects a malformed
+// request before looking at whose account it is, so every account answers the same
+// 400. Locking them one by one parks the whole pool for a payload that can never
+// succeed (open-sse/executors/antigravity.js parseError: fatal/requestRejected).
+func TestClassifyErrorForProvider_Antigravity400IsFatal(t *testing.T) {
+	cls := ClassifyErrorForProvider(400, `{"error":{"message":"Bad request"}}`, 0, "antigravity")
+	if !cls.Fatal || !cls.RequestRejected {
+		t.Fatalf("antigravity 400 classified %+v, want fatal request rejection", cls)
+	}
+
+	// The scope is the lane, not the status: another provider's 400 stays
+	// request-scoped, with no account state touched.
+	for _, provider := range []string{"openai", "gemini-cli", ""} {
+		other := ClassifyErrorForProvider(400, `{"error":{"message":"Bad request"}}`, 0, provider)
+		if other.Fatal || other.ShouldFallback {
+			t.Errorf("provider %q classified %+v, want request-scoped", provider, other)
+		}
+	}
+}
+
+// TestClassifyErrorForProvider_AntigravityTransientsStillBackOff guards the row:
+// the 400 verdict must not swallow the transient body patterns.
+func TestClassifyErrorForProvider_AntigravityTransientsStillBackOff(t *testing.T) {
+	for _, text := range []string{"high traffic", "Agent execution terminated due to error.", "temporarily unavailable"} {
+		cls := ClassifyErrorForProvider(400, text, 0, "antigravity")
+		if cls.Fatal {
+			t.Errorf("%q classified fatal, want the transient backoff", text)
+		}
+		if !cls.ShouldFallback || cls.NewBackoffLevel != 1 {
+			t.Errorf("%q classified %+v, want a backoff at level 1", text, cls)
+		}
+	}
+}
