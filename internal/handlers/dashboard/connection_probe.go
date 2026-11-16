@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"panrouter/proxy/internal/db"
 	"panrouter/proxy/internal/handlers/chat"
 	"panrouter/proxy/internal/handlerutil"
 	"panrouter/proxy/internal/log"
@@ -358,6 +359,20 @@ func parseConnectionProbeData(raw map[string]any) connectionProbeData {
 // testSingleConnection mirrors testSingleConnection(id): resolve the proxy,
 // pre-check it, then run the api-key or OAuth probe.
 func (h *DashboardHandler) testSingleConnection(ctx context.Context, conn *models.ProviderConnection, data connectionProbeData, raw map[string]any) probeOutcome {
+	// A provider ban is a verdict about the account: the provider refuses every
+	// request from it until it lifts the ban, so probing it spends another refused
+	// request — the pattern that earned the ban — and the answer is already known.
+	// The ban is reported instead (upstream bannedAccounts.js: the ban is recorded
+	// precisely so "Test connection" stops poking the account).
+	if conn != nil {
+		if until, reason, banned := db.ConnectionBannedUntil(conn.Data); banned {
+			message := "Account banned by the provider until " + until.UTC().Format(time.RFC3339)
+			if strings.TrimSpace(reason) != "" {
+				message += ": " + reason
+			}
+			return probeOutcome{message: message}
+		}
+	}
 	if conn != nil && providers.IsLocalByDesign(conn.Provider) {
 		ctx = proxy.WithAllowLoopback(ctx)
 	}

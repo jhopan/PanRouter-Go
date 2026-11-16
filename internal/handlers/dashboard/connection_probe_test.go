@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"panrouter/proxy/internal/db"
+	"panrouter/proxy/internal/models"
 	"panrouter/proxy/internal/proxy/oauth"
 )
 
@@ -683,4 +685,88 @@ func TestProbeHTTPClient_Socks5Proxy(t *testing.T) {
 	if resolved == nil || resolved.String() != "socks5h://192.168.22.206:1080" {
 		t.Errorf("resolved = %v, want socks5h://192.168.22.206:1080", resolved)
 	}
+}
+
+// TestTestConnection_RefusesToPokeABannedAccount pins the ban contract from the
+// provider's side: a banned account is refused on every request until the ban is
+// lifted, so probing it spends another refused request — the repeat pattern that
+// earned the ban — and reports nothing the recorded ban does not already say.
+func TestTestConnection_RefusesToPokeABannedAccount(t *testing.T) {
+	repo, cleanup := setupProbeTestDB(t)
+	defer cleanup()
+
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	until := time.Now().UTC().Add(20 * 24 * time.Hour).Truncate(time.Second)
+	conn := &models.ProviderConnection{
+		ID:       "cb-banned",
+		Provider: "codebuddy-intl",
+		AuthType: "apikey",
+		Name:     new("banned"),
+		Data: `{"apiKey":"sk-banned","baseUrl":"` + upstream.URL + `","bannedUntil":"` +
+			until.Format(time.RFC3339) + `","banReason":"Your account has been restricted due to unusual activity"}`,
+	}
+
+	raw := probeTestRaw(t, conn.Data)
+	handler := NewDashboardHandler(repo)
+	outcome := handler.testSingleConnection(context.Background(), conn, parseConnectionProbeData(raw), raw)
+
+	if hits.Load() != 0 {
+		t.Errorf("upstream requests = %d, want 0: a banned account must not be probed", hits.Load())
+	}
+	if !strings.Contains(outcome.message, "banned by the provider") {
+		t.Errorf("message = %q, want the ban reported", outcome.message)
+	}
+	if !strings.Contains(outcome.message, "unusual activity") {
+		t.Errorf("message = %q, want the provider's own reason", outcome.message)
+	}
+}
+
+// TestTestConnection_ProbesAnExpiredBanAgain: a ban expires on its own, so a row
+// whose window has passed is probed like any other.
+func TestTestConnection_ProbesAnExpiredBanAgain(t *testing.T) {
+	repo, cleanup := setupProbeTestDB(t)
+	defer cleanup()
+
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	expired := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	conn := &models.ProviderConnection{
+		ID:       "cb-expired-ban",
+		Provider: "codebuddy-intl",
+		AuthType: "apikey",
+		Name:     new("expired"),
+		Data: `{"apiKey":"sk-expired","baseUrl":"` + upstream.URL + `","bannedUntil":"` +
+			expired.Format(time.RFC3339) + `","banReason":"old ban"}`,
+	}
+
+	raw := probeTestRaw(t, conn.Data)
+	handler := NewDashboardHandler(repo)
+	handler.testSingleConnection(context.Background(), conn, parseConnectionProbeData(raw), raw)
+
+	if hits.Load() == 0 {
+		t.Error("an expired ban must not stop the probe")
+	}
+}
+
+// probeTestRaw decodes a connection's stored data blob for the probe helpers.
+func probeTestRaw(t *testing.T, data string) map[string]any {
+	t.Helper()
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+		t.Fatalf("decode connection data: %v", err)
+	}
+	return raw
 }

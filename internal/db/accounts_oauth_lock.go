@@ -142,6 +142,27 @@ func ConnectionBlockedUntilAt(rawData string, now time.Time) (time.Time, bool) {
 	return earliest, true
 }
 
+// ConnectionBannedUntil reads a provider ban recorded on the connection, with the
+// reason the provider gave. The ban is a verdict about the ACCOUNT, not a cooldown:
+// it names no reset, so the reader answers with the window the router parked it for.
+func ConnectionBannedUntil(rawData string) (time.Time, string, bool) {
+	return ConnectionBannedUntilAt(rawData, time.Now())
+}
+
+// ConnectionBannedUntilAt is ConnectionBannedUntil with the clock injected.
+func ConnectionBannedUntilAt(rawData string, now time.Time) (time.Time, string, bool) {
+	raw, ok := parseConnData(rawData)
+	if !ok {
+		return time.Time{}, "", false
+	}
+	until, ok := readTimestampField(raw, "bannedUntil")
+	if !ok || !until.After(now) {
+		return time.Time{}, "", false
+	}
+	reason, _ := raw["banReason"].(string)
+	return until, reason, true
+}
+
 // ConnectionAccountLockUntil reads the account-ban lockout timestamp a
 // connection carries in its data blob, failing open on a missing or malformed
 // value.

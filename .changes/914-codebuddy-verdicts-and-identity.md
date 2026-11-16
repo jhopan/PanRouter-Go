@@ -80,6 +80,13 @@ opening time nor a stable value across turns.
   exists to prevent (upstream's own registries disagree with their executors on this
   version; the executor is authoritative).
 
+**The block is also respected by "Test connection".** A banned account was still
+being probed by hand: the provider refuses every request from it until the ban is
+lifted, so a click on "Test connection" spent another refused request — the repeat
+pattern that earned the ban — and reported nothing the recorded ban did not already
+say. `testSingleConnection` now answers from the row (`ConnectionBannedUntil`) and
+never dials. The ban expires on its own, so a lapsed window probes as before.
+
 Verified: `go test ./internal/translator/ ./internal/proxy/... ./internal/handlers/...
 ./internal/providers/ ./internal/db/ ./internal/schedule/ ./internal/app/`, plus the
 new fallback tests that drive a real 403 through the loop: a 11128 refusal must
