@@ -128,6 +128,12 @@ const (
 	// every turn the same address is refused on.
 	cooldownAddressRefused = 30 * 60 * 1000
 
+	// cooldownCloudflareIPBlock is the pause for Cloudflare error 1015 ("You are
+	// being rate limited") — upstream errorConfig.js:99-100. The egress IP is
+	// blocked for minutes-to-hours, so the connection steps aside for an hour and
+	// the rotation picks another account, whose relay exits from another address.
+	cooldownCloudflareIPBlock = 60 * 60 * 1000
+
 	// QuotaExhaustedCooldownMs is how long an account is parked after the
 	// upstream reports its credit/quota budget is spent. Ported from the
 	// upstream classify429 helper (QUOTA_EXHAUSTED_COOLDOWN_MS): a rate limit
@@ -272,6 +278,28 @@ var ErrorRules = []ErrorRule{
 	{Provider: "antigravity", Text: "stream terminated", Backoff: true},
 	{Provider: "antigravity", Text: "stream interrupted", Backoff: true},
 	{Provider: "antigravity", Text: "empty response", Backoff: true},
+
+	// ── Cloudflare IP-level block (upstream errorConfig.js:93-104) ──────────
+	// Error 1015 ("You are being rate limited") is not the provider saying slow
+	// down: Cloudflare has blocked the EGRESS IP — the relay or the box this
+	// gateway runs on — for minutes to hours, and it does not clear on its own in
+	// seconds. The generic "rate limit" row below reads it as a burst and backs
+	// off 2s→5min, so the same blocked IP was re-dialled every few seconds for
+	// the whole block. A flat hour parks the connection instead, which is what
+	// lets the router fall to another account (different relay, different egress
+	// IP) rather than hammering the blocked one.
+	//
+	// These rows must stay ABOVE both the generic "rate limit" backoff and the
+	// HTML row below, because a 1015 body is an HTML page and its own sentence
+	// also contains "rate limited".
+	{Text: "you are being rate limited", CooldownMs: cooldownCloudflareIPBlock},
+	{Text: "error 1015", CooldownMs: cooldownCloudflareIPBlock},
+	// An HTML error page instead of a body (Cloudflare's managed challenge, a
+	// Render cold start) is infra-level and transient: the origin is not awake or
+	// wants a browser re-check, and the same request usually succeeds on retry.
+	// Short cooldown on purpose — it is not an account verdict.
+	{Text: "<!doctype html", CooldownMs: cooldownShort},
+
 	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
 	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
 	{Text: "insufficient_quota", CooldownMs: cooldownLong},

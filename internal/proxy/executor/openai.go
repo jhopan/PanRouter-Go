@@ -114,6 +114,65 @@ func renameMaxTokensBody(body []byte) []byte {
 // than this, so a client budget above it is folded down before dispatch.
 const volcengineArkGLM5OutputCeiling = 4096
 
+// flattenCloudflareContent folds array message content into a plain string for
+// Cloudflare Workers AI. It is the Go half of upstream paramSupport
+// STRIP_RULES `{ provider: "cloudflare-ai", flattenContent: true }` (#1926):
+//
+//	msg.content.map(b => (b && b.type === "text" && typeof b.text === "string") ? b.text : "").join("")
+//
+// Workers AI accepts `content` as a string only, so any client that always sends
+// the OpenAI content-part array — a translated Claude body, an editor with an
+// image attached, a client replaying parts — is answered with a 400 that names
+// nothing useful. Joined text preserves the prompt; a non-text block contributes
+// nothing, exactly as the upstream expression does.
+//
+// Messages whose content is already a string, and bodies with no messages array,
+// are returned untouched.
+func flattenCloudflareContent(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	msgs, ok := m["messages"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		var text strings.Builder
+		for _, part := range parts {
+			block, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if typ, _ := block["type"].(string); typ != "text" {
+				continue
+			}
+			if s, ok := block["text"].(string); ok {
+				text.WriteString(s)
+			}
+		}
+		msg["content"] = text.String()
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := marshalStable(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // clampVolcengineArkGLM5OutputTokens folds a GLM-5 output budget above the
 // Ark ceiling down to the model's capability ceiling (capped at Ark's 4096).
 // A budget at or below the ceiling, a request that sets no budget, and every
@@ -297,6 +356,14 @@ func ForwardOpenAI(w http.ResponseWriter, req *Request) error {
 		// down before the request leaves the upstream. The ceiling is the model's
 		// declared maxOutput from the capability registry, capped at Ark's 4096.
 		req.Body = clampVolcengineArkGLM5OutputTokens(req.Provider, req.Body)
+	}
+	if providers.ResolveAlias(req.Provider) == "cloudflare-ai" {
+		// Workers AI validates `messages[].content` against a oneOf root schema
+		// that accepts a plain string and rejects the OpenAI content-part array
+		// (upstream paramSupport STRIP_RULES, #1926), so a client that always
+		// sends parts gets a bare 400 from Cloudflare with no hint that the shape
+		// is the problem.
+		req.Body = flattenCloudflareContent(req.Body)
 	}
 	resp, err := proxy.ForwardOpenAI(req.Ctx, req.Client, req.Config, req.APIKey, req.Body, req.IsStream)
 	if err != nil {
