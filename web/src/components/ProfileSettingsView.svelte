@@ -20,6 +20,7 @@
   import Modal from '../lib/ui/Modal.svelte'
   import Button from '../lib/ui/Button.svelte'
   import Input from '../lib/ui/Input.svelte'
+  import BackupPanel from './BackupPanel.svelte'
   import { api, getAuthHeaders, responseErrorMessage, type DatabaseStats, type Settings } from '../api/client'
   import { isCompactUnitsEnabled, isProviderTogglePersistent, setCompactUnits, setProviderTogglePersistent } from '../lib/compactNumber'
   import {
@@ -1362,6 +1363,10 @@
         </div>
       </div>
     </Card>
+    <!-- SECTION: Automatic Backup. Snapshots pushed off the box to a private
+         GitHub repo, plus the tokens a second machine uses to pull the database
+         itself. Off until an operator turns it on. -->
+    <BackupPanel />
     <!-- SECTION: White-label branding. The sidebar renders these two values, so
          the card is the only place the product name and logo are set. An empty
          value falls back to the project defaults, which is what an operator who

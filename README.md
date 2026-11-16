@@ -422,8 +422,14 @@ commits still sitting in the write-ahead log are included — and pushes it to a
 repo you nominate. The target **must be private**: the check is a hard gate, not
 a warning, because a public repo would publish every provider credential.
 
-- Configured through the API (there is no dashboard panel for it yet): `POST /api/backup/config`
-  takes the repo, token and interval (default **24 h**); `POST /api/backup/run` takes one now.
+- Set it up in the dashboard: **Settings → Automatic Backup** — enable the schedule,
+  pick an interval (1 h…7 d, default **24 h**), and give the GitHub username, the
+  repository URL and a token with write access. **Back up now** proves the setup
+  without waiting for the schedule. The token never comes back to the browser: the
+  field shows `•••••••• (saved — leave blank to keep)` once it is stored.
+- The same panel mints the mirror tokens below, and shows the three shell snippets
+  (one-off download, `mirror.sh`, the cron line) with the gateway's own origin.
+- Everything is also scriptable: `GET|POST /api/backup/config`, `POST /api/backup/run`.
 - `GET /api/backup/download` streams the live `data.sqlite` to a holder of a backup token.
 - `GET|POST|PATCH|DELETE /api/backup/tokens` issue and revoke those tokens; each stores a
   key id + CRC, never the secret, so a second machine can get its own.

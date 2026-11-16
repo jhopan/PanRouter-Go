@@ -15,6 +15,33 @@ export interface PruneUsageResult {
   carriedTokens?: number
   cutoff: string
 }
+
+/**
+ * The stored automatic-backup settings. `githubToken` is never returned — the
+ * server answers with `githubTokenConfigured` instead, so the panel can say
+ * "saved — leave blank to keep" without holding the secret.
+ */
+export interface BackupConfig {
+  enabled: boolean
+  intervalHours: number
+  githubUser: string
+  /** Bare repo name; use `githubRepoUrl` to show or edit it as a URL. */
+  githubRepo: string
+  githubRepoOwner: string
+  githubRepoUrl: string
+  githubTokenConfigured: boolean
+}
+
+/** One mirror credential. Only the key id and the checksum are stored. */
+export interface BackupMirrorToken {
+  id: string
+  keyId: string
+  name: string
+  machineId: string
+  isActive: boolean
+  lastUsedAt: string | null
+  createdAt: string
+}
 // Typed API client for panrouter-go Native Dashboard
 
 export interface ProviderConnection {
@@ -2061,6 +2088,38 @@ export const api = {
       '/api/settings/database/vacuum',
       { method: 'POST' }
     ),
+
+  // Automatic backup: snapshots pushed to a private GitHub repo, plus the
+  // download tokens a mirror machine uses. Port of /api/backup/* upstream.
+  getBackupConfig: () => request<BackupConfig>('/api/backup/config'),
+  saveBackupConfig: (payload: {
+    enabled: boolean
+    intervalHours: number
+    githubUser: string
+    githubRepo: string
+    githubToken: string
+  }) =>
+    request<{ success: boolean } & BackupConfig>('/api/backup/config', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  runBackup: () =>
+    request<{ success: boolean; fileName: string; bytes: number }>('/api/backup/run', {
+      method: 'POST',
+    }),
+  getBackupTokens: () => request<{ tokens: BackupMirrorToken[] }>('/api/backup/tokens'),
+  createBackupToken: (payload: { name?: string; machineId?: string }) =>
+    request<{ success: boolean; token: string; keyId: string; name: string; machineId: string; createdAt: string }>(
+      '/api/backup/tokens',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+  setBackupTokenActive: (id: string, isActive: boolean) =>
+    request<{ success: boolean }>('/api/backup/tokens', {
+      method: 'PATCH',
+      body: JSON.stringify({ id, isActive }),
+    }),
+  deleteBackupToken: (id: string) =>
+    request<{ success: boolean }>(`/api/backup/tokens?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
   testRtk: (data: { text: string; config?: Record<string, unknown> }) =>
     request<{
       originalTokens: number
