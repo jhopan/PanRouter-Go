@@ -85,19 +85,19 @@ What's new:
 … up to 10 entries
 
 Release notes: https://github.com/jhopan/PanRouter-Go/releases/tag/v1.9.11
-    docker pull luqmenul/panrouter-go:1.9.11
+    curl -fsSL https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.sh | bash
 ```
 
 Only headings are listed, not their bullets: the full notes live on the
 release page, and a 700-line changelog is unreadable on a phone. A prerelease
-tag gets an experimental banner instead, because it is absent from `latest`.
+tag gets an experimental banner instead — and its install line is pinned to that
+tag (`VERSION=v1.9.11-exp.1 ...`) — because it is absent from `latest`.
 
 ## Why it lives in `release.yml`
 
-The `notify` job declares `needs: [binaries, docker]`, so it runs after the
-release page and the Docker image both exist. A separate workflow triggered by
-the tag push would run in parallel with the build and routinely publish a
-dead link.
+The `notify` job declares `needs: [binaries]`, so it runs after the release page
+exists; the link in the message resolves. A separate workflow triggered by the
+tag push would run in parallel with the build and routinely publish a dead link.
 
 `continue-on-error: true` is deliberate: a Telegram outage must not mark a
 successful release as failed.

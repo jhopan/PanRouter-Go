@@ -21,8 +21,17 @@ Upstream's model, kept: one immutable release and one rolling pointer.
 
 | Artifact | What it is | Who moves it |
 |---|---|---|
-| **version release** | tag `vX.Y.Z`, GitHub Release (marked Pre-release when `VERSION` carries `-exp.N`), five platform binaries + `SHA256SUMS.txt`, docker `:X.Y` and `:X.Y.Z` | the tag push, never edited afterwards |
-| **`latest` pointer** | GitHub `releases/latest`, `version.json` on `main`, docker `:latest` | the newest **non-prerelease** release only |
+| **version release** | tag `vX.Y.Z`, GitHub Release (marked Pre-release when `VERSION` carries `-exp.N`), five platform binaries + `SHA256SUMS.txt` | the tag push, never edited afterwards |
+| **`latest` pointer** | GitHub `releases/latest`, `version.json` on `main` | the newest **non-prerelease** release only |
+
+Nothing is published to an image registry. The release job used to push
+`luqmenul/panrouter-go` to Docker Hub and that was removed: a static binary does
+not need a container, the login step failed the whole run on every tag when the
+secrets were absent, and an image takes `panrouter-go update` out of reach (the
+binary being updated would live inside it). `Dockerfile` and `docker-compose.yml`
+stay in the repo, and `ci.yml` still builds the image on every PR
+(`Build Docker image (verify only)`) so they cannot rot — that job needs no
+credentials.
 
 Clients pull the pointer, never a pinned version: `panrouter-go update` reads
 `https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/version.json`
@@ -37,11 +46,12 @@ banner, and **Update now** → **Auto Update** calls `POST /api/version/update`.
 ## Experimental channel
 
 A `VERSION` carrying a prerelease (`1.1.0-exp.1`) is published as a GitHub
-**Pre-release** and docker `:exp`, `:1.1-exp`, `:1.1.0-exp.1`. GitHub excludes
+**Pre-release** and nothing else: no `latest` pointer moves. GitHub excludes
 pre-releases from `releases/latest`, and `bump-version.sh` leaves `version.json`
 untouched for a prerelease bump, so a stable install is never handed one.
 `autoApplyAllowed` enforces the same rule from the client side: a stable build
-never auto-applies a prerelease.
+never auto-applies a prerelease. Taking one deliberately is a pinned install —
+`VERSION=v1.1.0-exp.1 install.sh` — or the asset from the pre-releases page.
 
 ## Procedure
 
@@ -53,11 +63,12 @@ git tag v1.0.1
 git push origin <branch> --tags        # the tag is what publishes
 ```
 
-`.github/workflows/release.yml` then builds every target, writes `SHA256SUMS.txt`,
-publishes the GitHub Release (final or Pre-release, derived from the tag alone),
-and pushes the matching docker tags. Never re-tag a published version: clients
-already hold it, and the manifest would advertise the same number for different
-bytes.
+`.github/workflows/release.yml` then builds every target, writes `SHA256SUMS.txt`
+and publishes the GitHub Release (final or Pre-release, derived from the tag
+alone). For a stable tag that release is also the `latest` pointer clients read,
+because `version.json` on `main` already carries the same number. Never re-tag a
+published version: clients already hold it, and the manifest would advertise the
+same number for different bytes.
 
 The changelog entry for a release is assembled from `.changes/*.md` fragments —
 never by editing `CHANGELOG.md` in a feature PR (`make changelog-merge TAG=vX.Y.Z`
@@ -66,24 +77,22 @@ at release time). See [`.changes/README.md`](../.changes/README.md).
 ## Repository secrets the release job needs
 
 The `binaries` job publishes the GitHub Release with the default `GITHUB_TOKEN`
-and needs nothing configured. The other two jobs do:
+and needs nothing configured — a release with no secrets at all is a green run.
+The Telegram job is the only one with a requirement:
 
 | Secret | Used by | Failure if absent |
 |---|---|---|
-| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | `docker` | job fails with `Username and password required`; the GitHub Release is already published, but no `:latest` / `:X.Y` / `:X.Y.Z` image appears |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (and the topic id) | `notify` | skipped without failing the run |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (and the topic id) | `notify` | skipped without failing the run (`continue-on-error: true`) |
 
-A run that fails only in `docker` is recoverable without re-tagging: add the
-secrets, then re-run the failed jobs on the same tag
-(`gh run rerun <run-id> --failed`). Never delete and re-push the tag to force it.
+Nothing here is recoverable-only-by-re-tagging: the release page and its assets
+come from the `binaries` job alone.
 
 ## The 1.0.0 baseline
 
 `1.0.0` is the first release on the standalone scheme, published 2026-11-16 from
-tag `v1.0.0` (five platform binaries + `SHA256SUMS.txt`; the docker image is still
-pending the secrets above). It is a **downgrade** from `1.9.17` as semver, so the
-updater will not offer it: an install still on `1.9.x` keeps running that build
-until it is reinstalled once from the release assets (or `install.sh` /
-`install.ps1`). After that, every release is a normal forward step and the
-`latest` pointer does the work — `version.json` on `main`, `releases/latest` and
-docker `:latest` all move together when the next tag is pushed.
+tag `v1.0.0` (five platform binaries + `SHA256SUMS.txt`). It is a **downgrade**
+from `1.9.17` as semver, so the updater will not offer it: an install still on
+`1.9.x` keeps running that build until it is reinstalled once from the release
+assets (or `install.sh` / `install.ps1`). After that, every release is a normal
+forward step and the `latest` pointer does the work — `version.json` on `main`
+and `releases/latest` move together when the next stable tag is pushed.

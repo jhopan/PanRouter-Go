@@ -95,12 +95,13 @@ if [ -z "$entries" ]; then
 fi
 
 release_url="https://github.com/jhopan/PanRouter-Go/releases/tag/${TAG}"
-docker_image="${DOCKER_IMAGE:-luqmenul/panrouter-go}"
+install_cmd="curl -fsSL https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.sh | bash"
 
 # A prerelease must not read like a stable install: it is absent from `latest`,
-# so anyone pulling `latest` still gets the previous version.
+# so `panrouter-go update` still installs the previous stable version.
 if echo "$TAG" | grep -q -- '-'; then
   headline="🧪 Experimental build — not on latest, and 'panrouter-go update' will not offer it to a stable install."
+  install_cmd="VERSION=${TAG} ${install_cmd}"
 else
   headline="✅ Stable release"
 fi
@@ -120,7 +121,7 @@ ${entries}
 fi
 message="${message}
 Release notes: ${release_url}
-    docker pull ${docker_image}:${TAG#v}"
+    ${install_cmd}"
 
 # Telegram measures length in characters and rejects anything over 4096, so the
 # cap has to be enforced on characters — trimming by line count is not enough,
@@ -140,7 +141,7 @@ if [ "${#message}" -gt "$MAX_LEN" ]; then
 … more in the release notes
 
 Release notes: ${release_url}
-    docker pull ${docker_image}:${TAG#v}"
+    ${install_cmd}"
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

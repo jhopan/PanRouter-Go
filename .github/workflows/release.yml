@@ -8,10 +8,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
-
-env:
-  REGISTRY_IMAGE: luqmenul/panrouter-go
 
 jobs:
   # The release channel is derived from the tag and nothing else — not the
@@ -19,24 +15,24 @@ jobs:
   # you tag is what you publish.
   #
   #   stable       v1.10.0        -> GitHub Release (final)
-  #                                  docker :latest :1.10 :1.10.0
   #   experimental v1.10.0-exp.1  -> GitHub Release (PRERELEASE)
-  #                                  docker :exp :1.10-exp :1.10.0-exp.1
   #
-  # Both halves matter for user safety. GitHub excludes prereleases from
-  # /releases/latest, which is the endpoint `internal/updater` falls back to,
-  # so a stable install is never offered an experimental build. And
-  # `docker/metadata-action`'s `type=raw,value=latest,enable={{is_default_branch}}`
-  # was permanently false here — this workflow only ever runs on tags — which is
-  # why :latest had never moved at all. Both are replaced by the explicit
-  # per-channel tag lists computed below.
+  # The GitHub Release is the only artifact this workflow publishes. A stable
+  # tag also moves the `latest` pointer that every install follows: GitHub
+  # `releases/latest` excludes prereleases, so an experimental tag cannot reach
+  # a stable install through it.
+  #
+  # The image once built here was removed deliberately: `panrouter-go` ships a
+  # static binary, the operator runs it natively, and a docker job that cannot
+  # log in fails the whole run on every tag. `ci.yml` still builds the
+  # Dockerfile on every PR (`Build Docker image (verify only)`), which is what
+  # keeps it from rotting — that job needs no credentials.
   channel:
     name: Resolve release channel
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.resolve.outputs.channel }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
-      docker_tags: ${{ steps.resolve.outputs.docker_tags }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,12 +79,6 @@ jobs:
                 echo "  ./scripts/bump-version.sh <latest-stable>"
                 exit 1
               fi
-              # `%%-*` removes the longest suffix starting at the first dash,
-              # so the core survives regardless of how many dashes the
-              # prerelease identifier has; `%.*` then drops the patch. The
-              # result is the floating tag the matching stable release takes.
-              CORE="${VERSION%%-*}"
-              TAGS="exp ${CORE%.*}-exp $VERSION"
               ;;
             *)
               CHANNEL=stable
@@ -103,21 +93,16 @@ jobs:
                 echo "  ./scripts/bump-version.sh $VERSION"
                 exit 1
               fi
-              TAGS="latest ${VERSION%.*} $VERSION"
               ;;
           esac
 
           {
             echo "channel=$CHANNEL"
             echo "prerelease=$PRERELEASE"
-            echo "docker_tags<<EOF"
-            for t in $TAGS; do echo "type=raw,value=$t"; done
-            echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
           echo "channel:  $CHANNEL"
           echo "version:  $VERSION"
-          echo "docker:   $TAGS"
 
   binaries:
     name: Build release binaries
@@ -241,11 +226,12 @@ jobs:
             # after GitHub removes the common prefix.
             cat > /tmp/notes.md <<BANNER
           > **Experimental build.** Not published to \`latest\`, and \`panrouter-go update\`
-          > will not offer it to an install running a stable release. Track it
-          > explicitly:
+          > will not offer it to an install running a stable release. Take it
+          > explicitly — download the asset for your platform from this page and
+          > replace the running binary, or install it by version:
           >
           > \`\`\`sh
-          > docker pull ${REGISTRY_IMAGE}:${GITHUB_REF_NAME#v}
+          > VERSION=${GITHUB_REF_NAME} curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | bash
           > \`\`\`
           >
           > Issues found here are still worth reporting — but check the stable
@@ -292,50 +278,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  docker:
-    name: Build and push Docker image
-    needs: channel
-    runs-on: ubuntu-latest
-    environment: prod
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: ${{ needs.channel.outputs.docker_tags }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   # Announce the release to the Telegram group.
   #
-  # `needs: [binaries, docker]` is the whole design: it runs only after the
-  # release page and the image both exist, so the link in the message resolves.
-  # A separate workflow triggered by the tag push would fire in parallel with
-  # the build and routinely publish a 404 link.
+  # `needs: [binaries]` is the whole design: the release page is what the
+  # message links to, so the job waits for it to exist. A separate workflow
+  # triggered by the tag push would fire in parallel with the build and
+  # routinely publish a 404 link.
   #
   # continue-on-error is deliberate. A Telegram outage or a revoked token must
   # not turn a successful release red — the artifacts are already published by
@@ -343,7 +291,7 @@ jobs:
   # watching the run list.
   notify:
     name: Notify Telegram
-    needs: [binaries, docker]
+    needs: [binaries]
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:

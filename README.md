@@ -176,17 +176,29 @@ Claude Code / Codex / OpenClaw / Cursor / Cline Settings:
 **Alternatives:**
 
 ```bash
-# Docker — no build needed
+# Manual download (no installer script) — pick your file, no command line guesswork:
+# Windows → .exe | Mac M1+ → darwin-arm64 | Mac Intel → darwin-amd64
+# Linux VPS → linux-amd64 | Raspberry Pi → linux-arm64
+# then: chmod +x panrouter-go-<os>-<arch> && ./panrouter-go-<os>-<arch>
+```
+
+```bash
+# Container — build it yourself. No image is published to a registry:
+# run it natively unless you have a reason not to (see the note below).
+docker build -t panrouter-go .
 docker run -d --name panrouter-go --restart unless-stopped \
   -p 20130:20130 -v "$HOME/.panrouter:/data" \
   -e PORT=20130 -e DATA_DIR=/data \
   -e INITIAL_PASSWORD=your-secure-password \
-  luqmenul/panrouter-go:latest
-
-# Manual download — pick your file, no command line guesswork:
-# Windows → .exe | Mac M1+ → darwin-arm64 | Mac Intel → darwin-amd64
-# Linux VPS → linux-amd64 | Raspberry Pi → linux-arm64
+  panrouter-go
 ```
+
+> **Why no published image.** The release publishes binaries only. Docker adds a
+> daemon, a containerd shim and a second copy of the data path to a box that is
+> expected to be 1 vCPU, and it takes `panrouter-go update` out of reach — the
+> binary you would be updating lives inside the image, so an update becomes a
+> rebuild. `Dockerfile` and `docker-compose.yml` stay in the repo and CI builds
+> the image on every PR, so self-hosting it keeps working; nothing here needs it.
 
 📦 [All release binaries](https://github.com/jhopan/PanRouter-Go/releases/latest) • 🔨 [Build from source](#-setup-guide)
 
@@ -337,8 +349,8 @@ reproduces is tracked in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Each release publishes two artifacts, the way upstream does: an immutable
 `vX.Y.Z` release (binaries + `SHA256SUMS.txt`) and a rolling **`latest`** pointer
-(GitHub `releases/latest`, `version.json` on `main`, docker `:latest`) that
-`panrouter-go update` follows — so "update" always means "pull the pointer".
+(GitHub `releases/latest` plus `version.json` on `main`) that `panrouter-go
+update` follows — so "update" always means "pull the pointer".
 Release procedure: [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ### 🧪 Experimental builds
@@ -348,16 +360,24 @@ separately and are never offered to a normal install:
 
 - GitHub Releases marks them **Pre-release**, so `releases/latest` — the URL
   `panrouter-go update` falls back to — keeps pointing at the stable version.
-- Docker Hub tags them `exp` (`luqmenul/panrouter-go:exp`), never `latest`.
-
-```bash
-docker pull luqmenul/panrouter-go:exp
-```
+- `version.json` on `main` keeps advertising the last **stable** version, and
+  `bump-version.sh` refuses to point it at a prerelease, so the manifest cannot
+  leak one either. `autoApplyAllowed` enforces the same rule client-side.
 
 Opt in only if you want to help shake out bugs. `panrouter-go update` will not
-install one over a stable release — grab the asset for your platform from the
-[pre-releases page](https://github.com/jhopan/PanRouter-Go/releases) and
-replace the running binary with it.
+install one over a stable release — take it by version instead:
+
+```bash
+VERSION=v1.1.0-exp.1 \
+  curl -fsSL https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/install.sh | bash
+```
+
+That resolves the asset from that exact tag (the pin is what makes it
+experimental, not the command), and the tarball-free layout means the same
+installer covers every platform. Installing it by hand is equally fine: grab the
+asset for your platform from the
+[pre-releases page](https://github.com/jhopan/PanRouter-Go/releases) and replace
+the running binary with it.
 
 ### Build from source
 
