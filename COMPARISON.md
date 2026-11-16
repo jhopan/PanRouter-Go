@@ -1,10 +1,10 @@
 # panrouter-go vs Historical Upstream PanRouter
 
-This document compares the current native `panrouter-go` v1.9.1 with the local historical upstream checkout (`decolua/panrouter` v0.5.85, Next.js dashboard and gateway). It is not a provider-by-provider certification.
+This document compares the current native `panrouter-go` (version scheme tracked in `VERSION`; `1.0.0` is the first release on the standalone scheme) with the local historical upstream checkout (`decolua/panrouter` v0.5.85, Next.js dashboard and gateway). It is not a provider-by-provider certification.
 
 ## Version and comparison scope
 
-`panrouter-go` v1.9.1 is the current release (`VERSION`, `version.json`, `internal/updater.CurrentVersion`). The declared manifest/README sync target is upstream v0.5.85. `CHANGELOG.md` separately records two selected v0.5.86 parity ports and explicitly defers one feature; that does not make the whole v0.5.86 release synced. Treat the release declarations as a known documentation gap until they are reconciled.
+`panrouter-go` versions itself independently of upstream: `VERSION`, `version.json` and `internal/updater.CurrentVersion` all carry the same standalone semver (`1.0.0` on the current scheme), while upstream's four-part `0.5.x.x` is a parity target only — see [`docs/RELEASING.md`](docs/RELEASING.md). The declared manifest/README sync target is upstream v0.5.85. `CHANGELOG.md` separately records two selected v0.5.86 parity ports and explicitly defers one feature; that does not make the whole v0.5.86 release synced. Treat the release declarations as a known documentation gap until they are reconciled.
 
 Statuses below mean:
 

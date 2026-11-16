@@ -322,14 +322,19 @@ pre-releases from, so a stable install is never handed an experimental build.
 itself a pre-release may auto-update to anything, a stable build never
 auto-applies a pre-release. To run an experimental build deliberately, see below.
 
-**Version numbering.** This gateway versions itself (currently `1.x` semver, e.g.
-`1.9.17`); the upstream PanRouter baseline it reproduces is tracked separately in
-[`ARCHITECTURE.md`](ARCHITECTURE.md). Upstream's four-part version
-(`0.5.88.40`) is deliberately **not** adopted as this binary's version:
-`internal/updater/semver.go` parses three numeric fields, so a fourth component
-would compare equal to its neighbours, and every existing `1.9.x` install would
-see a `0.5.x` release as a *downgrade* and never be offered it. Mirroring
-upstream's version needs a migration release, not a renamed tag.
+**Version numbering.** This gateway versions itself — semver on its own scheme,
+`1.0.0` being the first release on it. It deliberately does **not** adopt upstream
+PanRouter's four-part `0.5.x.x`: `internal/updater/semver.go` parses three numeric
+fields, so a fourth component would compare equal to its neighbours, and a `0.5.x`
+manifest would read as a *downgrade* for every installed `1.x` — those installs
+would never be offered an update again. The upstream baseline this binary
+reproduces is tracked in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+Each release publishes two artifacts, the way upstream does: an immutable
+`vX.Y.Z` release (binaries + `SHA256SUMS.txt`) and a rolling **`latest`** pointer
+(GitHub `releases/latest`, `version.json` on `main`, docker `:latest`) that
+`panrouter-go update` follows — so "update" always means "pull the pointer".
+Release procedure: [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ### 🧪 Experimental builds
 
