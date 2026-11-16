@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"reflect"
 	"sync"
 )
 
@@ -58,7 +59,7 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	resp, err := base.RoundTrip(req)
-	if isProxyFailure(err, resp) {
+	if isProxyFailure(err, resp, transportConsultedAProxy(base, req)) {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -69,6 +70,38 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return direct.RoundTrip(directReq)
 	}
 	return resp, err
+}
+
+// transportConsultedAProxy reports whether this request went through a proxy on
+// the base leg. A proxy can only refuse a request that reached it: with no proxy
+// configured the direct leg is the same path, so a 403 from the application is the
+// application's answer and must not be replayed.
+//
+// A base transport that does not expose a Proxy func is reported as proxied —
+// pool-backed and tls-client transports route through whatever the operator
+// assigned, and their refusals are exactly what this transport exists to recover
+// from.
+func transportConsultedAProxy(base http.RoundTripper, req *http.Request) bool {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		// A pool-backed or tls-client transport routes through whatever the
+		// operator assigned; its refusals are what this wrapper exists to recover
+		// from, so it keeps the sniff.
+		return true
+	}
+	if transport.Proxy == nil {
+		return false
+	}
+	// The ambient environment is not an assignment. This repo already reads an
+	// env-inherited proxy as "not assigned" when it decides whether a refusal may
+	// be answered directly (proxiesViaAssignment), and the same distinction
+	// matters here: an application 403 served as text/plain must not be replayed
+	// just because HTTP_PROXY happens to be set in the process.
+	if reflect.ValueOf(transport.Proxy).Pointer() == reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
+		return false
+	}
+	proxyURL, err := transport.Proxy(req)
+	return err == nil && proxyURL != nil
 }
 
 // NewFallbackTransport wraps a transport with automatic direct fallback on proxy refusal.

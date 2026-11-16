@@ -118,9 +118,23 @@ func InsecureClientFor(proxyURL string) *http.Client {
 	return client
 }
 
-func isProxyFailure(err error, resp *http.Response) bool {
+// isProxyFailure reports whether an attempt failed because of the PROXY rather
+// than because of the upstream application.
+//
+// The response half is deliberately narrow. A 403 is the provider's own answer
+// unless the proxy says otherwise: `X-Proxy-Error` is the proxy speaking for
+// itself, and the text/plain sniff only means anything when a proxy was actually
+// consulted for this request. Without that gate a provider 403 served as
+// text/plain was read as a proxy refusal and the SAME request was replayed twice
+// more (measured: one call, three upstream requests), from a different egress and
+// with the identical per-turn ids — for a lane that bans accounts over repeated
+// request patterns, three copies of one turn is the pattern.
+func isProxyFailure(err error, resp *http.Response, proxyInUse bool) bool {
 	if resp != nil && resp.StatusCode == http.StatusForbidden {
-		if resp.Header.Get("X-Proxy-Error") != "" || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/plain") {
+		if resp.Header.Get("X-Proxy-Error") != "" {
+			return true
+		}
+		if proxyInUse && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/plain") {
 			return true
 		}
 	}
@@ -347,7 +361,7 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, url string,
 		if resp, err = replayInsecureTLS(ctx, proxyURLFor(client), method, url, headers, body); err != nil {
 			return nil, fmt.Errorf("upstream request after insecure TLS retry: %w", err)
 		}
-	case isProxyFailure(err, resp):
+	case isProxyFailure(err, resp, proxyURLFor(client) != "" || proxiesViaAssignment(client)):
 		if resp != nil {
 			resp.Body.Close()
 		}

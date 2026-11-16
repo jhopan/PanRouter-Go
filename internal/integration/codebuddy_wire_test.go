@@ -102,6 +102,30 @@ func TestCodeBuddyWireIdentityEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCodeBuddyIntlRefusalIsNotReplayed pins the transport contract for this lane:
+// one refused turn is ONE upstream request. A gateway that bans accounts over
+// repeated request patterns reads a replayed turn as three, and the replay was
+// happening on any refusal whose body sniffed as text/plain.
+func TestCodeBuddyIntlRefusalIsNotReplayed(t *testing.T) {
+	env := newEnv(t)
+
+	up := env.NewUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		// No Content-Type: Go sniffs text/plain, which is what a proxy refusal page
+		// looks like too. The body is CodeBuddy's own answer.
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":11140,"msg":"request illegal"}`))
+	})
+	env.AddConnection(t, "cb-refused-1", "codebuddy-intl", "refused account", up, "cb-token")
+
+	res := env.Post(t, "/v1/chat/completions", ChatBody("cbai/claude-opus-4-6", false))
+	if res.Status == http.StatusOK {
+		t.Fatalf("a refused turn must not be answered as a success: %s", truncate(res.Body))
+	}
+	if got := up.Count(); got != 1 {
+		t.Errorf("upstream requests = %d, want 1: the refusal must not be replayed", got)
+	}
+}
+
 // TestCodeBuddyBanRotationEndToEnd parks a banned account through the real router
 // and proves the turn still succeeds on the next one — the behaviour the field log
 // showed failing ("3 accounts refused — stopping rotation").
