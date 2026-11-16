@@ -63,15 +63,27 @@ The changelog entry for a release is assembled from `.changes/*.md` fragments �
 never by editing `CHANGELOG.md` in a feature PR (`make changelog-merge TAG=vX.Y.Z`
 at release time). See [`.changes/README.md`](../.changes/README.md).
 
+## Repository secrets the release job needs
+
+The `binaries` job publishes the GitHub Release with the default `GITHUB_TOKEN`
+and needs nothing configured. The other two jobs do:
+
+| Secret | Used by | Failure if absent |
+|---|---|---|
+| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | `docker` | job fails with `Username and password required`; the GitHub Release is already published, but no `:latest` / `:X.Y` / `:X.Y.Z` image appears |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (and the topic id) | `notify` | skipped without failing the run |
+
+A run that fails only in `docker` is recoverable without re-tagging: add the
+secrets, then re-run the failed jobs on the same tag
+(`gh run rerun <run-id> --failed`). Never delete and re-push the tag to force it.
+
 ## The 1.0.0 baseline
 
-`1.0.0` is the first release on the standalone scheme. It is a **downgrade** from
-`1.9.17` as semver, so the updater will not offer it: an install still on `1.9.x`
-keeps running that build until it is reinstalled once from the release assets
-(or `install.sh` / `install.ps1`). After that, every release is a normal forward
-step and the `latest` pointer does the work.
-
-Until `v1.0.0` is tagged and pushed, the repository has **no published releases**:
-`/releases/latest` returns 404, so `panrouter-go update`, `panrouter-go version`
-and both install one-liners have nothing to fetch. The tag is what creates the
-`latest` pointer — nothing else needs to move.
+`1.0.0` is the first release on the standalone scheme, published 2026-11-16 from
+tag `v1.0.0` (five platform binaries + `SHA256SUMS.txt`; the docker image is still
+pending the secrets above). It is a **downgrade** from `1.9.17` as semver, so the
+updater will not offer it: an install still on `1.9.x` keeps running that build
+until it is reinstalled once from the release assets (or `install.sh` /
+`install.ps1`). After that, every release is a normal forward step and the
+`latest` pointer does the work — `version.json` on `main`, `releases/latest` and
+docker `:latest` all move together when the next tag is pushed.
