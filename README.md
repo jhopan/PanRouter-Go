@@ -143,6 +143,21 @@ Administrator console. The Windows task runs as the current user at logon, so it
 reads that user's data dir rather than `SYSTEM`'s. Force a backend with
 `--backend systemd|launchd|openrc|runit|cron`.
 
+**Keep it current (one command):**
+
+```bash
+panrouter-go version     # current version, and whether a newer stable release exists
+panrouter-go update      # fetch the latest stable release, verify SHA-256, swap the binary, restart
+```
+
+The dashboard does the same without a terminal: the sidebar shows the version you
+are running, and when a newer stable release exists it shows
+`New version available: vX.Y.Z`. **Update now** opens the update dialog — read the
+release notes, then press **Auto Update** to download and apply it, or copy the
+`panrouter-go update` command. The process comes back on the new binary and
+`DATA_DIR` is untouched. Fine print, endpoints, and the stable/experimental
+channel rules: [Update](#-update).
+
 **2. Connect a FREE provider (no signup needed):**
 
 Dashboard → Providers → Connect **Kiro AI** (~50 credits/month free) or **OpenCode Free** (no auth) → Done!
@@ -262,6 +277,60 @@ Full schema, operator contract, and multi-process limits: [`DATABASE.md`](DATABA
 
 Download from [GitHub Releases](https://github.com/jhopan/PanRouter-Go/releases/latest), verify against `SHA256SUMS.txt`.
 
+### 🔄 Update
+
+One command, no package manager, no container:
+
+```bash
+panrouter-go version     # current version + latest available (check only, changes nothing)
+panrouter-go update      # apply the latest stable release, then restart
+```
+
+What `update` actually does (`internal/updater`): asks GitHub for the newest
+release, picks the asset matching this OS/arch, downloads `SHA256SUMS.txt` and
+**verifies the digest before touching the binary**, extracts it (raw ELF/Mach-O/PE,
+`.tar.gz`, or `.zip`), swaps it in place through a `.old`/`.new` rename so a
+running executable is replaceable on Windows too, and restarts the process on the
+new binary. If verification fails, nothing is replaced.
+
+The same flow from the dashboard — the WebUI is the check, not just a label:
+
+| Where | What it does |
+|---|---|
+| Sidebar (bottom) | shows the running version; shows `New version available: vX.Y.Z` when one exists |
+| **Update now** button | opens the update dialog: release notes, the copyable `panrouter-go update` command, and **Auto Update** |
+| **Auto Update** | `POST /api/version/update` — download, verify, apply, restart the process |
+| `AUTO_UPDATE=true` | background auto-apply on the periodic check (default `false`) |
+
+The endpoints behind it, in case you script it:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/version` | current version + `hasUpdate`, loaded by every dashboard page |
+| `GET` | `/api/version/status` | updater state, cached latest release |
+| `GET` | `/api/version/check` | force a fresh GitHub check |
+| `POST` | `/api/version/update` | apply now (SSE-safe; the process restarts) |
+| `POST` | `/api/version/auto-update` | toggle background auto-apply |
+| `POST` | `/api/version/shutdown` | graceful stop (in-flight streams finish) |
+
+`POST` routes need a dashboard session or a CLI token; a client API key is not
+enough.
+
+**Channels.** `update` follows `/releases/latest`, which GitHub excludes
+pre-releases from, so a stable install is never handed an experimental build.
+`autoApplyAllowed` enforces the same rule from the other side: a build that is
+itself a pre-release may auto-update to anything, a stable build never
+auto-applies a pre-release. To run an experimental build deliberately, see below.
+
+**Version numbering.** This gateway versions itself (currently `1.x` semver, e.g.
+`1.9.17`); the upstream PanRouter baseline it reproduces is tracked separately in
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Upstream's four-part version
+(`0.5.88.40`) is deliberately **not** adopted as this binary's version:
+`internal/updater/semver.go` parses three numeric fields, so a fourth component
+would compare equal to its neighbours, and every existing `1.9.x` install would
+see a `0.5.x` release as a *downgrade* and never be offered it. Mirroring
+upstream's version needs a migration release, not a renamed tag.
+
 ### 🧪 Experimental builds
 
 Unreleased work also ships as **experimental** builds. They are published
@@ -309,6 +378,47 @@ DATA_DIR=/srv/panrouter ./panrouter-go              # different data dir
 DB_PATH=/srv/panrouter/data.sqlite ./panrouter-go   # explicit SQLite file
 HOST=127.0.0.1 ./panrouter-go                     # localhost only, behind a reverse proxy
 ```
+
+### 💾 Backup & restore
+
+The whole gateway is one SQLite file — `DATA_DIR/db/data.sqlite` (`~/.panrouter/db/data.sqlite`
+by default, `%APPDATA%\panrouter` on Windows). OAuth tokens, connections, combos,
+API keys, plans and the usage ledger all live in it, so that file is the backup.
+Three ways to get one, and they are not equivalent:
+
+**1. Snapshot to a private GitHub repo (the scheduled one).** `internal/dbbackup`
+takes a `VACUUM INTO` copy — a consistent snapshot, not a plain file copy, so
+commits still sitting in the write-ahead log are included — and pushes it to a
+repo you nominate. The target **must be private**: the check is a hard gate, not
+a warning, because a public repo would publish every provider credential.
+
+- Configured through the API (there is no dashboard panel for it yet): `POST /api/backup/config`
+  takes the repo, token and interval (default **24 h**); `POST /api/backup/run` takes one now.
+- `GET /api/backup/download` streams the live `data.sqlite` to a holder of a backup token.
+- `GET|POST|PATCH|DELETE /api/backup/tokens` issue and revoke those tokens; each stores a
+  key id + CRC, never the secret, so a second machine can get its own.
+
+**2. Manual copy.** Stop the gateway first, then copy the file — or all three of
+`data.sqlite`, `data.sqlite-wal`, `data.sqlite-shm`:
+
+```bash
+panrouter-go stop          # or: panrouter-go service stop   (if you installed autostart)
+cp ~/.panrouter/db/data.sqlite ~/panrouter-backup-$(date +%F).sqlite
+panrouter-go start         # or: panrouter-go service start
+```
+
+That caveat is why the scheduled snapshot exists: `GET /api/backup/download`
+hands you the live file, which can miss the WAL while the gateway is writing.
+
+**3. Dashboard export.** Settings → **Runtime Storage** → *Download Backup* writes a
+**JSON payload** of dashboard content, not the database file — it is for moving
+configuration between installations, not for disaster recovery. Restore it with
+*Import Backup* on the same panel.
+
+**Restore:** stop the gateway, put the snapshot back at `DATA_DIR/db/data.sqlite`
+(delete a stale `-wal`/`-shm` beside it), start it. The schema bootstrap is
+additive-only — it creates missing tables and adds missing columns, never drops or
+retypes — so a snapshot from an older release opens.
 
 ### 🔑 Dashboard Login & Fresh Install
 
