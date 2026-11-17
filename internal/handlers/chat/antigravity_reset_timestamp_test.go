@@ -129,10 +129,19 @@ func TestQuotaResetTimestamp_LongestCarrierWins(t *testing.T) {
 	if got < 2*time.Hour+59*time.Minute {
 		t.Errorf("retryAfterWait = %v, want the 3h instant rather than the 120s echo", got)
 	}
-	// The announced window is still clamped by the provider ceiling so a
-	// nonsensical body cannot park an account forever.
-	if secs := retryableCooldownSec(http.StatusTooManyRequests, 2*time.Second, ue, "antigravity"); secs != int(maxResetCooldown/time.Second) {
-		t.Errorf("cooldown = %ds, want the %v ceiling", secs, maxResetCooldown)
+	// The announced window survives whole: Antigravity's free tier refills
+	// WEEKLY (upstream quotaWindows.js registers it as QUOTA_SCOPES.WEEKLY), so
+	// the ceiling for this lane is one weekly window and a 3h reset is inside
+	// it. Clamping it to the generic two hours would hand the account back
+	// while it was still out of quota.
+	if secs := retryableCooldownSec(http.StatusTooManyRequests, 2*time.Second, ue, "antigravity"); secs < int(3*time.Hour/time.Second) {
+		t.Errorf("cooldown = %ds, want the announced 3h window", secs)
+	}
+	// A window longer than the ceiling is still bounded by it, so a nonsensical
+	// body cannot park an account forever.
+	far := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResetOnlyBody(http.StatusTooManyRequests, time.Now().Add(30*24*time.Hour)))}
+	if secs := retryableCooldownSec(http.StatusTooManyRequests, 2*time.Second, far, "antigravity"); secs != int(maxWeeklyResetCooldown/time.Second) {
+		t.Errorf("cooldown = %ds, want the %v weekly ceiling", secs, maxWeeklyResetCooldown)
 	}
 }
 
@@ -162,7 +171,7 @@ func TestRateLimitResetHeaders(t *testing.T) {
 		wantOk bool
 	}{
 		{name: "delta seconds", header: http.Header{"X-Ratelimit-Reset-After": {"45"}}, want: 45 * time.Second, wantOk: true},
-		{name: "epoch seconds", header: http.Header{"X-Ratelimit-Reset": {strconv.FormatInt(time.Now().Add(2 * time.Minute).Unix(), 10)}}, want: 2 * time.Minute, wantOk: true},
+		{name: "epoch seconds", header: http.Header{"X-Ratelimit-Reset": {strconv.FormatInt(time.Now().Add(2*time.Minute).Unix(), 10)}}, want: 2 * time.Minute, wantOk: true},
 		{name: "epoch already past", header: http.Header{"X-Ratelimit-Reset": {"1"}}, wantOk: false},
 		{name: "nonsense", header: http.Header{"X-Ratelimit-Reset-After": {"soon"}}, wantOk: false},
 		{name: "absent", header: http.Header{}, wantOk: false},

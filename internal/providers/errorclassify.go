@@ -206,6 +206,29 @@ var ErrorRules = []ErrorRule{
 	{Provider: "minimax-code", Text: "insufficient balance", CooldownMs: int(minimaxPlanBlock / time.Millisecond), Quota: true},
 	{Provider: "minimax-code-global", Text: "insufficient balance", CooldownMs: int(minimaxPlanBlock / time.Millisecond), Quota: true},
 
+	// --- free-pi's own codes (checked before the shared quota wording) ---
+	// These are exact CODE values, and each one carries its own fixed cooldown
+	// (hungkevin/free-pi-cli-proxy server.mjs:1057-1120): the hourly cap clears
+	// at the hour boundary, and the daily allowance does not clear until 00:00.
+	//
+	// They must come BEFORE the shared quota-wording rows below: free-pi's
+	// daily-allowance body is
+	//   {"error":{"code":"insufficient_quota","message":"You exceeded your current quota."}}
+	// and that MESSAGE is the same wording Google's 403 quota refusal uses
+	// ("exceeded your current quota"). The generic row answered it with the flat
+	// one-hour quota cooldown, so free-pi's own taxonomy lost its two-minute
+	// cooldown and the account was parked for an hour instead.
+	//
+	// A code is more specific than prose, which is the same reason these rows
+	// sit above the wording rows.
+	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
+	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
+	{Text: "insufficient_quota", CooldownMs: cooldownLong},
+	{Text: "billing_error", CooldownMs: cooldownLong},
+	{Text: "budgetlimiterror", CooldownMs: cooldownLong},
+	{Text: "gousagelimiterror", CooldownMs: cooldownLong},
+	{Text: "free_pi_token_expired", CooldownMs: cooldownAuthDead},
+
 	// --- Quota / credit exhaustion (checked before generic rules) ---
 	// A spent budget is not a transient throttle: give it the long cooldown
 	// instead of the 30s transient default. Without this, "insufficient
@@ -220,6 +243,13 @@ var ErrorRules = []ErrorRule{
 	{Text: "insufficient quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "monthly limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "frequency limit", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	// Google/Gemini/Antigravity spent-quota wording. Both spellings, because the
+	// body carries `RESOURCE_EXHAUSTED` as a field value and the message spells it
+	// out in words.
+	{Text: "resource_exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "resource has been exhausted", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "individual quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
+	{Text: "exceeded your current quota", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "payment required", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	// TokenHarbor's free tier answers 429 with "You've used this period's free
 	// allowance. Your next rolling 7-day period starts on ...". The status
@@ -300,14 +330,6 @@ var ErrorRules = []ErrorRule{
 	// Short cooldown on purpose — it is not an account verdict.
 	{Text: "<!doctype html", CooldownMs: cooldownShort},
 
-	{Text: "rate_limit_exceeded", CooldownMs: cooldownShort},
-	{Text: "creditlimitexceeded", CooldownMs: cooldownLong},
-	{Text: "insufficient_quota", CooldownMs: cooldownLong},
-	{Text: "billing_error", CooldownMs: cooldownLong},
-	{Text: "budgetlimiterror", CooldownMs: cooldownLong},
-	{Text: "gousagelimiterror", CooldownMs: cooldownLong},
-	{Text: "free_pi_token_expired", CooldownMs: cooldownAuthDead},
-
 	// ── Free-window refusals (upstream QUOTA_EXHAUSTED_SIGNALS) ────────────
 	// A provider that meters a free tier names the spent WINDOW rather than the
 	// account ("daily limit exceeded", "weekly quota reached"), and those wordings
@@ -349,8 +371,7 @@ var ErrorRules = []ErrorRule{
 	{Text: "credit balance is too low", CooldownMs: QuotaExhaustedCooldownMs, Quota: true},
 	{Text: "capacity", Backoff: true},
 	{Text: "overloaded", Backoff: true},
-	{Text: "resource_exhausted", Backoff: true},
-	{Text: "resource has been exhausted", Backoff: true},
+
 	{Text: "model_capacity_exhausted", Backoff: true},
 	{Text: "server is temporarily unavailable", Backoff: true},
 
@@ -438,6 +459,18 @@ var quotaExhaustedPatterns = []string{
 	// the real reset instead of guessing.
 	"monthly_request_count",
 	"you have reached the limit",
+	// Antigravity/Google quota refusals. The generation endpoint answers
+	// `429 {"error":{"code":429,"message":"Resource has been exhausted (e.g. check
+	// quota).","status":"RESOURCE_EXHAUSTED"}}` — the quota evidence is the STATUS
+	// field, with an underscore, so the spaced spelling below never matched and the
+	// verdict fell to the burst rule: the account was locked for 2 seconds and
+	// re-dialled for the rest of the week. Upstream also parks on "Individual quota
+	// reached ... Resets in 74h19m34s", "exceeded your current quota" (403) and
+	// "upgrade your subscription to increase".
+	"resource_exhausted",
+	"individual quota",
+	"exceeded your current quota",
+	"upgrade your subscription to increase",
 	// CodeBuddy words a spent model quota as a frequency limit and states when
 	// it resets: "usage exceeds frequency limit ... reset at <timestamp>". It is
 	// not a transient throttle, so it belongs with the exhausted budgets rather

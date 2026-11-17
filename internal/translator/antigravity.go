@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -309,7 +310,26 @@ var (
 	// literal single space in "Nous Research" — upstream does not accept
 	// other whitespace between the two words, and a port that accepted more
 	// would rewrite phrasings upstream leaves alone.
-	hermesIdentityRegex = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
+	// claudeCodeIdentityRegex matches the sentence Anthropic's Claude Code
+	// prepends to its own system prompt. Measured against the live gateway
+	// (2026-11-17, daily-cloudcode-pa `v1internal:generateContent`, one account,
+	// one model, only the system prompt varying):
+	//
+	//   "You are Claude Code."                                            -> 429 RESOURCE_EXHAUSTED
+	//   "you are claude code, anthropic's official cli for claude."        -> 429 RESOURCE_EXHAUSTED
+	//   "You are an assistant built as Anthropic's official CLI for Claude." -> 200
+	//   "You are a Claude agent, built on Anthropic's Claude Agent SDK."    -> 200
+	//   "x-anthropic-billing-header: ..."                                   -> 200
+	//   "You like the name Claude." / "You are opencode..."                 -> 200
+	//
+	// So the fingerprint is the identity phrase itself, and the 429 is a
+	// filtering verdict rather than quota: the same account served a 200 for a
+	// neutral prompt seconds earlier while its weekly bucket still showed 61%
+	// remaining. The reference's own rewrite table does not carry this row yet,
+	// which is why PanRouter hits the same refusal; this port keeps the prose
+	// around it and replaces only the sentence.
+	claudeCodeIdentityRegex = regexp.MustCompile(`(?i)you are claude code[^.\n]*\.?`)
+	hermesIdentityRegex     = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
 )
 
 // normalizeHarnessMarkers neutralizes harness fingerprint tags in system text.
@@ -357,6 +377,11 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 	text = claudeBillingHeaderRegex.ReplaceAllString(text, "")
 	text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	if isSystemInstruction {
+		// Only the system instruction carries the caller's client identity, and
+		// only that text is what the backend fingerprints. A user message that
+		// quotes the phrase is the user's own content and stays untouched.
+		text = claudeCodeIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
+		// The harness marker names are fingerprints of the system text too.
 		text = normalizeHarnessMarkers(text)
 		// Upstream applies this row to the system instruction only: the
 		// caller brands its own client there, and the backend flags
@@ -752,15 +777,23 @@ func antigravityBuildIdentity(sessionID, model, requestType string, contentCount
 	}
 }
 
-// antigravityAgentLabels is the labels bag upstream captured from the shipped
-// Hub 2.32.1: cascade/root-cascade/trajectory/request ids, the step index and
-// the used_* flags, all strings. `model_enum` is the Hub's own placeholder
-// table, which this port has no mapping for, so it is omitted rather than
-// guessed — upstream omits it for the same reason.
+// antigravityAgentLabels is the labels bag the shipped Hub 2.32.1 sends on an
+// agent turn: cascade/root-cascade/trajectory/request ids, the step index, the
+// used_* flags and `model_enum`, all strings.
+//
+// `model_enum` used to be omitted here because this port had no mapping for
+// it — the reference omits it for the same reason. The mapping is not
+// guesswork: the shipped client publishes the enum for every model it serves
+// in the catalog it fetches itself (v1internal:fetchAvailableModels), and puts
+// exactly that value in this bag. See antigravity_model_enum.go for the
+// captured table.
+//
+// The enum is sent for the model the turn actually runs, and a model the
+// client does not publish gets none: the bag stays the client's own shape.
 func antigravityAgentLabels(id antigravityEnvelopeIdentity, model string) map[string]string {
 	lower := strings.ToLower(model)
 	stepIndex := strconv.Itoa(max(id.Step-1, 0))
-	return map[string]string{
+	labels := map[string]string{
 		"cascade_id":               id.ConversationID,
 		"last_step_index":          stepIndex,
 		"request_id":               id.TrajectoryID + "-" + stepIndex,
@@ -770,6 +803,10 @@ func antigravityAgentLabels(id antigravityEnvelopeIdentity, model string) map[st
 		"used_claude_conservative": "false",
 		"used_non_gemini_model":    strconv.FormatBool(!strings.HasPrefix(lower, "gemini")),
 	}
+	if enum := AntigravityModelEnumName(model); enum != "" {
+		labels["model_enum"] = enum
+	}
+	return labels
 }
 
 // antigravityBuildRequestID builds the IDE request ID in the same shape as the
@@ -779,13 +816,19 @@ func antigravityBuildRequestID(sessionID, model, requestType string, contentCoun
 }
 
 // hardenAntigravityRequest strips blacklisted thinking/reasoning fields Google
-// rejects, caps maxOutputTokens at maxAntigravityOutputTokens, and stamps the
-// agent identity the envelope needs (sessionId + labels). sessionID/labels are
-// empty for a bare hardening pass.
+// rejects, caps maxOutputTokens at the model's own published budget, and stamps
+// the agent identity the envelope needs (sessionId + labels). sessionID/labels
+// are empty for a bare hardening pass.
 //
 // Without an identity it returns the request byte-for-byte intact so thought
 // signatures on functionCall/thought parts are never re-encoded.
-func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[string]string) []byte {
+//
+// wireModel is the id the backend serves (the one the client's own catalog
+// uses). It decides two things the shipped client decides the same way: the
+// output budget (65536 for the Gemini 3.8 family, 65535 for the 2.5 family,
+// 64000 for the Claude family) and the thinking dialect (the Gemini families
+// speak thinkingLevel, the Claude family speaks thinkingBudget).
+func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[string]string, wireModel string) []byte {
 	var m map[string]any
 	if err := json.Unmarshal(geminiBody, &m); err != nil {
 		return geminiBody
@@ -813,8 +856,16 @@ func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[st
 
 	gc, _ := m["generationConfig"].(map[string]any)
 	if gc != nil {
-		if v, ok := gc["maxOutputTokens"].(float64); ok && v > maxAntigravityOutputTokens {
-			gc["maxOutputTokens"] = float64(maxAntigravityOutputTokens)
+		// The output budget is the model's own published figure, not one global
+		// cap: the shipped client sends 65536 for the 3.8 family, 65535 for the
+		// 2.5 family and 64000 for Claude. A model the client does not publish
+		// keeps the shared ceiling.
+		cap := maxAntigravityOutputTokens
+		if published := AntigravityMaxOutputTokens(wireModel); published > 0 {
+			cap = published
+		}
+		if v, ok := gc["maxOutputTokens"].(float64); ok && v > float64(cap) {
+			gc["maxOutputTokens"] = float64(cap)
 			changed = true
 		}
 		// Ensure maxOutputTokens strictly exceeds thinkingBudget to prevent 400 INVALID_ARGUMENT (PR #3981)
@@ -828,8 +879,8 @@ func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[st
 			curMax, hasMax := gc["maxOutputTokens"].(float64)
 			if !hasMax || curMax <= thinkingBudget {
 				newMax := thinkingBudget + thinkingHeadroomTokens
-				if newMax > maxAntigravityOutputTokens {
-					newMax = maxAntigravityOutputTokens
+				if newMax > float64(cap) {
+					newMax = float64(cap)
 				}
 				gc["maxOutputTokens"] = newMax
 				changed = true
@@ -984,6 +1035,26 @@ func fixAntigravityContents(req *GeminiRequest, model string) bool {
 	return false
 }
 
+// antigravityNumericSessionID is upstream `toNumericSessionId`
+// (open-sse/utils/sessionManager.js): an already-numeric id passes through, and
+// any other value becomes a stable negative number so the Hub always sees the
+// id shape it emits itself.
+func antigravityNumericSessionID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if antigravityNumericIDRe.MatchString(trimmed) {
+		return trimmed
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	n := new(big.Int).SetBytes(sum[:8])
+	n.SetBit(n, 63, 0) // 0x7fffffffffffffff
+	return "-" + n.String()
+}
+
+var antigravityNumericIDRe = regexp.MustCompile(`^-?\d+$`)
+
 // WrapForAntigravity wraps a standard Gemini request in Antigravity API envelope.
 // sessionID scopes conversation and trajectory UUIDs per connection or client session.
 func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionID ...string) ([]byte, error) {
@@ -1026,16 +1097,33 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionI
 		}
 	}
 
-	sess := projectID
+	// The Hub names a conversation with a SIGNED NUMERIC id
+	// (`toNumericSessionId` upstream): a numeric client session passes through,
+	// anything else is folded onto `-<sha256 first 8 bytes & 0x7fff...>` so the
+	// same conversation keeps the same number. Echoing the project id — the
+	// previous fallback — put the literal project name where an id belongs and
+	// made every conversation of that project one session.
+	sess := antigravityNumericSessionID(projectID)
 	if len(sessionID) > 0 && sessionID[0] != "" {
-		sess = sessionID[0]
+		sess = antigravityNumericSessionID(sessionID[0])
 	}
 
 	// The incoming requestId was read above, before the cleaning pass dropped the
 	// unmodelled field; it now decides the envelope identity.
 	identity := antigravityBuildIdentity(sess, modelName, antigravityRequestTypeAgent, contentCount, incomingRequestID)
 
-	geminiBody = hardenAntigravityRequest(geminiBody, sess, antigravityAgentLabels(identity, modelName))
+	geminiBody = hardenAntigravityRequest(geminiBody, sess, antigravityAgentLabels(identity, modelName), modelName)
+	// The thinking config goes on the wire in the dialect the model's family
+	// speaks: thinkingLevel for the Gemini families, thinkingBudget for the
+	// Claude family and gpt-oss. It runs BEFORE the budget pass below, because
+	// that pass needs the thinking budget to size the output budget: Claude
+	// answers 400 "`max_tokens` must be greater than `thinking.budget_tokens`"
+	// when the request carries a thinking budget and no output budget.
+	geminiBody = antigravityApplyWireThinking(geminiBody, modelName)
+	geminiBody = antigravityApplyOutputBudget(geminiBody, modelName)
+	// The lane's prompting shape: the client's own identity opens the system
+	// instruction, and a user turn's text is wrapped in the request tags.
+	geminiBody = antigravityApplyPromptShape(geminiBody)
 
 	wrapper := AntigravityRequest{
 		Project:   projectID,

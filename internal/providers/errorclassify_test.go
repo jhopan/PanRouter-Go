@@ -19,13 +19,29 @@ func TestClassifyError_CapacityExhausted(t *testing.T) {
 	}
 }
 
+// TestClassifyError_ResourceExhausted429 pins the verdict Google answers a
+// spent Antigravity/Cloud Code quota with:
+//
+//	429 {"error":{"code":429,"message":"Resource has been exhausted (e.g. check
+//	     quota).","status":"RESOURCE_EXHAUSTED"}}
+//
+// Upstream lists `resource_exhausted` in QUOTA_EXHAUSTED_SIGNALS
+// (open-sse/config/quotaWindows.js:196), and every signal in that list is a
+// daily-quota rule: `shouldFallback: true`, `newBackoffLevel: 0` and a
+// cooldown the provider's window decides. The exponential ladder must NOT
+// advance here — the account is empty, not chatty, and a growing backoff on it
+// is what re-dials a guaranteed-failed call every few seconds for the rest of
+// the window.
 func TestClassifyError_ResourceExhausted429(t *testing.T) {
 	cls := ClassifyError(http.StatusTooManyRequests, "Resource has been exhausted (e.g. check quota). RESOURCE_EXHAUSTED", 0)
 	if !cls.ShouldFallback {
 		t.Error("expected fallback for 429 resource exhausted")
 	}
-	if cls.NewBackoffLevel != 1 {
-		t.Errorf("expected backoff level 1, got %d", cls.NewBackoffLevel)
+	if !cls.Quota {
+		t.Errorf("a spent quota must be a quota verdict, not a burst: %+v", cls)
+	}
+	if cls.NewBackoffLevel != 0 {
+		t.Errorf("expected backoff level 0, got %d", cls.NewBackoffLevel)
 	}
 }
 

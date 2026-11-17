@@ -114,6 +114,11 @@ var quotaWindowScopes = map[string]quotaScope{
 	// no reset was clamped to the generic two-hour ceiling, so a monthly-capped
 	// account returned to rotation the same afternoon.
 	"kiro": scopeMonthly,
+	// Antigravity's free tier refills WEEKLY, and its reading names the moment
+	// (`gemini_weekly.resetAt`). Without the entry a spent quota was clamped by the
+	// generic ceilings, and the classifier's flat hour was what the account waited.
+	"antigravity": scopeWeekly,
+	"ag":          scopeWeekly,
 }
 
 // scopeFor resolves a provider id (or one of its aliases) to the quota scope it
@@ -339,6 +344,19 @@ func (h *ChatHandler) cooldownSecFor(connID, provider string, ue *upstreamError,
 				return wait
 			}
 		}
+	}
+	// A spent Google/Antigravity quota names its window weekly. The reading the
+	// tracker already holds is the reference's `usageKey: gemini_weekly`; the
+	// calendar fallback is the next Monday 00:00 UTC. Without this the account was
+	// parked for the classifier's flat hour (or, worse, the 2s burst base) and
+	// re-dialled all week.
+	if providers.ResolveAlias(provider) == "antigravity" && isQuotaExhaustionVerdict(ue.StatusCode, provider, errorText, ue, cls) {
+		now := time.Now().UTC()
+		until := antigravityQuotaResetFor(connID, now)
+		if secs := ceilSeconds(min(until.Sub(now), maxCooldownFor(provider))); secs > 0 {
+			return secs
+		}
+		return cooldownSec
 	}
 	if !KiroMonthlyVerdict(provider, ue.StatusCode, errorText) {
 		return cooldownSec

@@ -131,7 +131,12 @@ func TestMaxCooldownFor(t *testing.T) {
 		want     time.Duration
 	}{
 		{"openai", maxResetCooldown},
-		{"antigravity", maxResetCooldown},
+		// Antigravity's free tier refills WEEKLY (upstream quotaWindows.js:
+		// `antigravity: { scope: QUOTA_SCOPES.WEEKLY, usageKey: "gemini_weekly" }`),
+		// so the reset it names is at most one window out. A two-hour ceiling
+		// handed the account back while it was still out of quota, and the
+		// request was re-dialled for the rest of the week.
+		{"antigravity", maxWeeklyResetCooldown},
 		{"deepseek-web", deepSeekWebMaxMuteCooldown},
 		{"codebuddy-intl", maxMonthlyResetCooldown},
 		{"codebuddy-cn", maxMonthlyResetCooldown},

@@ -240,8 +240,8 @@ func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
 	}
 
 	inner := unwrapInnerRequest(t, wrapped)
-	if got, _ := inner["sessionId"].(string); got != "sess-1" {
-		t.Errorf("inner sessionId = %q, want sess-1", got)
+	if got, _ := inner["sessionId"].(string); !antigravityNumericSessionIDRe.MatchString(got) {
+		t.Errorf("inner sessionId = %q, want a signed numeric id", got)
 	}
 	labels, _ := inner["labels"].(map[string]any)
 	if labels == nil {
@@ -757,9 +757,14 @@ func TestWrapForAntigravity_NormalizesTriggerSystemPrompt(t *testing.T) {
 		t.Fatalf("WrapForAntigravity failed: %v", err)
 	}
 	inner := unwrapInnerRequest(t, wrapped)
-	si, _ := inner["system_instruction"].(map[string]any)
+	// The Cloud Code lane names the field `systemInstruction` (camelCase), the
+	// way the shipped client and the reference both send it.
+	si, _ := inner["systemInstruction"].(map[string]any)
 	if si == nil {
-		t.Fatal("system_instruction missing from wrapped request")
+		t.Fatalf("systemInstruction missing from wrapped request: %v", inner)
+	}
+	if _, ok := inner["system_instruction"]; ok {
+		t.Errorf("the snake_case spelling must not survive on this lane: %v", inner)
 	}
 	parts, _ := si["parts"].([]any)
 	if len(parts) == 0 {
@@ -909,6 +914,11 @@ func unwrapInnerRequest(t *testing.T, wrapped []byte) map[string]any {
 }
 
 var antigravityRequestIDRe = regexp.MustCompile(`^agent/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\d+/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\d+$`)
+
+// antigravityNumericSessionIDRe is the wire shape of a session id on the
+// Antigravity lane: a signed number, as the Hub itself sends
+// (`sessionId: -3750763034362895579` in the 2.32.1 capture).
+var antigravityNumericSessionIDRe = regexp.MustCompile(`^-?\d+$`)
 
 func TestWrapForAntigravity_CapAndRequestID(t *testing.T) {
 	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":100000}}`)

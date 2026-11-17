@@ -137,11 +137,17 @@ func TestSanitizeFunctionName(t *testing.T) {
 // (open-sse/executors/antigravity.js:217-218, `toNumericSessionId(raw) || raw`),
 // so a caller that sends a numeric id must still get a well-formed envelope.
 //
-// This is a characterisation test, not a fix: the port derives the envelope
-// session from the session it is handed (a header/connection id, always a Go
-// string), so the wire field can never be a number — a numeric value in the
-// client's own body is replaced, not decoded into a typed field, and cannot
-// break the marshal.
+// The wire field is a SIGNED NUMERIC id, always: a numeric client session
+// passes through, and anything else is folded onto a stable negative number
+// (`toNumericSessionId`: sha256 → high 8 bytes → `& 0x7fff…` → `-N`). The
+// shipped client sends the same shape (`sessionId: -3750763034362895579` in
+// the Hub 2.32.1 capture), and a literal session name on the wire is a
+// fingerprint the backend does not recognise.
+//
+// The client's own body value is replaced rather than decoded into a typed
+// field: the port derives the envelope session from the session it is handed (a
+// header/connection id, always a Go string), so a numeric value in the body
+// cannot break the marshal.
 func TestWrapForAntigravity_SessionIDShapes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -169,8 +175,23 @@ func TestWrapForAntigravity_SessionIDShapes(t *testing.T) {
 			if !ok || sid == "" {
 				t.Fatalf("request.sessionId = %#v, want a non-empty string", envelope.Request["sessionId"])
 			}
-			if sid != "sess-derived" {
-				t.Errorf("request.sessionId = %q, want the derived session", sid)
+			if !antigravityNumericSessionIDRe.MatchString(sid) {
+				t.Errorf("request.sessionId = %q, want a signed numeric id", sid)
+			}
+			// The same session keeps the same number, so a conversation stays one
+			// conversation across turns.
+			again, err := translator.WrapForAntigravity([]byte(tt.body), "proj-1", "gemini-3.8-flash-medium", "sess-derived")
+			if err != nil {
+				t.Fatalf("WrapForAntigravity: %v", err)
+			}
+			var second struct {
+				Request map[string]any `json:"request"`
+			}
+			if err := json.Unmarshal(again, &second); err != nil {
+				t.Fatalf("the envelope is not decodable: %v", err)
+			}
+			if got, _ := second.Request["sessionId"].(string); got != sid {
+				t.Errorf("sessionId changed between turns: %q then %q", sid, got)
 			}
 		})
 	}

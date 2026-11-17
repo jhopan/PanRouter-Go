@@ -633,7 +633,7 @@ func TestHardenAntigravityRequest_GuardsThinkingBudget(t *testing.T) {
 		}
 	}`)
 
-	hardened := hardenAntigravityRequest(reqBody, "", nil)
+	hardened := hardenAntigravityRequest(reqBody, "", nil, "gemini-3.8-flash-medium")
 	var m map[string]any
 	if err := json.Unmarshal(hardened, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)

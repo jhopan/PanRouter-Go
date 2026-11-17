@@ -92,6 +92,13 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 			sendBody = wrapped
 		case projectID != "":
 			sessID := handlerutil.GetSessionID(ctx)
+			// The Antigravity lane speaks its own thinking dialect, per model
+			// family: the Gemini families carry thinkingLevel, the Claude
+			// family and gpt-oss carry thinkingBudget. The shipped client sends
+			// that on every agent turn, and the level/budget comes from the
+			// client's own effort or the model's own tier.
+			wireModel := translator.AntigravityUpstreamModel(modelName)
+			geminiBody = translator.AntigravityThinkingFor(geminiBody, body, wireModel)
 			wrapped, err := translator.WrapForAntigravity(geminiBody, projectID, modelName, sessID)
 			if err != nil {
 				return nil, fmt.Errorf("wrap for antigravity: %w", err)
