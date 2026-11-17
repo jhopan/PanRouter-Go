@@ -42,21 +42,22 @@ func antigravityApplyOutputBudget(geminiBody []byte, wireModel string) []byte {
 		}
 	}
 
-	budget := float64(published)
-	if cur, ok := gc["maxOutputTokens"].(float64); ok && cur > 0 && cur < budget {
-		// The client named a smaller budget: it keeps its own.
-		budget = cur
+	// The figure the client asked for is already on the body: the thinking pass
+	// wrote it from the CLIENT's own request, because only that pass can tell a
+	// request from the translator's floor. This pass only enforces the two
+	// rules the backend imposes on it.
+	budget, hasBudget := gc["maxOutputTokens"].(float64)
+	if !hasBudget || budget <= 0 {
+		budget = float64(published)
+	}
+	if budget > float64(published) {
+		budget = float64(published)
 	}
 	if thinkingBudget > 0 && budget <= thinkingBudget {
 		budget = thinkingBudget + thinkingHeadroomTokens
 		if budget > float64(published) {
 			budget = float64(published)
 		}
-	}
-	if budget <= thinkingBudget {
-		// The published figure cannot hold the thinking budget, so the budget
-		// is the thinking budget plus the headroom the model allows.
-		budget = thinkingBudget + thinkingHeadroomTokens
 	}
 	gc["maxOutputTokens"] = budget
 	m["generationConfig"] = gc

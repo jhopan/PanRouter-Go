@@ -221,6 +221,115 @@ func TestAntigravityClaudeBudgetFollowsTheRequestedLevel(t *testing.T) {
 	}
 }
 
+// The budget a budget-dialect model gets when the CALLER asked for no
+// thinking at all is the one the shipped client publishes for it: 1024 for the
+// Claude family, 8192 for gpt-oss.
+//
+// The wrap step alone is not enough to pin this: the production path runs the
+// thinking pass FIRST (AntigravityThinkingFor), and that pass is where a
+// budget-dialect model used to be folded onto the level table's default tier —
+// medium, so 8192 — instead of the published budget. The unit test that
+// wrapped a bare body could not see it, because the bare body carries no
+// thinking for the pass to rewrite.
+//
+// This test runs the two steps in the order the proxy runs them.
+func TestAntigravityBudgetFamilyDefaultBudgetOnTheProductionPath(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"claude-sonnet-4-6", 1024},
+		{"gpt-oss-120b-medium", 8192},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			// The proxy's order: translate, then the thinking pass, then wrap.
+			geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+			wireModel := translator.AntigravityUpstreamModel(tt.model)
+			geminiBody = translator.AntigravityThinkingFor(geminiBody, []byte(`{"model":"`+tt.model+`","messages":[{"role":"user","content":"hi"}]}`), wireModel)
+			wrapped, err := translator.WrapForAntigravity(geminiBody, "aicode-consumers", tt.model, "sess-probe")
+			if err != nil {
+				t.Fatalf("WrapForAntigravity(%q): %v", tt.model, err)
+			}
+			var envelope struct {
+				Request map[string]any `json:"request"`
+			}
+			if err := json.Unmarshal(wrapped, &envelope); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			gc, _ := envelope.Request["generationConfig"].(map[string]any)
+			tc, _ := gc["thinkingConfig"].(map[string]any)
+			if tc == nil {
+				t.Fatalf("no thinkingConfig in %v", envelope.Request)
+			}
+			if _, ok := tc["thinkingLevel"]; ok {
+				t.Errorf("thinkingConfig carries a level on a budget family: %v", tc)
+			}
+			if got, _ := tc["thinkingBudget"].(float64); got != tt.want {
+				t.Errorf("thinkingBudget = %v, want %v (the budget the shipped client publishes)", got, tt.want)
+			}
+		})
+	}
+}
+
+// The output budget on the wire is the model's published figure when the
+// caller named none — 64000 for the Claude family, 32768 for gpt-oss — and
+// the client's own smaller figure when it named one.
+//
+// The published figure is the one the shipped client sends, and the
+// translator's own floor is NOT a request: the Gemini translation writes a
+// floor into maxOutputTokens, and a floor mistaken for the client's number
+// pinned a Claude turn to 8192 (and, once the thinking budget moved earlier,
+// to 9216) instead of 64000.
+func TestAntigravityOutputBudgetOnTheProductionPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		clientBody string
+		wantBudget float64
+	}{
+		{
+			name:       "no client budget keeps the published figure",
+			model:      "claude-sonnet-4-6",
+			clientBody: `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`,
+			wantBudget: 64000,
+		},
+		{
+			name:       "no client budget keeps the published figure for gpt-oss",
+			model:      "gpt-oss-120b-medium",
+			clientBody: `{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hi"}]}`,
+			wantBudget: 32768,
+		},
+		{
+			name:       "a smaller client budget is kept",
+			model:      "claude-sonnet-4-6",
+			clientBody: `{"model":"claude-sonnet-4-6","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`,
+			wantBudget: 4096,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+			wireModel := translator.AntigravityUpstreamModel(tt.model)
+			geminiBody = translator.AntigravityThinkingFor(geminiBody, []byte(tt.clientBody), wireModel)
+			wrapped, err := translator.WrapForAntigravity(geminiBody, "aicode-consumers", tt.model, "sess-probe")
+			if err != nil {
+				t.Fatalf("WrapForAntigravity(%q): %v", tt.model, err)
+			}
+			var envelope struct {
+				Request map[string]any `json:"request"`
+			}
+			if err := json.Unmarshal(wrapped, &envelope); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			gc, _ := envelope.Request["generationConfig"].(map[string]any)
+			if got, _ := gc["maxOutputTokens"].(float64); got != tt.wantBudget {
+				t.Errorf("maxOutputTokens = %v, want %v", got, tt.wantBudget)
+			}
+		})
+	}
+}
+
 // The identity bag is the client's own shape: the request id's ids, the step
 // index, the used_* flags and the enum, all strings.
 func TestAntigravityLabelsAreTheClientsShape(t *testing.T) {

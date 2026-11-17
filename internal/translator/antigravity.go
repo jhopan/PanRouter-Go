@@ -868,7 +868,13 @@ func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[st
 			gc["maxOutputTokens"] = float64(cap)
 			changed = true
 		}
-		// Ensure maxOutputTokens strictly exceeds thinkingBudget to prevent 400 INVALID_ARGUMENT (PR #3981)
+		// Ensure maxOutputTokens strictly exceeds thinkingBudget to prevent 400 INVALID_ARGUMENT (PR #3981).
+		//
+		// The figure itself is NOT decided here: the thinking pass wrote the
+		// client's own budget, and this pass only raises the figure when the
+		// thinking budget outgrew it. Inventing one here (thinking budget plus
+		// headroom) overrode the client's number and pinned a Claude turn to
+		// 9216 instead of the model's published 64000.
 		var thinkingBudget float64
 		if tc, ok := gc["thinkingConfig"].(map[string]any); ok {
 			if tb, ok := tc["thinkingBudget"].(float64); ok {

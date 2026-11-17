@@ -28,7 +28,7 @@ func AntigravityThinkingFor(geminiBody, openaiBody []byte, wireModel string) []b
 		return geminiBody
 	}
 	effort := antigravityRequestedEffort(openaiBody)
-	level, _ := antigravityThinkingChoice(wireModel, effort)
+	level, budget := antigravityThinkingChoice(wireModel, effort)
 
 	var m map[string]any
 	if err := json.Unmarshal(geminiBody, &m); err != nil {
@@ -38,10 +38,25 @@ func AntigravityThinkingFor(geminiBody, openaiBody []byte, wireModel string) []b
 	if gc == nil {
 		gc = map[string]any{}
 	}
-	gc["thinkingConfig"] = map[string]any{
-		"thinkingLevel":   level,
-		"includeThoughts": level != "minimal",
+	// The canonical form is the LEVEL for a level-shaped family and the
+	// BUDGET for a budget-shaped one. Writing a level for a budget family
+	// would make the dialect pass below map that level onto the level table
+	// (medium → 8192) instead of the budget the shipped client publishes
+	// (1024 for the Claude family).
+	tc := map[string]any{}
+	if budget > 0 && level == "" {
+		tc["thinkingBudget"] = float64(budget)
+	} else {
+		tc["thinkingLevel"] = level
 	}
+	tc["includeThoughts"] = level != "minimal"
+	gc["thinkingConfig"] = tc
+	// The output budget belongs to the same pass, because it is the CLIENT's
+	// own request that decides it and only this function sees the client's
+	// body: the translated body cannot tell the client's number from the
+	// translator's own floor, and a floor mistaken for a request is what
+	// pinned the budget to 8192 instead of the model's published 64000.
+	antigravitySetClientOutputBudget(gc, openaiBody, wireModel, budget)
 	m["generationConfig"] = gc
 	out, err := json.Marshal(m, json.Deterministic(true))
 	if err != nil {
@@ -188,12 +203,67 @@ func antigravityRequestedEffort(openaiBody []byte) string {
 	return ""
 }
 
+// antigravitySetClientOutputBudget records the output budget the CLIENT asked
+// for, so the later budget pass can tell a request from a translator floor.
+//
+// The shipped client sends its model's published figure on every agent turn,
+// and a client that named a smaller one keeps it. The translated body cannot
+// carry that distinction: the Gemini translation writes its own floor
+// (GeminiBudgetOutputFloor) into generationConfig.maxOutputTokens, and a floor
+// mistaken for a request is what pinned a Claude turn to 8192 instead of the
+// published 64000.
+//
+// So the client's own body is the only authority here. A client that named no
+// output budget gets the model's published figure, decided by the pass that
+// knows the client named nothing.
+func antigravitySetClientOutputBudget(gc map[string]any, openaiBody []byte, wireModel string, thinkingBudget int) {
+	requested := antigravityRequestedOutputTokens(openaiBody)
+	if requested > 0 {
+		gc["maxOutputTokens"] = float64(requested)
+		return
+	}
+	// The client named no budget: the model's own published figure, and the
+	// headroom rule so it stays legal against the thinking budget.
+	published := AntigravityMaxOutputTokens(wireModel)
+	if published <= 0 {
+		return
+	}
+	if thinkingBudget > 0 && published <= thinkingBudget {
+		published = thinkingBudget + thinkingHeadroomTokens
+	}
+	gc["maxOutputTokens"] = float64(published)
+}
+
+// antigravityRequestedOutputTokens reads the output budget the client's own
+// body asked for, in the shapes an OpenAI-shaped request carries it:
+// max_tokens, max_completion_tokens and max_output_tokens.
+func antigravityRequestedOutputTokens(openaiBody []byte) int {
+	var body struct {
+		MaxTokens           *int `json:"max_tokens"`
+		MaxCompletionTokens *int `json:"max_completion_tokens"`
+		MaxOutputTokens     *int `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(openaiBody, &body); err != nil {
+		return 0
+	}
+	for _, v := range []*int{body.MaxTokens, body.MaxCompletionTokens, body.MaxOutputTokens} {
+		if v != nil && *v > 0 {
+			return *v
+		}
+	}
+	return 0
+}
+
 // antigravityThinkingChoice resolves the level and the budget one turn carries.
 //
 // The client's effort wins when it asked for one. Otherwise the model's own
 // tier decides: the tiered ids name it (`gemini-3.8-flash-high` → high), and a
-// tiered id names the top tier the shipped client sends. A model that names no
-// tier keeps the level the client published for it.
+// tiered id names the top tier the shipped client sends.
+//
+// A model whose family speaks the BUDGET dialect has no tier to name: its own
+// published budget is the value the shipped client sends (1024 for the Claude
+// family, 8192 for gpt-oss). Folding such a model onto the level table's
+// default tier sent 8192 for a Claude turn the shipped client sends 1024 on.
 func antigravityThinkingChoice(wireModel, effort string) (level string, budget int) {
 	entry, known := antigravityShippedModels[wireModel]
 	if !known {
@@ -207,6 +277,10 @@ func antigravityThinkingChoice(wireModel, effort string) (level string, budget i
 	}
 	if effort != "" {
 		return antigravityNormalizeLevel(effort), antigravityBudgetForLevel(effort)
+	}
+	if entry.ThinkingDialect == antigravityThinkingBudget {
+		// The budget dialect: the model's own published budget, not a level.
+		return "", antigravityDefaultBudget(wireModel)
 	}
 	level = entry.DefaultLevel
 	if level == "" {
