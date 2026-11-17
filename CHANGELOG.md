@@ -1,5 +1,352 @@
 # Changelog
 
+## [v1.0.1] - 2026-11-17
+
+### fix(chat): a spent free window skips the account instead of retrying it
+
+Cloudflare Workers AI meters its free allocation per calendar day. When that
+allocation is gone its 429 states the daily cap — and nothing in this router
+matched that wording, so the refusal fell through to the generic 429 backoff:
+the ladder climbed 2s→5min, the account stayed in rotation, and every request in
+between was sent to an account that could not answer until the next UTC day.
+
+Two things were missing, both from upstream:
+
+- **The free-window wordings.** Upstream builds its quota rules from
+  `QUOTA_EXHAUSTED_SIGNALS` (19 wordings: `daily limit`, `daily quota`,
+  `weekly limit`, `weekly quota`, `monthly quota`, `quota will reset`,
+  `quota exhausted`, `free limit reached`, `daily free limit reached`,
+  `inference_cap_error`, `usage limit has been reached`, `individual quota`,
+  `upgrade your subscription to increase`, `exceeded your current quota`, …).
+  The rule table carried three of them. All of them are now quota-class rules,
+  and the shared `quotaExhaustedPatterns` list agrees with the table, so the
+  dashboard's stored-error classification reads the same vocabulary.
+- **Cloudflare's window.** `cooldownSecFor` only reaches the provider's calendar
+  when the connection's provider declares one, and `cloudflare-ai` declared
+  none — so even a quota verdict parked it for the flat hour and handed the
+  account back mid-day. It now declares the daily window (next 00:00 UTC), which
+  is what upstream's quota-window resolver gives every undeclared provider
+  (`default: { scope: DAILY, resetUtcHour: 0 }`).
+
+The result is the skip the question was about: limit reached → quota verdict →
+parked until the day rolls over → the rotation moves to the next connection
+instead of re-dialling the empty one.
+
+Ordering is deliberate: the new rows sit **after** the explicit code rows
+(`insufficient_quota`, `gousagelimiterror`, …), because an exact provider code is
+more specific than prose — free-pi's taxonomy keeps its own fixed cooldown, which
+`TestClassifyError_FreePiQuotaTaxonomy` still pins.
+
+One upstream divergence kept on purpose: local treats `resource_exhausted` as a
+burst (it is in `rateLimitPatterns`, with `TestClassifyError_ResourceExhausted429`
+asserting the backoff), while upstream lists it among the quota signals. Flipping
+it would change Google/Antigravity behaviour, so it stays as it is and is recorded
+here rather than silently re-pinned.
+
+Verified: `go test ./internal/providers/ ./internal/handlers/chat/` green, with
+new tests for the wordings (all quota-class, backoff level unchanged), for a
+Cloudflare daily-limit 429 parking to the next 00:00 UTC (bounded by a day, unlock
+on the hour), for the `cf` alias resolving to the same window, and for a genuine
+Cloudflare burst staying a short burst.
+
+### fix(providers): Cloudflare Workers AI content shape + the 1015 IP-block rule
+
+The `cf` / `cloudflare-ai` provider was already ported end to end — registry
+entry with `hasProviderSpecificData`, 24 models (`@cf/meta/llama-3.2-1b-instruct`
+included, plus the image lane and `@cf/cloudflare/clef-flash`), `{accountId}`
+substitution in the transport URL with the `CLOUDFLARE_ACCOUNT_ID` fallback, the
+validate probe, the image handler and limits via the models.dev catalogue
+(`cloudflare-ai` → `cloudflare-workers-ai`). Two provider-specific **rules** were
+missing, and both break that model on a normal client:
+
+- **Content parts.** Workers AI validates `messages[].content` against a `oneOf`
+  root schema that accepts a plain string and rejects the OpenAI content-part
+  array (upstream paramSupport STRIP_RULES, #1926), so any client that always
+  sends parts — a translated Claude body, an editor with an image attached, a
+  replay — got a bare 400 from Cloudflare naming nothing. `ForwardOpenAI` now
+  folds the array into a string for this provider, byte-identical to upstream's
+  `.map(b => b?.type === "text" ? b.text : "").join("")`: text blocks concatenate
+  in order, every other block contributes nothing, and a body whose messages are
+  already strings is returned untouched. Resolved through `ResolveAlias`, so `cf`
+  and `cloudflare-ai` share the rule and no other lane is affected.
+- **Error 1015.** "You are being rate limited" is Cloudflare blocking the EGRESS
+  IP, not the account being throttled (upstream errorConfig.js:93-100). The
+  generic `rate limit` row read it as a burst and backed off 2s→5min, so the same
+  blocked address was re-dialled every few seconds for the whole block. It now
+  parks the connection for an hour, which is what lets the rotation fall to
+  another account. The HTML-body rule (managed challenge, cold start) is ported
+  with it and stays a short cooldown; both sit above the generic rate-limit row,
+  as upstream orders them.
+
+Verified: `go test ./internal/providers/... ./internal/proxy/...` green, with new
+tests for the classification (1h for a 1015 body, short cooldown for a plain HTML
+body, and a generic "rate limit" still taking the backoff ladder) and for the
+flatten rule, including a `ForwardOpenAI` harness that asserts what a fake
+upstream actually receives: `say hi` as a string for both `cf` and
+`cloudflare-ai`, and the untouched three-part array for `openai`.
+
+### feat(dashboard): Automatic Backup panel — schedule, mirror tokens, shell snippets
+
+The Go side of upstream's automatic backup has been ported for a while
+(`internal/dbbackup`, `/api/backup/{config,run,download,tokens}`, byte-compatible
+`bk-` tokens), but there was no way to turn it on from the dashboard: the README
+had to say "there is no dashboard panel for it yet", and the schedule could only
+be configured with curl. This is that panel, ported from the two cards in
+upstream's profile page.
+
+- **Settings → Automatic Backup** (`web/src/components/BackupPanel.svelte`): the
+  enable toggle, the interval picker (1 h, 3 h, 6 h, 12 h, 24 h, 48 h, 7 d — the
+  same options upstream offers), GitHub username, repository URL and token, plus
+  **Save** and **Back up now**. The token field shows
+  `•••••••• (saved — leave blank to keep)` once one is stored, because the server
+  never returns it.
+- The same card mints the mirror tokens (create / revoke / re-enable / delete),
+  shows a new token exactly once, and renders the three shell snippets — one-off
+  `curl`, `mirror.sh`, the cron line — with the gateway's own origin and a
+  `<TOKEN>` placeholder, each with a copy button.
+- `web/src/api/client.ts`: `BackupConfig` / `BackupMirrorToken` types and the
+  seven `/api/backup/*` calls.
+- `web/src/lib/backupMirror.ts` holds the shell text, because a lost trailing
+  backslash turns one command into three that fail; `backupMirror.test.ts` pins
+  the continuations, the token header, the origin (with and without a trailing
+  slash, which would otherwise produce `//api/backup/download`) and that every
+  offered interval sits inside the band `ResolveIntervalHours` accepts.
+- README's backup section now points at the panel instead of saying it does not
+  exist, and keeps the endpoints for scripting.
+
+No Go change: the backend already implemented everything the panel drives.
+
+Verified in a real browser against a local build (`DATA_DIR` = temp dir, port
+20255, managed through the relay):
+
+| Step | Result |
+|---|---|
+| Panel renders on Settings | toggle, interval, three fields, both buttons, snippets |
+| Save with a fake token/repo | `POST /api/backup/config → 400`, panel shows the server's own reason: `GitHub: cannot read repo octocat/nonexistent-backup-repo (HTTP 401) — check the token and the repo name` (the private-repo gate runs) |
+| Create token | `POST → 200`, `bk-<machineId>-<keyId6>-<crc8>` shown once, list row `active · never used` |
+| Revoke → `curl -H "x-backup-token: …"` | `401` |
+| Re-enable → same curl | `200`, `4096` bytes, magic `SQLite format 3` |
+| Delete | row gone, same curl `401` |
+| Accessible names | `Backup interval`, `GitHub username`, `Repository`, `GitHub token`, `Token name` |
+
+The one path the browser test cannot reach is a *successful* save: it needs a real
+private repo and token, and creating one on the operator's GitHub account is not
+something a smoke test may do. That half is covered server-side by
+`TestBackupConfigPOST` (persists the block including `enabled`, never echoes the
+token, calls the privacy check once with the parsed owner/repo, and `Configure()`
+restarts the scheduler to match).
+
+`make vet-svelte` clean (0 unresolved identifiers; baseline tightened 73 → 72) and
+`bun run build` unchanged in weight (4.2 MB `dist`, 1740 KB → 366 KB brotli).
+
+### ci(release): drop the Docker Hub publish job
+
+Every tag published a red run: the `docker` job logged in with
+`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`, neither of which exists, so it failed
+with `Username and password required` and `notify` never ran (`needs: [binaries,
+docker]`). The image was also never pullable in practice — the workflow pushed
+`luqmenul/panrouter-go`, a namespace this repository's owner does not control.
+
+- `release.yml`: the `docker` job is gone, along with `REGISTRY_IMAGE`, the
+  `docker_tags` output and its per-channel tag computation, and the now-unused
+  `packages: write` permission. `notify` is `needs: [binaries]`, which is what it
+  actually needed — the message links the release page, not an image.
+- The experimental banner on the release page no longer tells people to
+  `docker pull` a tag that does not exist; it pins the install script
+  (`VERSION=v1.1.0-exp.1 install.sh`) or points at the asset.
+- `scripts/notify-telegram.sh` printed `docker pull <image>:<tag>` in every
+  Telegram message. It now prints the install command, pinned to the tag for a
+  prerelease. Verified with `--dry-run` for both a stable and an `-exp` tag.
+- README: the Docker block is a self-build (`docker build -t panrouter-go .`)
+  with the reason no image is published; the experimental section pins the
+  installer instead of pulling `:exp`. `docs/RELEASING.md` records the removal
+  and that a release now needs no secrets at all; `docs/TELEGRAM_RELEASE_NOTIFICATIONS.md`
+  matches the new message.
+
+`ci.yml`'s `Build Docker image (verify only)` job stays — it builds the image on
+every PR with no credentials, which is what keeps `Dockerfile` and the PGO
+assertion alive.
+
+Verified: `actionlint` clean on the edited workflow, no `REGISTRY_IMAGE` /
+`docker_tags` / `luqmenul` references remain, `bash -n` plus two `--dry-run`
+renders of the notifier, and `go run ./cmd/changelog-merge --tag v1.0.1 --dry-run`
+unaffected.
+
+### Antigravity: the shipped client's wire, captured and reproduced
+
+The Antigravity lane is now built from the **shipped client**, not from a
+transcription of it. The authority is the language server the IDE installs
+(`AppData/Local/Programs/antigravity/resources/bin/language_server.exe`, Hub
+2.32.1), started with the argument set the Hub launcher passes
+(`--standalone --override_ide_name antigravity --subclient_type hub
+--override_ide_version 2.32.1 --override_user_agent_name antigravity`) and
+MITM-captured through mitmdump while it answered one turn per model.
+
+**The prompt fingerprint.** Measured live on one account and one model, only
+the system prompt varying:
+
+| system prompt | verdict |
+|---|---|
+| `You are Claude Code.` | **429 RESOURCE_EXHAUSTED** |
+| `you are claude code, anthropic's official cli for claude.` | **429 RESOURCE_EXHAUSTED** |
+| `You are Claude Code, Anthropic's official CLI for Claude.` | **429 RESOURCE_EXHAUSTED** |
+| `You are an assistant built as Anthropic's official CLI for Claude.` | 200 |
+| `You are a Claude agent, built on Anthropic's Claude Agent SDK.` | 200 |
+| `x-anthropic-billing-header: cc_version=2.1.322.abc; …` | 200 |
+| `You like the name Claude.` / `You are opencode …` | 200 |
+| *(no system prompt)* | 200 |
+
+The same account served a 200 for a neutral prompt seconds before each refusal
+and its `gemini-weekly` bucket still showed 61% remaining — so the 429 is a
+**filtering verdict, not quota**. The identity phrase is what the backend keys
+on, and `Anthropic's official CLI for Claude` alone is accepted.
+
+The lane now sends the client's own identity first, the way the shipped client
+does:
+
+```
+<identity>
+You are Antigravity, a powerful agentic AI assistant designed by the Google Deepmind team.
+You are working with a USER to solve their task.
+The USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.
+</identity>
+```
+
+and wraps a user turn in `<USER_REQUEST>` … `</USER_REQUEST>`. The caller's own
+system text is kept after the identity block; the rewrite of competing
+branding (the reference's `ANTIGRAVITY_PROMPT_REWRITES`) stays as well.
+
+**What the capture changed in the wire.** Six divergences, each pinned by a
+test in `internal/translator/antigravity_shipped_wire_test.go`:
+
+- `labels.model_enum` — the client sends it on every agent turn. Upstream
+  omits it because it had no mapping ("we have no mapping for it, so it is
+  omitted rather than guessed"); the mapping is not a guess — the client
+  publishes it in the catalog it fetches itself, and the captured table is
+  now carried here (`internal/translator/antigravity_model_enum.go`).
+- **The output budget is per model**, not one global cap: 65536 for the Gemini
+  3.8 family, 65535 for the 2.5 family, 64000 for the Claude family, 32768 for
+  gpt-oss. The lane now sends the model's published figure.
+- **The Claude family speaks the budget dialect** on this lane
+  (`thinkingBudget`), not the level dialect the Gemini families use
+  (`thinkingLevel`). A level on a Claude model is a field the backend does not
+  read for it.
+- `systemInstruction` (camelCase), the key the Cloud Code API publishes and the
+  client sends.
+- The session id is a signed number (`toNumericSessionId` upstream): a numeric
+  client session passes through, anything else folds onto a stable negative
+  number. The previous fallback echoed the project id.
+- The identity block and the request tags, as above.
+
+**A defect the capture exposed.** A Claude turn that carried a thinking budget
+and no output budget answered 400: *"`max_tokens` must be greater than
+`thinking.budget_tokens`"*. The output budget now rides along with the
+thinking config, which is what the shipped client sends.
+
+**A second defect the live wire exposed.** The published output budget and the
+thinking budget each have to come from the model's own table, and the passes
+that write them disagreed about where the numbers came from:
+
+- the thinking pass wrote a *level* for a budget-shaped family, which the
+  dialect pass then mapped onto the level table — so a Claude turn asked for
+  8192 where the shipped client asks for 1024;
+- the output budget was read back off the translated body, where the
+  translator's own floor (`GeminiBudgetOutputFloor`) is indistinguishable from
+  a number the client asked for — so a Claude turn asked for 8192, and then for
+  9216, where the shipped client asks for 64000.
+
+Both are now decided from the client's own request and the model's published
+table, in one place: the thinking pass writes the budget and the output figure
+together, and the later passes only enforce the two rules the backend imposes
+(the figure stays within the published one, and it stays above the thinking
+budget). The two regression tests run the passes in the order the proxy runs
+them, because a test that wrapped a bare body could not see either defect.
+
+**The cooldown.** A spent Antigravity quota is a weekly window, not a burst:
+upstream registers the provider as `QUOTA_SCOPES.WEEKLY` with
+`usageKey: "gemini_weekly"`, and `resource_exhausted` is one of upstream's
+`QUOTA_EXHAUSTED_SIGNALS`. The classifier now answers that verdict with
+`newBackoffLevel: 0` and a quota cooldown, the lane's ceiling is one weekly
+window, and the account parks until the bucket's own reset instant (the
+reading the tracker already holds) or the next Monday 00:00 UTC.
+
+**Verified live** against two accounts copied from the operator's VPS into a
+file outside the repository (never committed): `gemini-3.8-flash-medium`,
+`gemini-3.8-flash-tiered`, `gemini-3.8-flash-high`, `gemini-3.5-flash-lite`,
+`claude-sonnet-4-6` and `gpt-oss-120b-medium` all answer 200 through the
+gateway's own public HTTP API (`POST /v1/chat/completions` with a client API
+key), with mitmdump capturing the upstream bytes next to the verdict. Every
+captured request matches the shipped client's published figures exactly — the
+output budget, the thinking dialect and the enum:
+
+```
+OK gemini-3.8-flash-medium    budget=65536 thinking=level:medium enum=MODEL_PLACEHOLDER_M319
+OK gemini-3.8-flash-tiered    budget=65536 thinking=level:high   enum=MODEL_PLACEHOLDER_M322
+OK gemini-3.8-flash-high      budget=65536 thinking=level:high   enum=MODEL_PLACEHOLDER_M318
+OK gemini-3.5-flash-lite      budget=65535 thinking=level:low    enum=MODEL_PLACEHOLDER_M198
+OK claude-sonnet-4-6          budget=64000 thinking=budget:1024   enum=MODEL_PLACEHOLDER_M35
+OK gpt-oss-120b-medium        budget=32768 thinking=budget:8192   enum=MODEL_OPENAI_GPT_OSS_120B_MEDIUM
+```
+
+The fingerprint verdict was confirmed on the same path: the request carrying
+`You are Claude Code.` is rewritten to `You are an AI assistant.` on the wire
+and answers 200, where the same account and model answered 429 before.
+
+**For the reference.** PanRouter's `ANTIGRAVITY_PROMPT_REWRITES` table carries
+the billing-header, Hermes and `opencode` rows but not the Claude Code identity
+sentence, so it hits the same fake 429. The same goes for the `model_enum`
+mapping (its own comment: "we have no mapping for it, so it is omitted rather
+than guessed"), the per-model output budget (one global figure there) and the
+Claude budget dialect (a level for every model there).
+
+This repo carries all four, which is a **deliberate divergence** from the
+reference (§0): each one was measured against the shipped client and verified
+live. The reference has not been touched — PanRouter stays the behaviour
+reference to read, and mirroring these fixes into it happens only when the
+operator asks for it.
+
+Evidence: `internal/translator/antigravity_model_enum.go` (the captured
+catalog), `antigravity_thinking.go` (the dialects),
+`antigravity_budget.go` (the budget rule) and `antigravity_prompt.go` (the
+prompting shape), with the measurements in the comments beside each.
+
+### Antigravity: in-place transient retry, 400 verdict, stream_options
+
+Three behaviours from `open-sse/executors/antigravity.js` that were not held here,
+all of them about not parking a healthy account over a fault that is not the
+account's.
+
+**In-place retry (`computeRetryDelay`).** Google's agent lane answers 429/5xx and a
+family of 400s whose body says "high traffic" or "agent terminated due to error".
+Upstream repeats the SAME call while the wait is short, instead of locking the
+account and rotating; on a single-account deployment the alternative is failing the
+client's turn for a fault that clears in seconds. Ported with the reference's
+budgets: a provider-named wait (`Retry-After`, `X-Ratelimit-Reset[-After]`, or
+"resets in 1h2m3s" in the body) is honoured only up to 10s and is a veto above it,
+a transient fault with no named wait backs off exponentially (capped at 10s for a
+429, 15s for a 5xx), and at most two repeats. Only a 429/5xx body is read at all, so
+a normal answer is still streamed untouched.
+
+**A 400 is the request, not the account.** Google rejects a malformed body before
+looking at whose account it is, so the same 400 comes back from every account —
+walking the pool locks each one in turn for a payload that can never succeed. It is
+now fatal for this lane only (`{Provider: "antigravity", Status: 400, Fatal: true,
+RequestRejected: true}`), which meant teaching the status branch of the rule table
+the same provider scope the text branch already had, and `extractErrorText` now
+carries `error.details[].fieldViolations` — Google answers a bare "Bad request" and
+puts the real cause ("items.items: missing field.") in there.
+
+**stream_options on a non-streaming call.** An OpenAI client may send it even when
+it asked for no stream, and `generateContent` rejects the combination before
+processing the request. Stripped for this lane when the call is not streaming; a
+streaming request keeps the client's value.
+
+Verified: `go test ./internal/proxy/... ./internal/handlers/... ./internal/providers/
+./internal/translator/ ./internal/db/ ./internal/schedule/ ./internal/app/`, including
+the retry-delay table (header, body, backoff caps, veto), a fake upstream that fails
+once and then succeeds in place, a rejected 400 that is not retried, and the two
+`stream_options` cases.
+
 ## [v1.0.0] - 2026-11-16
 
 ### release: first release on the standalone version scheme

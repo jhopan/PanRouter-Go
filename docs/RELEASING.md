@@ -74,6 +74,49 @@ The changelog entry for a release is assembled from `.changes/*.md` fragments �
 never by editing `CHANGELOG.md` in a feature PR (`make changelog-merge TAG=vX.Y.Z`
 at release time). See [`.changes/README.md`](../.changes/README.md).
 
+### A release body has a size limit, and the merge has one
+
+`make changelog-merge TAG=vX.Y.Z` folds **every** pending fragment into
+`CHANGELOG.md` and empties the folder. That is right when the backlog is small.
+It is wrong when the backlog is large, for two reasons that pull in opposite
+directions:
+
+- The release workflow takes the **first `## [tag]` section verbatim** as the
+  GitHub Release body, and GitHub caps that body at **125,000 bytes**. A merge
+  of the whole backlog produces a section far past that, and the release page
+  is truncated or the publish fails.
+- A fragment that is already in `CHANGELOG.md` and still sitting in
+  `.changes/` is rendered **twice** by the dashboard, which assembles both
+  (`GET /api/changelog`). So "merge everything, leave the fragments" is not a
+  state the dashboard can show correctly.
+
+`v1.0.1` hit both: 78 fragments, 267 KB merged, 1.6 MB section. It took the
+same shape `v1.0.0` did — a **curated section** holding only the fragments
+added since the last tag, with the older backlog left pending:
+
+```bash
+# 1. The fragments added since the last tag are the release's content.
+STAGE="$(mktemp -d)"; mkdir -p "$STAGE/.changes"
+cp CHANGELOG.md "$STAGE/"
+for f in <fragments added since the last tag>; do cp ".changes/$f.md" "$STAGE/.changes/"; done
+
+# 2. The repo's own merge tool writes the section — same code path as
+#    `make changelog-merge`, so the section is byte-identical to a full merge.
+go run ./cmd/changelog-merge --tag vX.Y.Z --root "$STAGE"
+
+# 3. That section goes above the previous release in the real CHANGELOG.md.
+# 4. The merged fragments are removed from .changes/ — otherwise the
+#    dashboard shows them twice.
+git rm .changes/<those fragments>.md
+```
+
+Check the size before tagging: the section must stay under 125,000 bytes.
+
+**Never re-tag a published version**, and never delete a tag to redo a release:
+the assets are already on the release page and the manifest would advertise one
+number for two sets of bytes. A failed run is recovered with
+`gh run rerun --failed` on the same tag.
+
 ## Repository secrets the release job needs
 
 The `binaries` job publishes the GitHub Release with the default `GITHUB_TOKEN`
