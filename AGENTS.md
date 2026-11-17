@@ -41,12 +41,25 @@ PanRouter (JS, Node)        <- source of truth: behaviour, headers, error handli
 PanRouter-Go (Go, binary)   <- reproduction: same behaviour, ~6x less RAM
 ```
 
-- **A bug fixed in PanRouter is not fixed here** until it is ported. The two code
-  bases drift silently; assume nothing.
-- **A provider that changed its wire format** is updated in PanRouter first —
-  that is where the MITM capture and the live test live — then mirrored here.
-- **Never invent behaviour here.** If PanRouter does X and this repo does Y, that
-  is a bug in this repo, even if Y looks better. Fix PanRouter first, then port.
+- **A bug fixed in PanRouter is not fixed here** until it is ported, unless the
+  operator asks for it here. The two code bases drift silently; assume nothing
+  about the other side.
+- **A provider that changed its wire format** is captured in PanRouter first —
+  that is where the MITM capture and the live test live — then reproduced here.
+  Where the reference and this repo disagree, this repo may carry the correct
+  behaviour on the operator's instruction; see the next bullet.
+- **PanRouter is the reference to READ; mirroring a change INTO it is the
+  operator's call, not this repo's.** Read PanRouter first and treat what it
+  does as the contract to match. But when the operator asks for a behaviour
+  here, implement it here and record the divergence — do not hold the work
+  hostage to a PanRouter commit, and do not open a PanRouter PR unprompted.
+  Only port a change into PanRouter when the operator explicitly says so.
+  (Operator directive, 2026-11-17.)
+- **Never invent behaviour here.** If PanRouter does X and this repo does Y,
+  that divergence is a bug in this repo when Y is worse and PanRouter is the
+  intent — unless the divergence is deliberate and recorded (§7.6). The
+  operator's instruction above decides when a fix lands in PanRouter; it does
+  not decide whether this repo may hold a correct fix.
 - **When porting, port the comment too.** PanRouter's comments explain *why* a
   header exists, why an error is classified a certain way, why a lock lasts a
   certain time. That reasoning is the valuable part; the code is the easy half.
@@ -69,7 +82,8 @@ from it; nothing here is justified by "9router did it".
 
 1. **Inspect PanRouter first.** Before writing or modifying logic, read the
    corresponding file in the PanRouter clone. Its `tests/unit/` holds the
-   regression cases that encode *why* each behaviour exists.
+   regression cases that encode *why* each behaviour exists. Reading it is
+   mandatory; mirroring a fix into it is not (§0).
 2. **Behavioural compatibility (100% contract match)**:
    - `/v1/*` request/response schemas (Chat Completions, Messages, Embeddings,
      Audio, Models).
@@ -840,9 +854,11 @@ rtk git diff
   attribution for two MIT projects — panrouter (decolua and contributors) and
   panrouter-go (Luqmanul Hakim). Removing it is a licence violation, not a
   cleanup.
-- **Never port a change here before it is settled in PanRouter.** This repo
-  reproduces; it does not decide. If a fix looks obvious, land it in PanRouter
-  first, then mirror it.
+- **Never mirror a change into PanRouter without being asked.** PanRouter stays
+  the reference to read (§0), but porting a fix into it — a commit, a PR, an
+  edit to that clone — happens only when the operator explicitly asks for it.
+  A fix that lives here first is fine: record it as a deliberate divergence in
+  the `.changes/` fragment (§7.6) and move on.
 - **Never touch a remote server without an explicit, absolute instruction for
   that exact change.** "Coba cek", "jelaskan" and a pasted log are not permission
   to SSH in and change something. Read-only inspection (logs, DB queries, DNS/TLS

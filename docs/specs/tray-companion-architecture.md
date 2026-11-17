@@ -50,8 +50,8 @@ Ba lý do, mỗi lý do đều là một ràng buộc đã tồn tại trong rep
 
 | Lý do | Bằng chứng | Hệ quả |
 | --- | --- | --- |
-| Core phải build được `CGO_ENABLED=0` cho cả năm target | `Makefile:197` `CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64`; vòng kiểm ở `AGENTS.md:161-164` | Một dependency GUI cần cgo trong `cmd/panrouter-go` sẽ phá cả năm target cùng lúc (`AGENTS.md:171`) |
-| GUI là mã theo nền tảng, không phải mã di động | Windows cần `Shell_NotifyIconW`, macOS cần Objective-C runtime, Linux cần StatusNotifierItem/AppIndicator | Đưa GUI vào core biến "một binary di động" thành "một bản build cho mỗi nền tảng", đúng thứ `AGENTS.md:172` cấm |
+| Core phải build được `CGO_ENABLED=0` cho cả năm target | `Makefile:197` `CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64`; vòng kiểm ở `AGENTS.md:314-317` | Một dependency GUI cần cgo trong `cmd/panrouter-go` sẽ phá cả năm target cùng lúc (`AGENTS.md:324`) |
+| GUI là mã theo nền tảng, không phải mã di động | Windows cần `Shell_NotifyIconW`, macOS cần Objective-C runtime, Linux cần StatusNotifierItem/AppIndicator | Đưa GUI vào core biến "một binary di động" thành "một bản build cho mỗi nền tảng", đúng thứ `AGENTS.md:325` cấm |
 | Tray có vòng đời người dùng, gateway có vòng đời máy | Bất biến C4 | Hai vòng đời khác nhau không nên chia sẻ một process |
 
 Ngược lại, core **không** cần biết tray tồn tại: không route, không cờ, không endpoint nào trong tài liệu này yêu cầu gateway thay đổi. Đó là điều làm cho G27 trở thành một thay đổi **cộng thêm** thay vì một thay đổi **xâm nhập**.
@@ -146,13 +146,13 @@ Mỗi bất biến có: phát biểu, cơ chế thực thi, và cái gì hỏng 
 
 **Phát biểu:** `panrouter-go` build được với `CGO_ENABLED=0` cho **mọi** cặp trong `CROSS_TARGETS` sau khi G27 hoàn tất. Không mã GUI, không import GUI, không build tag GUI nào lọt vào `cmd/panrouter-go/`.
 
-**Cơ chế:** `CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64` (`Makefile:197`). `AGENTS.md:161-164` cho một vòng kiểm copy-runnable; `AGENTS.md:171` cấm "any library requiring cgo" và `:172` cấm build tag phá bất kỳ target nào. Tray nằm ở `cmd/panrouter-tray/`, **ngoài** vòng `cross-one` (`Makefile:217`, `go build … ./cmd/panrouter-go/`) và ngoài mọi target của `CROSS_TARGETS`.
+**Cơ chế:** `CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64` (`Makefile:197`). `AGENTS.md:314-317` cho một vòng kiểm copy-runnable; `AGENTS.md:324` cấm "any library requiring cgo" và `:325` cấm build tag phá bất kỳ target nào. Tray nằm ở `cmd/panrouter-tray/`, **ngoài** vòng `cross-one` (`Makefile:217`, `go build … ./cmd/panrouter-go/`) và ngoài mọi target của `CROSS_TARGETS`.
 
 **Điểm dễ hiểu sai:** "tray được phép dùng cgo" không phải một ngoại lệ của `AGENTS.md §4.F` — nó là kết quả của việc `§4.F` chỉ ràng buộc **binary được ship trong `CROSS_TARGETS`**. Tray là binary thứ hai, không có mặt trong vòng lặp đó. Nếu ai thêm `cmd/panrouter-tray` vào `CROSS_TARGETS` hoặc vào `cross`, C1 vỡ ngay lập tức và vỡ cho cả năm target cùng lúc.
 
 **Hệ quả lên `./...`:** `go vet ./...`, `go test ./...` và `golangci-lint run ./...` đều duyệt **mọi** package, kể cả tray — nên một import GUI không có build constraint sẽ kéo `pkg-config ayatana-appindicator3-0.1` vào mọi lệnh workspace trên Linux, và làm đỏ ba job CI trên runner không cài `libayatana-appindicator3-dev`. Vì vậy `cmd/panrouter-tray/gui.go` mang `//go:build windows || tray`: Windows vào constraint không cần tag (systray gọi thẳng Win32 API, không cgo, không pkg-config), macOS/Linux cần `-tags tray` và phải build trên host thật của chúng. Bản build không có tag sinh ra `gui_stub.go`, thoát lúc khởi động kèm tên flag cần thêm — im lặng không hiện icon thì người dùng sẽ đi tìm lỗi ở gateway. Job `Build tray binary` trong `ci.yml` chạy trên `windows-latest` để constraint này không âm thầm che một `gui.go` hỏng.
 
-**Khi vi phạm:** một dependency GUI cần cgo trong core biến "một binary di động" thành "một bản build cho mỗi nền tảng" — đúng thứ `AGENTS.md:172` nói pipeline này tồn tại để tránh.
+**Khi vi phạm:** một dependency GUI cần cgo trong core biến "một binary di động" thành "một bản build cho mỗi nền tảng" — đúng thứ `AGENTS.md:325` nói pipeline này tồn tại để tránh.
 
 ### C2 — Identity Before Control
 
@@ -266,7 +266,7 @@ done
 go mod tidy && git diff --exit-code go.mod
 ```
 
-Điều kiện 1 cần `web/dist` tồn tại trước (`make web-build`) vì `web/embed.go` là `//go:embed all:dist` (`AGENTS.md:166`). Đó là lý do `FAIL` ở lần chạy đầu trên clone sạch **không** phải lỗi portability.
+Điều kiện 1 cần `web/dist` tồn tại trước (`make web-build`) vì `web/embed.go` là `//go:embed all:dist` (`AGENTS.md:319`). Đó là lý do `FAIL` ở lần chạy đầu trên clone sạch **không** phải lỗi portability.
 
 Điều **chưa kiểm chứng và phải kiểm chứng khi build thật**:
 

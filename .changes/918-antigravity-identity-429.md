@@ -120,9 +120,16 @@ and answers 200, where the same account and model answered 429 before.
 
 **For the reference.** PanRouter's `ANTIGRAVITY_PROMPT_REWRITES` table carries
 the billing-header, Hermes and `opencode` rows but not the Claude Code identity
-sentence, so it hits the same fake 429. That row, the `model_enum` mapping, the
-per-model output budget and the Claude budget dialect belong in PanRouter
-first (§0), after which the two trees agree.
+sentence, so it hits the same fake 429. The same goes for the `model_enum`
+mapping (its own comment: "we have no mapping for it, so it is omitted rather
+than guessed"), the per-model output budget (one global figure there) and the
+Claude budget dialect (a level for every model there).
+
+This repo carries all four, which is a **deliberate divergence** from the
+reference (§0): each one was measured against the shipped client and verified
+live. The reference has not been touched — PanRouter stays the behaviour
+reference to read, and mirroring these fixes into it happens only when the
+operator asks for it.
 
 Evidence: `internal/translator/antigravity_model_enum.go` (the captured
 catalog), `antigravity_thinking.go` (the dialects),
