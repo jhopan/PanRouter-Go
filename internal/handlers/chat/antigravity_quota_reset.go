@@ -32,6 +32,21 @@ func antigravityQuotaResetFor(connectionID string, now time.Time) time.Time {
 	return nextWeeklyRollover(now)
 }
 
+// antigravityBucketRemaining reports the account's own remaining percentage for
+// a bucket, and whether a live reading from the provider exists at all.
+func antigravityBucketRemaining(connectionID, bucket string, now time.Time) (float64, bool) {
+	if connectionID == "" || bucket == "" {
+		return 0, false
+	}
+	agQuotaMu.RLock()
+	quota, ok := agQuotaCache[connectionID][bucket]
+	agQuotaMu.RUnlock()
+	if !ok || quota.ResetAt.IsZero() || !quota.ResetAt.After(now) {
+		return 0, false
+	}
+	return quota.RemainingPercentage, true
+}
+
 // antigravityBucketResetFor reads one bucket's reset out of the in-memory quota
 // cache, requiring it to be in the future — a lapsed reset names an account that is
 // usable again, not a window to park for.

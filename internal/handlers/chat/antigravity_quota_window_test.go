@@ -113,6 +113,59 @@ func TestCooldownSecFor_AntigravityParksUntilTheWeeklyReset(t *testing.T) {
 	}
 }
 
+// A detail-free RESOURCE_EXHAUSTED with quota still on the bucket is the lane's
+// refusal, not a spent budget: measured live on 2026-11-18, the same account
+// answered that body for one model while its own reading said 99% remained, and
+// the account was parked for the whole week. Holding the ordinary cooldown keeps
+// the account rotating, which is what lets a second account serve the request.
+func TestCooldownSecFor_AntigravityHealthyBucketIsNotParkedForTheWeek(t *testing.T) {
+	installAntigravityKV(t)
+	base := time.Now().UTC()
+	useAntigravityClock(t, base)
+
+	seedAntigravityQuotas("ag-healthy", map[string]AntigravityModelQuota{
+		"gemini_weekly": {RemainingPercentage: 99, ResetAt: base.Add(6 * 24 * time.Hour)},
+	})
+
+	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResourceExhaustedBody)}
+	errorText := extractErrorText(ue.Body)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, 0, "antigravity")
+
+	got := (&ChatHandler{}).cooldownSecFor("ag-healthy", "antigravity", ue, errorText, cls)
+	if got <= 0 {
+		t.Fatalf("cooldown = %ds, want the ordinary quota cooldown", got)
+	}
+	if weekly := int(nextWeeklyRollover(base).Sub(base).Seconds()); got >= weekly {
+		t.Errorf("cooldown = %ds, want less than the weekly window %ds while the bucket has quota", got, weekly)
+	}
+	if got != int(cls.CooldownMs/1000) {
+		t.Errorf("cooldown = %ds, want the classifier's %ds", got, cls.CooldownMs/1000)
+	}
+}
+
+// A body that NAMES the reset instant is the provider describing its own window,
+// so it still parks even when the local reading disagrees — the body is newer
+// than the reading, and the reading is what is stale.
+func TestCooldownSecFor_AntigravityNamedResetStillParks(t *testing.T) {
+	installAntigravityKV(t)
+	base := time.Now().UTC()
+	useAntigravityClock(t, base)
+
+	seedAntigravityQuotas("ag-named", map[string]AntigravityModelQuota{
+		"gemini_weekly": {RemainingPercentage: 99, ResetAt: base.Add(6 * 24 * time.Hour)},
+	})
+
+	resetAt := base.Add(30 * time.Hour).Truncate(time.Second)
+	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResetOnlyBody(http.StatusTooManyRequests, resetAt))}
+	errorText := extractErrorText(ue.Body)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, 0, "antigravity")
+
+	got := (&ChatHandler{}).cooldownSecFor("ag-named", "antigravity", ue, errorText, cls)
+	if want := int(resetAt.Sub(base).Seconds()); got < want-2 || got > want+2 {
+		t.Errorf("cooldown = %ds, want the named reset's %ds", got, want)
+	}
+}
+
 func TestCooldownSecFor_AntigravityWithoutAReadingUsesTheCalendar(t *testing.T) {
 	installAntigravityKV(t)
 	base := time.Now().UTC()

@@ -352,6 +352,20 @@ func (h *ChatHandler) cooldownSecFor(connID, provider string, ue *upstreamError,
 	// re-dialled all week.
 	if providers.ResolveAlias(provider) == "antigravity" && isQuotaExhaustionVerdict(ue.StatusCode, provider, errorText, ue, cls) {
 		now := time.Now().UTC()
+		// A verdict that names no reset instant is a detail-free refusal, and this
+		// lane answers one for a request shape it dislikes exactly as it does for a
+		// spent bucket ("Resource has been exhausted (e.g. check quota)." — measured
+		// live against a bucket still reading 99% remaining). The account's own
+		// reading is what separates the two: while the bucket has quota, hold the
+		// ordinary cooldown and let the next account serve, instead of parking a
+		// healthy account for the whole week.
+		// shortcut: a connection with no reading yet still parks for the window,
+		// because nothing has told us the bucket is alive.
+		if _, namesReset := extractResetDuration(ue.Body); !namesReset {
+			if remaining, ok := antigravityBucketRemaining(connID, AntigravityQuotaUsageKey, now); ok && remaining > 0 {
+				return cooldownSec
+			}
+		}
 		until := antigravityQuotaResetFor(connID, now)
 		if secs := ceilSeconds(min(until.Sub(now), maxCooldownFor(provider))); secs > 0 {
 			return secs
