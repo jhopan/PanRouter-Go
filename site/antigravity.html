@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antigravity Playground</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --muted: #888; --ok: #1a7f37; --bad: #cf222e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; max-width: 900px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 5px; }
+  input, select, textarea, button { font: inherit; width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
+  textarea { resize: vertical; min-height: 68px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 180px; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .actions button { width: auto; flex: 1 1 200px; cursor: pointer; font-weight: 600; }
+  .actions button:hover { border-color: var(--muted); }
+  .chk { display: flex; align-items: center; gap: 7px; margin-top: 14px; font-size: 14px; }
+  .chk input { width: auto; }
+  table { width: 100%; border-collapse: collapse; margin-top: 22px; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td.model { font-family: ui-monospace, monospace; font-size: 12.5px; white-space: nowrap; }
+  .ok { color: var(--ok); font-weight: 700; }
+  .bad { color: var(--bad); font-weight: 700; }
+  .out { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .err { font-size: 12px; color: var(--bad); }
+</style>
+</head>
+<body>
+<h1>Antigravity Playground</h1>
+<p class="sub">Talks to this gateway's <code>/v1/chat/completions</code>. Serve it with <code>python site/serve.py</code>, then open <code>http://127.0.0.1:8088/antigravity.html</code>.</p>
+
+<label for="key">API key</label>
+<input id="key" type="password" placeholder="sk-... (a key from the dashboard)" autocomplete="off">
+
+<div class="row">
+  <div>
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="antigravity/gemini-3.8-flash-high">antigravity / gemini-3.8-flash-high</option>
+      <option value="antigravity/claude-sonnet-4-6">antigravity / claude-sonnet-4-6</option>
+      <option value="antigravity/claude-opus-4-6-thinking">antigravity / claude-opus-4-6-thinking</option>
+    </select>
+  </div>
+</div>
+
+<label for="prompt">Prompt</label>
+<textarea id="prompt">Say exactly: ok</textarea>
+
+<div class="chk"><input id="stream" type="checkbox"><label for="stream" style="margin:0;font-weight:400">stream</label></div>
+
+<div class="actions">
+  <button id="send">Send</button>
+  <button id="all">Test all three</button>
+</div>
+
+<table>
+  <thead><tr><th>model</th><th>status</th><th>time</th><th>answer</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const MODELS = [
+  'antigravity/gemini-3.8-flash-high',
+  'antigravity/claude-sonnet-4-6',
+  'antigravity/claude-opus-4-6-thinking',
+];
+const keyEl = document.getElementById('key');
+const promptEl = document.getElementById('prompt');
+const streamEl = document.getElementById('stream');
+const rowsEl = document.getElementById('rows');
+
+keyEl.value = localStorage.getItem('ag-key') || '';
+keyEl.addEventListener('input', () => localStorage.setItem('ag-key', keyEl.value));
+
+function row(model) {
+  let tr = [...rowsEl.rows].find(r => r.dataset.model === model);
+  if (!tr) {
+    tr = rowsEl.insertRow();
+    tr.dataset.model = model;
+    tr.innerHTML = '<td class="model"></td><td class="status"></td><td class="time"></td><td><div class="out"></div></td>';
+    tr.cells[0].textContent = model;
+  }
+  return tr;
+}
+
+function setCell(tr, status, time, text, err) {
+  const st = tr.cells[1];
+  st.textContent = status;
+  st.className = 'status ' + (status >= 200 && status < 300 ? 'ok' : 'bad');
+  tr.cells[2].textContent = time;
+  const out = tr.cells[3].firstChild;
+  out.textContent = text || '';
+  out.className = 'out' + (err ? ' err' : '');
+}
+
+async function callModel(model) {
+  const tr = row(model);
+  const started = performance.now();
+  setCell(tr, '…', '', '', false);
+  const body = { model, messages: [{ role: 'user', content: promptEl.value }] };
+  if (streamEl.checked) body.stream = true;
+
+  let res;
+  try {
+    res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + keyEl.value.trim() },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    setCell(tr, 'network', '', String(e), true);
+    return;
+  }
+  const ms = Math.round(performance.now() - started);
+
+  if (!streamEl.checked) {
+    const raw = await res.text();
+    let text = raw, err = false;
+    try {
+      const j = JSON.parse(raw);
+      const msg = j.choices?.[0]?.message;
+      text = msg ? (msg.reasoning_content ? msg.reasoning_content + '\n---\n' : '') + (msg.content ?? '') : raw;
+      err = !res.ok;
+    } catch { err = !res.ok; }
+    setCell(tr, res.status, ms + ' ms', text, err);
+    return;
+  }
+
+  if (!res.ok) {
+    setCell(tr, res.status, ms + ' ms', await res.text(), true);
+    return;
+  }
+  const out = tr.cells[3].firstChild;
+  out.textContent = '';
+  out.className = 'out';
+  tr.cells[1].textContent = res.status;
+  tr.cells[1].className = 'status ok';
+  tr.cells[2].textContent = ms + ' ms';
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const d = JSON.parse(data).choices?.[0]?.delta;
+        if (!d) continue;
+        if (d.reasoning_content) out.textContent += d.reasoning_content;
+        if (d.content) out.textContent += d.content;
+      } catch { /* keep-alive or partial frame */ }
+    }
+    out.scrollTop = out.scrollHeight;
+  }
+  tr.cells[2].textContent = Math.round(performance.now() - started) + ' ms';
+}
+
+document.getElementById('send').onclick = () => callModel(document.getElementById('model').value);
+document.getElementById('all').onclick = async () => {
+  rowsEl.innerHTML = '';
+  for (const m of MODELS) await callModel(m);
+};
+</script>
+</body>
+</html>
