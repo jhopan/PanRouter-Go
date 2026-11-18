@@ -223,6 +223,7 @@ func TestAntigravityImageModelAndConfig(t *testing.T) {
 // WITHOUT the labels is what Google answered with a detail-free 429, so the two
 // travel together.
 func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
+	translator.ResetAntigravitySessionLabels()
 	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-medium", "sess-1")
 	if err != nil {
@@ -267,8 +268,9 @@ func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
 // TestWrapForAntigravity_LabelFlagsFollowTheModelFamily pins the used_* flags:
 // they are what tells the backend which model family the trajectory belongs to.
 func TestWrapForAntigravity_LabelFlagsFollowTheModelFamily(t *testing.T) {
+	translator.ResetAntigravitySessionLabels()
 	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "claude-sonnet-4-6")
+	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "claude-sonnet-4-6", "sess-claude")
 	if err != nil {
 		t.Fatalf("WrapForAntigravity failed: %v", err)
 	}
@@ -279,8 +281,49 @@ func TestWrapForAntigravity_LabelFlagsFollowTheModelFamily(t *testing.T) {
 	if got, _ := labels["used_claude"].(string); got != "true" {
 		t.Errorf("used_claude = %q, want true for a claude model", got)
 	}
+	if got, _ := labels["used_claude_conservative"].(string); got != "true" {
+		t.Errorf("used_claude_conservative = %q, want true alongside used_claude (captured client never sends the mismatch)", got)
+	}
 	if got, _ := labels["used_non_gemini_model"].(string); got != "true" {
 		t.Errorf("used_non_gemini_model = %q, want true for a claude model", got)
+	}
+}
+
+// TestWrapForAntigravity_LabelFlagsStickToTheConversation pins the captured
+// behaviour: once a conversation used a non-Gemini model, the flags stay true on
+// the Gemini turns that follow — the client does not reset them per request.
+func TestWrapForAntigravity_LabelFlagsStickToTheConversation(t *testing.T) {
+	translator.ResetAntigravitySessionLabels()
+	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+
+	if _, err := translator.WrapForAntigravity(geminiBody, "proj-1", "claude-sonnet-4-6", "sess-mixed"); err != nil {
+		t.Fatalf("claude turn: %v", err)
+	}
+	wrapped, err := translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-high", "sess-mixed")
+	if err != nil {
+		t.Fatalf("gemini turn: %v", err)
+	}
+	labels, _ := unwrapInnerRequest(t, wrapped)["labels"].(map[string]any)
+	for key, want := range map[string]string{
+		"used_claude":              "true",
+		"used_claude_conservative": "true",
+		"used_non_gemini_model":    "true",
+	} {
+		if got, _ := labels[key].(string); got != want {
+			t.Errorf("labels[%q] = %q on a Gemini turn after Claude, want %q", key, got, want)
+		}
+	}
+
+	// A conversation that never ran a non-Gemini model keeps them false.
+	wrapped, err = translator.WrapForAntigravity(geminiBody, "proj-1", "gemini-3.8-flash-high", "sess-pure-gemini")
+	if err != nil {
+		t.Fatalf("fresh gemini turn: %v", err)
+	}
+	labels, _ = unwrapInnerRequest(t, wrapped)["labels"].(map[string]any)
+	for _, key := range []string{"used_claude", "used_claude_conservative", "used_non_gemini_model"} {
+		if got, _ := labels[key].(string); got != "false" {
+			t.Errorf("labels[%q] = %q on a Gemini-only conversation, want false", key, got)
+		}
 	}
 }
 

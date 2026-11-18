@@ -52,12 +52,49 @@ import (
 // itself sends.
 
 // AntigravityIdentityPrompt is the identity block the shipped client opens
-// its system instruction with.
+// its system instruction with when its account's `generic-system-prompt`
+// experiment is ON — the branch measured live on 2026-11-18 for the accounts
+// used here (aicode.googleapis.com/v1alpha:fetchConfig reports the flag as
+// true).
 const AntigravityIdentityPrompt = "<identity>\n" +
 	"You are Antigravity, a powerful agentic AI assistant designed by the Google Deepmind team.\n" +
 	"You are working with a USER to solve their task.\n" +
 	"The USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n" +
 	"</identity>"
+
+// AntigravityIdentityPromptCoding is the SAME block with the experiment OFF.
+// The shipped client carries both as one template
+// (language_server.exe, `LINT.IfChange(antigravity_identity)`) and picks between
+// them per account:
+//
+//	{{if .ExperimentEnabled "generic-system-prompt"}}
+//	  You are Antigravity, a powerful agentic AI assistant designed by the Google Deepmind team.
+//	  You are working with a USER to solve their task.
+//	{{else}}
+//	  You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team
+//	  working on Advanced Agentic Coding.
+//	  You are pair programming with a USER to solve their coding task. The task may require creating
+//	  a new codebase, modifying or debugging an existing codebase, or simply answering a question.
+//	{{end}}
+//
+// The trailing sentence ("The USER will send you requests…") is shared by both
+// branches, which is why it appears in each constant whole rather than as a
+// shared suffix: the block is what the backend fingerprints, and assembling it
+// from parts invites a drifting concatenation.
+const AntigravityIdentityPromptCoding = "<identity>\n" +
+	"You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n" +
+	"You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.\n" +
+	"The USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n" +
+	"</identity>"
+
+// AntigravityIdentityPromptFor returns the identity block for an account's
+// experiment assignment.
+func AntigravityIdentityPromptFor(genericSystemPrompt bool) string {
+	if genericSystemPrompt {
+		return AntigravityIdentityPrompt
+	}
+	return AntigravityIdentityPromptCoding
+}
 
 // antigravityUserRequestOpen and antigravityUserRequestClose are the tags the
 // shipped client wraps a user turn in.
@@ -83,7 +120,7 @@ const (
 // send it. The plain Gemini API accepts the snake_case spelling too, but this
 // lane speaks the Cloud Code dialect, and the envelope around it
 // (generationConfig, toolConfig, sessionId) is camelCase as well.
-func antigravityApplyPromptShape(geminiBody []byte) []byte {
+func antigravityApplyPromptShape(geminiBody []byte, identity string) []byte {
 	var m map[string]any
 	if err := json.Unmarshal(geminiBody, &m); err != nil {
 		return geminiBody
@@ -91,7 +128,13 @@ func antigravityApplyPromptShape(geminiBody []byte) []byte {
 	changed := false
 
 	// The system instruction: the identity block first, the caller's own text
-	// after it.
+	// after it — and the identity block alone when the caller sent none at all.
+	//
+	// The shipped client has no turn without one: its system instruction is a
+	// ~49 KB document that OPENS with this block, and the backend reads that
+	// opening as the caller's identity. A request forwarded with no system
+	// instruction therefore goes out with no identity, which is a shape the
+	// client never sends.
 	if si, ok := m["system_instruction"].(map[string]any); ok {
 		parts, _ := si["parts"].([]any)
 		if len(parts) > 0 {
@@ -108,13 +151,20 @@ func antigravityApplyPromptShape(geminiBody []byte) []byte {
 			if len(texts) > 0 {
 				joined := strings.Join(texts, "\n")
 				if !strings.HasPrefix(joined, "<identity>") {
-					si["parts"] = []any{map[string]any{"text": AntigravityIdentityPrompt + joined}}
+					si["parts"] = []any{map[string]any{"text": identity + joined}}
 					changed = true
 				}
 			}
 		}
+		if len(parts) == 0 {
+			si["parts"] = []any{map[string]any{"text": identity}}
+			changed = true
+		}
 		delete(m, "system_instruction")
 		m["systemInstruction"] = si
+		changed = true
+	} else {
+		m["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": identity}}}
 		changed = true
 	}
 

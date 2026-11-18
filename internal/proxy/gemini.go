@@ -99,7 +99,8 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 			// client's own effort or the model's own tier.
 			wireModel := translator.AntigravityUpstreamModel(modelName)
 			geminiBody = translator.AntigravityThinkingFor(geminiBody, body, wireModel)
-			wrapped, err := translator.WrapForAntigravity(geminiBody, projectID, modelName, sessID)
+			wrapped, err := translator.WrapForAntigravityWithIdentity(geminiBody, projectID, modelName,
+				providers.AntigravityGenericSystemPromptForToken(apiKey), sessID)
 			if err != nil {
 				return nil, fmt.Errorf("wrap for antigravity: %w", err)
 			}

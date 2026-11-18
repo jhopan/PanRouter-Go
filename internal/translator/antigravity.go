@@ -791,17 +791,21 @@ func antigravityBuildIdentity(sessionID, model, requestType string, contentCount
 // The enum is sent for the model the turn actually runs, and a model the
 // client does not publish gets none: the bag stays the client's own shape.
 func antigravityAgentLabels(id antigravityEnvelopeIdentity, model string) map[string]string {
-	lower := strings.ToLower(model)
 	stepIndex := strconv.Itoa(max(id.Step-1, 0))
+	// The used_* flags describe the CONVERSATION, not this model: the captured
+	// client keeps all three true once any non-Gemini model ran in the cascade,
+	// including on the Gemini turns that follow. See
+	// antigravity_session_flags.go for the capture and the bound on that state.
+	used := antigravityObserveModelFamily(id.ConversationID, model)
 	labels := map[string]string{
 		"cascade_id":               id.ConversationID,
 		"last_step_index":          stepIndex,
 		"request_id":               id.TrajectoryID + "-" + stepIndex,
 		"root_cascade_id":          id.ConversationID,
 		"trajectory_id":            id.TrajectoryID,
-		"used_claude":              strconv.FormatBool(strings.HasPrefix(lower, "claude")),
-		"used_claude_conservative": "false",
-		"used_non_gemini_model":    strconv.FormatBool(!strings.HasPrefix(lower, "gemini")),
+		"used_claude":              strconv.FormatBool(used.usedClaude),
+		"used_claude_conservative": strconv.FormatBool(used.usedClaude),
+		"used_non_gemini_model":    strconv.FormatBool(used.usedNonGemini),
 	}
 	if enum := AntigravityModelEnumName(model); enum != "" {
 		labels["model_enum"] = enum
@@ -1063,7 +1067,22 @@ var antigravityNumericIDRe = regexp.MustCompile(`^-?\d+$`)
 
 // WrapForAntigravity wraps a standard Gemini request in Antigravity API envelope.
 // sessionID scopes conversation and trajectory UUIDs per connection or client session.
+// WrapForAntigravityWithIdentity is WrapForAntigravity with the account's own
+// `generic-system-prompt` experiment decision. The shipped client picks between
+// two identity texts per account (see AntigravityIdentityPromptCoding); this
+// entry point is how a caller that knows the answer passes it down. Callers that
+// do not know it keep using WrapForAntigravity, which sends the generic block —
+// the branch the accounts here resolve to.
+func WrapForAntigravityWithIdentity(geminiBody []byte, projectID, modelName string, genericSystemPrompt bool, sessionID ...string) ([]byte, error) {
+	return wrapForAntigravity(geminiBody, projectID, modelName, AntigravityIdentityPromptFor(genericSystemPrompt), sessionID...)
+}
+
+// WrapForAntigravity always sends the generic identity block.
 func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionID ...string) ([]byte, error) {
+	return wrapForAntigravity(geminiBody, projectID, modelName, AntigravityIdentityPrompt, sessionID...)
+}
+
+func wrapForAntigravity(geminiBody []byte, projectID, modelName, identityPrompt string, sessionID ...string) ([]byte, error) {
 	// The wire id is the registry's upstreamModelId with panrouter's own effort
 	// notation stripped, not the bare synonym the lock and quota paths share.
 	// proxy.ForwardGemini normalises the model before calling this, so the
@@ -1129,7 +1148,7 @@ func WrapForAntigravity(geminiBody []byte, projectID, modelName string, sessionI
 	geminiBody = antigravityApplyOutputBudget(geminiBody, modelName)
 	// The lane's prompting shape: the client's own identity opens the system
 	// instruction, and a user turn's text is wrapped in the request tags.
-	geminiBody = antigravityApplyPromptShape(geminiBody)
+	geminiBody = antigravityApplyPromptShape(geminiBody, identityPrompt)
 
 	wrapper := AntigravityRequest{
 		Project:   projectID,

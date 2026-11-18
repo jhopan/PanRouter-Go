@@ -296,6 +296,10 @@ func RefreshAntigravityQuota(ctx context.Context, client *http.Client, connectio
 	agLastRefreshAt[connectionID] = now
 	agQuotaMu.Unlock()
 
+	// The identity decision rides this refresh: it needs the same token and client,
+	// and the stored answer has its own TTL, so this is a no-op most of the time.
+	RefreshAntigravityExperiments(ctx, client, accessToken)
+
 	quotaURL := antigravityQuotaBaseURL + "/v1internal:fetchAvailableModels"
 
 	reqBodyMap := map[string]any{}

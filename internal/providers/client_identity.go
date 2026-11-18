@@ -43,30 +43,35 @@ const (
 	// GrokCLIPagerIdentifier is the identifier the probe and OAuth paths send.
 	GrokCLIPagerIdentifier = "grok-pager"
 
-	// Antigravity identity. ONE captured value, not an assembly of guesses:
+// Antigravity identity. ONE captured value, not an assembly of guesses:
 	//
-	//   antigravity/hub/2.32.1 (aidev_client; os_type=<host>; arch=<host>; cl=1021296516)
+	//   antigravity/hub/2.32.2 (aidev_client; os_type=<host>; arch=<host>; cl=1022991777)
 	//
-	// PanRouter's capture (2026-11-14) ran the shipped Hub client
-	// (language_server.exe) with the argument set the Hub launcher passes —
-	// `--subclient_type hub --override_ide_version 2.32.1` — against a local
-	// listener and read the wire value. It settles three things: "hub" is the
-	// subclient type rather than a product name, the version is the Hub app's own
-	// (2.32.1, neither the IDE release nor its VS Code base), and the trailing
-	// parenthesised block is a client descriptor, not the old macOS-style
-	// darwin/arm64 suffix that no real client ever sent.
+	// PanRouter's 2026-11-14 capture ran the shipped Hub client
+	// (language_server.exe) with the Hub launcher's argument set —
+	// `--subclient_type hub --override_ide_version 2.32.1` — and read
+	// `antigravity/hub/2.32.1 (aidev_client; ...; cl=1021296516)`, which this port
+	// shipped as the default identity.
+	//
+	// The Hub moved. A MITM capture of the LIVE client on 2026-11-18 (app 44.9.1,
+	// language_server.exe 215543296 bytes, one real turn) reads
+	// `antigravity/hub/2.32.2 (aidev_client; os_type=windows; arch=amd64;
+	// cl=1022991777)` — the same shape with both numbers advanced. The old value is
+	// a fingerprint no current client sends, and it is the only wire difference
+	// found between this port and that capture (identity block, request tags,
+	// thinking dialect, output budgets and the envelope all match byte for byte).
 	//
 	// os_type/arch describe the machine, because the real client always describes
 	// the machine it runs on: a Linux box must not claim windows.
 	//
-	// This port had a different capture — the standalone `agy` CLI 1.5.1 with
-	// `antigravity/cli/…; auth_method=consumer` (2026-11-05) — and a note that the
+	// This port also had a different capture — the standalone `agy` CLI 1.5.1 with
+	// `antigravity/cli/...; auth_method=consumer` (2026-11-05) — and a note that the
 	// non-cli flavour answered the Argon lanes with 404. Two captures cannot both
 	// describe the same lane, so the parity value is the default and
 	// ANTIGRAVITY_IDENTITY=cli restores the previous string without a rebuild
 	// (see AntigravityUserAgent).
-	AntigravityHubVersion  = "2.32.1"
-	AntigravityClientLabel = "1021296516"
+	AntigravityHubVersion  = "2.32.2"
+	AntigravityClientLabel = "1022991777"
 	// AntigravityIDEVersion is the value the X-Client-Version headers carry. It
 	// tracks the Hub version: one client identity across every Antigravity call.
 	AntigravityIDEVersion = AntigravityHubVersion
