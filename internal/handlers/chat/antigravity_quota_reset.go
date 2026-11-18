@@ -32,19 +32,36 @@ func antigravityQuotaResetFor(connectionID string, now time.Time) time.Time {
 	return nextWeeklyRollover(now)
 }
 
-// antigravityBucketRemaining reports the account's own remaining percentage for
-// a bucket, and whether a live reading from the provider exists at all.
-func antigravityBucketRemaining(connectionID, bucket string, now time.Time) (float64, bool) {
-	if connectionID == "" || bucket == "" {
+// antigravityLowestBucketRemaining reports the smallest remaining percentage
+// across the account's LIVE buckets, and whether any live reading exists at all.
+//
+// No model is needed, and none can be: what this feeds is a decision to take the
+// whole ACCOUNT out of rotation for a week, and an account is only provably spent
+// when every bucket it reports has nothing left. Judging that by one bucket is
+// what parked a healthy account for 4.5 days on a Claude 429 while its Gemini
+// bucket still read 99% (measured 2026-11-18: cooldown_s=393774 until
+// 2026-11-23, on an account whose own client answered the same model normally).
+//
+// A lapsed reset is not a block, so a stale row is ignored rather than counted
+// as zero.
+func antigravityLowestBucketRemaining(connectionID string, now time.Time) (float64, bool) {
+	if connectionID == "" {
 		return 0, false
 	}
 	agQuotaMu.RLock()
-	quota, ok := agQuotaCache[connectionID][bucket]
-	agQuotaMu.RUnlock()
-	if !ok || quota.ResetAt.IsZero() || !quota.ResetAt.After(now) {
-		return 0, false
+	buckets := agQuotaCache[connectionID]
+	lowest, found := 0.0, false
+	for _, quota := range buckets {
+		if quota.ResetAt.IsZero() || !quota.ResetAt.After(now) {
+			continue
+		}
+		if !found || quota.RemainingPercentage < lowest {
+			lowest = quota.RemainingPercentage
+		}
+		found = true
 	}
-	return quota.RemainingPercentage, true
+	agQuotaMu.RUnlock()
+	return lowest, found
 }
 
 // antigravityBucketResetFor reads one bucket's reset out of the in-memory quota

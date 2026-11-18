@@ -166,7 +166,12 @@ func TestCooldownSecFor_AntigravityNamedResetStillParks(t *testing.T) {
 	}
 }
 
-func TestCooldownSecFor_AntigravityWithoutAReadingUsesTheCalendar(t *testing.T) {
+// A detail-free 429 with no reading on the account names no window at all, so
+// there is nothing to park for. The ordinary cooldown keeps the account in
+// rotation; parking it until the next weekly boundary on no evidence is exactly
+// the 4.5-day park measured on 2026-11-18 (cooldown_s=393774), where the account
+// answered the same model normally in its own client moments later.
+func TestCooldownSecFor_AntigravityWithoutAReadingHoldsTheOrdinaryCooldown(t *testing.T) {
 	installAntigravityKV(t)
 	base := time.Now().UTC()
 	useAntigravityClock(t, base)
@@ -177,8 +182,31 @@ func TestCooldownSecFor_AntigravityWithoutAReadingUsesTheCalendar(t *testing.T) 
 
 	handler := &ChatHandler{}
 	got := handler.cooldownSecFor("ag-no-reading", "antigravity", ue, errorText, cls)
-	want := int(nextWeeklyRollover(base).Sub(base).Seconds())
-	if got < want || got > want+2 {
-		t.Errorf("cooldown = %ds, want the next weekly boundary %ds", got, want)
+	if want := int(cls.CooldownMs / 1000); got != want {
+		t.Errorf("cooldown = %ds, want the classifier's %ds", got, want)
+	}
+	if weekly := int(nextWeeklyRollover(base).Sub(base).Seconds()); got >= weekly {
+		t.Errorf("cooldown = %ds, want less than the weekly window %ds with no reading to justify it", got, weekly)
+	}
+}
+
+// A stale reading — one whose reset already passed — is not a block either: it
+// describes an account that is usable again, so it must not license a park.
+func TestCooldownSecFor_AntigravityStaleReadingIsNotAPark(t *testing.T) {
+	installAntigravityKV(t)
+	base := time.Now().UTC()
+	useAntigravityClock(t, base)
+
+	seedAntigravityQuotas("ag-stale", map[string]AntigravityModelQuota{
+		"gemini_weekly": {RemainingPercentage: 0, ResetAt: base.Add(-time.Minute)},
+	})
+
+	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResourceExhaustedBody)}
+	errorText := extractErrorText(ue.Body)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, 0, "antigravity")
+
+	got := (&ChatHandler{}).cooldownSecFor("ag-stale", "antigravity", ue, errorText, cls)
+	if want := int(cls.CooldownMs / 1000); got != want {
+		t.Errorf("cooldown = %ds, want the classifier's %ds for a lapsed reading", got, want)
 	}
 }
