@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"panrouter/proxy/internal/constants"
 )
 
 type svcCall struct {
@@ -67,6 +70,21 @@ func TestRenderSystemdUnit(t *testing.T) {
 		unit := renderSystemdUnit("/opt/my apps/panrouter-go", nil)
 		if !strings.Contains(unit, `ExecStart="/opt/my apps/panrouter-go"`) {
 			t.Errorf("ExecStart must quote spaced paths:\n%s", unit)
+		}
+	})
+
+	// The other end of the self-update restart protocol: the process exits
+	// with 256 to ask its supervisor for a restart, and the unit has to
+	// declare that status as the successful one. Without it the exit reads as
+	// a crash: systemd restarts the unit either way, but it lands in the
+	// failed state and `panrouter-go service status` reports the gateway as
+	// degraded rather than active.
+	t.Run("the restart status is declared successful", func(t *testing.T) {
+		t.Setenv("DATA_DIR", "")
+		unit := renderSystemdUnit("/usr/local/bin/panrouter-go", nil)
+		want := "SuccessExitStatus=" + strconv.Itoa(constants.SystemdRestartExitStatus)
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %q:\n%s", want, unit)
 		}
 	})
 

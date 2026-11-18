@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,18 @@ func renderSystemdUnit(exe string, args []string) string {
 		b.WriteString("Environment=" + quoteArg("DATA_DIR="+dataDir) + "\n")
 	}
 	b.WriteString("Restart=always\n")
-	b.WriteString("RestartSec=3\n\n")
+	b.WriteString("RestartSec=3\n")
+	// A self-update under a supervisor exits with 256 to ask for a restart
+	// instead of spawning a replacement process of its own: a second process
+	// in the same cgroup races the supervisor for the listening port, and
+	// systemd still counts the outgoing one as alive while it does.
+	//
+	// SuccessExitStatus is what keeps that status from reading as a crash —
+	// systemd restarts the unit either way, but a successful status leaves it
+	// out of the failed state, so `panrouter-go service status` reports the
+	// gateway as active rather than degraded.
+	b.WriteString("SuccessExitStatus=" + strconv.Itoa(constants.SystemdRestartExitStatus) + "\n")
+	b.WriteString("\n")
 	b.WriteString("[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
 	return b.String()

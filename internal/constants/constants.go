@@ -67,6 +67,19 @@ const (
 	DefaultLockDuration401 = 120
 )
 
+// SystemdRestartExitStatus is the exit status a supervised process uses to ask
+// its supervisor for a restart after a self-update.
+//
+// systemd treats a non-zero exit as a failure by default, and the unit's
+// `SuccessExitStatus=` is what turns a chosen status into "this was on
+// purpose". The value is 0x100 (256), which systemd reserves for exactly this
+// and which no ordinary failure produces.
+//
+// It lives here rather than in either package because BOTH ends of the
+// protocol need it: the process exits with it, and the unit template declares
+// it as the successful status. Two copies of the number would let them drift.
+const SystemdRestartExitStatus = 256
+
 // Truncation Limits
 const (
 	MaxResponseContentLen = 10000

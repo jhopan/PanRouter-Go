@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/samber/lo"
+	"panrouter/proxy/internal/constants"
 	"panrouter/proxy/internal/daemon"
 	"panrouter/proxy/internal/log"
 	"panrouter/proxy/internal/shutdown"
@@ -42,6 +43,43 @@ var DefaultGitHubRepo = "jhopan/PanRouter-Go"
 // DefaultCheckInterval is the periodic background update check interval (6 hours).
 const DefaultCheckInterval = 6 * time.Hour
 
+// SystemdRestartExitStatus is the exit status a supervised process uses to ask
+// its supervisor for a restart.
+//
+// systemd treats a non-zero exit as a failure by default, and the unit's
+// `SuccessExitStatus=` is what turns a chosen status into "this was on
+// purpose". The value is 0x100 (256), which systemd reserves for exactly this
+// and which no ordinary failure produces.
+//
+// The unit template emits:
+//
+//	SuccessExitStatus=256
+//	Restart=always
+//
+// so the status asks for a restart instead of reading as a crash: systemd
+// restarts the unit either way, but a successful status keeps the unit out of
+// the failed state, and `panrouter-go service status` reports it as active
+// rather than degraded.
+//
+// The number lives in internal/constants because both ends of the protocol
+// need it — the process exits with it, and the unit declares it as the
+// successful status.
+const SystemdRestartExitStatus = constants.SystemdRestartExitStatus
+
+// systemdEnvMarker is the variable systemd sets in every unit it starts.
+// Its presence is what tells a supervised process that a supervisor — not a
+// human — owns its lifetime.
+//
+// The marker is checked against the process's own PID because systemd sets
+// it in the environment of the process it starts. A shell that inherited the
+// variable from an earlier unit would otherwise look supervised while
+// running unsupervised.
+const systemdEnvMarker = "INVOCATION_ID"
+
+// systemdPIDEnv is the variable systemd sets to the PID of the process it
+// started.
+const systemdPIDEnv = "SYSTEMD_EXEC_PID"
+
 var (
 	cachedInfo        *UpdateInfo
 	cacheMu           sync.RWMutex
@@ -50,7 +88,31 @@ var (
 	autoUpdateMu      sync.RWMutex
 	updateInProgress  bool
 	updateProgressMu  sync.Mutex
+
+	// updatedBinaryPath is the path the last successful self-update wrote
+	// the new binary to. The restart must name THIS path: the swap renames
+	// the running inode aside, so /proc/self/exe follows it to the `.old`
+	// file, which the swap then deletes.
+	updatedBinaryPath string
+	installedPathMu   sync.Mutex
 )
+
+// UpdatedBinaryPath returns the path the last successful self-update wrote
+// the new binary to, and ok=false when no update has been applied yet.
+//
+// The restart uses it instead of resolving the running executable again. On
+// Linux the running inode has been renamed to `.old` by the swap, so
+// resolving it after the fact points at a file that no longer exists — the
+// restart then failed with "lstat …/panrouter-go.old: no such file or
+// directory" and the gateway kept running the old binary.
+func UpdatedBinaryPath() (string, bool) {
+	installedPathMu.Lock()
+	defer installedPathMu.Unlock()
+	if updatedBinaryPath == "" {
+		return "", false
+	}
+	return updatedBinaryPath, true
+}
 
 // UpdateInfo holds detailed version and asset information.
 type UpdateInfo struct {
@@ -409,6 +471,14 @@ var selfExecutable = os.Executable
 // PerformSelfUpdate downloads, decompresses (tar.gz/zip if needed), verifies, and safely replaces the active binary.
 // The downloaded asset (after archive extraction) is verified against expectedSHA256 before the binary is written
 // to disk, and a mismatch aborts the update and keeps the running binary intact.
+//
+// On success it records the path the new binary was written to, which is what
+// the restart must name. That is not the same as the path the running process
+// was started from: the swap renames the running inode aside, so on Linux
+// /proc/self/exe follows it to the `.old` file — which the swap then deletes.
+// A restart that looked the path up afterwards failed with "lstat
+// …/panrouter-go.old: no such file or directory", leaving the gateway running
+// the old binary while the file on disk was already the new one.
 func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	if downloadURL == "" {
 		return fmt.Errorf("missing download URL for platform %s_%s", runtime.GOOS, runtime.GOARCH)
@@ -441,6 +511,10 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	if err != nil {
 		return fmt.Errorf("resolve symlink path: %w", err)
 	}
+	// The path is captured HERE, before the swap below renames the file away.
+	// Resolving it once, up front, removes the race entirely: the restart
+	// names the same path the swap wrote to.
+	installedPath := execPath
 
 	log.Info("updater", "downloading update asset", "url", downloadURL, "target", execPath)
 
@@ -518,6 +592,11 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 
 	_ = os.Remove(oldPath)
 	log.Info("updater", "self-update applied successfully!", "binary", execPath)
+	// The restart names this path — not the path the running inode has moved
+	// to. See the capture above.
+	installedPathMu.Lock()
+	updatedBinaryPath = installedPath
+	installedPathMu.Unlock()
 	return nil
 }
 
@@ -775,20 +854,44 @@ func runCheckCycle(ctx context.Context) {
 // process still holds the listening socket, and a child that starts a moment
 // earlier races it for the port. main runs the hook once fxApp.Stop has closed
 // the listener, so the new process always finds the port free.
+//
+// Under a supervisor the process does NOT spawn a replacement. systemd owns
+// the unit, and a second process inside the same cgroup competes with the
+// supervisor for the listening port while systemd still counts the outgoing
+// one as alive — the gateway ends up with two instances fighting for 20130.
+// Instead the process exits with a status the unit is configured to restart
+// on, and systemd brings the new binary up itself.
+//
+// The path that gets started is the one the update wrote to, not the one the
+// running inode has moved to: the swap renames the running binary aside and
+// deletes that name, so resolving it here would fail.
 func RestartSelf() {
-	execPath, err := os.Executable()
-	if err != nil {
-		log.Error("updater", "locate binary for restart failed", "error", err)
-		return
-	}
-
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		log.Error("updater", "resolve symlink for restart failed", "error", err)
-		return
+	execPath, ok := UpdatedBinaryPath()
+	if !ok {
+		var err error
+		execPath, err = os.Executable()
+		if err != nil {
+			log.Error("updater", "locate binary for restart failed", "error", err)
+			return
+		}
+		execPath, err = filepath.EvalSymlinks(execPath)
+		if err != nil {
+			log.Error("updater", "resolve symlink for restart failed", "error", err)
+			return
+		}
 	}
 
 	spawn := func() {
+		// A supervised process hands the restart back to its supervisor: the
+		// exit status is the request, and the supervisor starts the new
+		// binary. Spawning a child here would put a second process in the
+		// same cgroup, racing the supervisor for the port.
+		if underSystemd() {
+			log.Info("updater", "supervised process is exiting so its supervisor restarts the updated binary",
+				"exitStatus", SystemdRestartExitStatus)
+			os.Exit(SystemdRestartExitStatus)
+		}
+
 		cmd := exec.Command(execPath, restartArgs()...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
