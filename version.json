@@ -1,5 +1,5 @@
 {
   "downloadUrl": "https://github.com/jhopan/PanRouter-Go/releases/latest",
-  "latestVersion": "1.0.5",
+  "latestVersion": "1.0.6",
   "releaseNotes": "v1.0.2 — auto-update that survives a service install. The self-update applied the new binary and then failed to restart into it: the restart resolved the running executable after the swap had renamed it aside and deleted that name, so on Linux it looked for a file that no longer existed (lstat …/panrouter-go.old: no such file or directory). The gateway kept serving the old binary while the file on disk was already the new one. The path is now captured before the swap. A supervised process also no longer spawns its own replacement: under systemd that puts a second process in the same cgroup competing for the listening port, so the process now exits with the status systemd reserves for a deliberate restart request and the supervisor brings the new binary up. Also in this release: the Antigravity lane rebuilt from the shipped client (the 429 a Claude Code request used to hit was a filtering verdict, not quota), an Automatic Backup panel, Cloudflare Workers AI fixes, and a dropped Docker Hub publish job. See docs/RELEASING.md."
 }
