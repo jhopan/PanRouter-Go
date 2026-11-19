@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,9 +52,9 @@ func antigravityProjectUserAgent(connData *shared.ConnectionData) string {
 }
 
 var lcaMetadata = map[string]any{
-	"ideType":    9, // ANTIGRAVITY
-	"platform":   GetAntigravityPlatformEnum(runtime.GOOS, runtime.GOARCH),
-	"pluginType": 2, // GEMINI
+	// The Hub sends the proto enum NAME only. platform/pluginType belong to the
+	// Gemini CLI client and make this account's bootstrap wire diverge.
+	"ideType": "ANTIGRAVITY",
 }
 
 // GetAntigravityPlatformEnum maps the host (GOOS, GOARCH) to the Google Cloud

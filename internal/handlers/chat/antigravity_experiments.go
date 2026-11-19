@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -31,10 +30,11 @@ func RefreshAntigravityExperiments(ctx context.Context, client *http.Client, acc
 		return
 	}
 
-	// The captured request carries no body — the config is answered from the
-	// authenticated identity alone.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		providers.AntigravityAICodeBaseURL+"/v1alpha:fetchConfig", bytes.NewReader(nil))
+	// The captured request is a GET with no body — the config is answered from the
+	// authenticated identity alone. A POST answers 404, which is how this call
+	// originally failed and left every account on the generic branch.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		providers.AntigravityAICodeBaseURL+"/v1alpha:fetchConfig", nil)
 	if err != nil {
 		providers.StoreAntigravityGenericSystemPrompt(accessToken, true, false)
 		return

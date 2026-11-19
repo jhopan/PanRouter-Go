@@ -28,9 +28,6 @@ const maxAntigravityOutputTokens = 65536
 // maxOutputTokens strictly exceeds it (parity across chat and image paths).
 const thinkingHeadroomTokens = 8192
 
-// antigravityDecoyUnavailable is the placeholder description for injected decoy tools.
-const antigravityDecoyUnavailable = "This tool is currently unavailable."
-
 // antigravityFunctionNameRe is the tail Gemini accepts after the first
 // character: everything outside [a-zA-Z0-9_.:-] is replaced, and the name is
 // truncated to 64 bytes in total.
@@ -91,180 +88,90 @@ type AntigravityRequest struct {
 	Request     jsontext.Value `json:"request"`
 }
 
-// AntigravityNativeToolNames are tool names preserved without suffix.
-var AntigravityNativeToolNames = map[string]bool{
-	"browser_subagent": true,
-	"command_status":   true,
-	"find_by_name":     true,
-	"generate_image":   true,
-	"grep_search":      true,
-	"list_dir":         true,
-	"list_resources":   true,
-	"mcp_sequential-thinking_sequentialthinking": true,
-	"multi_replace_file_content":                 true,
-	"notify_user":                                true,
-	"read_resource":                              true,
-	"read_terminal":                              true,
-	"read_url_content":                           true,
-	"replace_file_content":                       true,
-	"run_command":                                true,
-	"search_web":                                 true,
-	"send_command_input":                         true,
-	"task_boundary":                              true,
-	"view_content_chunk":                         true,
-	"view_file":                                  true,
-	"write_to_file":                              true,
-}
-
-// AntigravityDecoyPlaceholderParams provides a valid schema for tools with no input parameters.
-var AntigravityDecoyPlaceholderParams = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"reason": map[string]any{
-			"type":        "string",
-			"description": "Brief explanation of why you are calling this tool",
-		},
-	},
-	"required": []string{"reason"},
-}
-
-// AntigravityDecoyTools are the 21 decoy tools matching official IDE defaults.
-var AntigravityDecoyTools = []GeminiFunctionDecl{
-	{Name: "browser_subagent", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "command_status", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "find_by_name", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "generate_image", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "grep_search", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "list_dir", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "list_resources", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "mcp_sequential-thinking_sequentialthinking", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "multi_replace_file_content", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "notify_user", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "read_resource", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "read_terminal", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "read_url_content", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "replace_file_content", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "run_command", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "search_web", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "send_command_input", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "task_boundary", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "view_content_chunk", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "view_file", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-	{Name: "write_to_file", Description: antigravityDecoyUnavailable, Parameters: AntigravityDecoyPlaceholderParams},
-}
-
-// CloakAntigravityRequest cloaks tool names with `_ide` suffix and appends decoy tools.
+// CloakAntigravityRequest keeps the caller's actual tool contract on the agent
+// wire. The name remains for compatibility, but the old behaviour is gone:
+// live Hub/CLI captures carry their real tools (16 and 12 respectively), not a
+// padded fake IDE inventory, and valid caller names are not rewritten to `_ide`.
 //
-// Every name that reaches the wire is run through SanitizeFunctionName: Google
-// rejects the whole request when one declaration is not a valid Gemini function
-// name, and the returned map is keyed on the sanitised name (what the backend
-// echoes back) → the caller's original name.
-func CloakAntigravityRequest(req *GeminiRequest, clientTool string) (*GeminiRequest, map[string]string) {
+// Only transformations Gemini itself requires remain: declarations are flattened
+// into one group, duplicate/invalid names are normalised, schemas are cleaned,
+// and functionCall/functionResponse history receives the same normalised name.
+// The Hub writes VALIDATED whenever it has declarations.
+func CloakAntigravityRequest(req *GeminiRequest, _ string) (*GeminiRequest, map[string]string) {
 	if req == nil {
 		return nil, nil
 	}
-
 	toolNameMap := make(map[string]string)
 	if len(req.Tools) == 0 {
 		return req, toolNameMap
 	}
 
-	isCopilot := clientTool == "github-copilot"
-	var clientDecls []GeminiFunctionDecl
-	decoyNames := make(map[string]bool, len(AntigravityDecoyTools))
-	for _, dt := range AntigravityDecoyTools {
-		decoyNames[dt.Name] = true
-	}
-
-	for _, toolGroup := range req.Tools {
-		for _, fn := range toolGroup.FunctionDeclarations {
-			if isCopilot && (AntigravityNativeToolNames[fn.Name] || decoyNames[fn.Name]) {
+	seen := make(map[string]struct{})
+	decls := make([]GeminiFunctionDecl, 0)
+	for _, group := range req.Tools {
+		for _, decl := range group.FunctionDeclarations {
+			original := decl.Name
+			decl.Name = SanitizeFunctionName(decl.Name)
+			if _, exists := seen[decl.Name]; exists {
 				continue
 			}
-			if AntigravityNativeToolNames[fn.Name] {
-				// Native names are already valid Gemini function names, but the
-				// pass runs on every declaration anyway: the wire invariant is
-				// "every name in tools[] is valid", and a native name is only
-				// excused from the suffix, not from the rule (upstream's
-				// executor sanitises the merged list the same way).
-				fn.Name = SanitizeFunctionName(fn.Name)
-				clientDecls = append(clientDecls, fn)
-				continue
+			seen[decl.Name] = struct{}{}
+			if decl.Name != original {
+				toolNameMap[decl.Name] = original
 			}
-
-			// The cloaked name is what Google echoes back on a functionCall, so
-			// the decloak map is keyed on the SANITISED name. Registering the
-			// unsanitised "name_ide" instead leaves a dead entry (and a client
-			// whose tool name held a space or started with a digit never gets
-			// its own name back).
-			wireName := SanitizeFunctionName(fn.Name + "_ide")
-			toolNameMap[wireName] = fn.Name
-			fn.Name = wireName
-			clientDecls = append(clientDecls, fn)
-		}
-	}
-
-	// Merge client declarations first, then decoy tools (deduplicating)
-	seen := make(map[string]bool)
-	var allDecls []GeminiFunctionDecl
-	for _, decl := range append(clientDecls, AntigravityDecoyTools...) {
-		if decl.Name == "" || seen[decl.Name] {
-			continue
-		}
-		seen[decl.Name] = true
-		if decl.Parameters != nil {
-			if b, err := json.Marshal(decl.Parameters, json.Deterministic(true)); err == nil {
-				cleaned := CleanParametersSchema(b)
-				var cleanedParams any
-				if err := json.Unmarshal(cleaned, &cleanedParams); err == nil {
-					decl.Parameters = cleanedParams
+			if decl.Parameters != nil {
+				if raw, err := json.Marshal(decl.Parameters, json.Deterministic(true)); err == nil {
+					cleaned := CleanParametersSchema(raw)
+					var parameters any
+					if json.Unmarshal(cleaned, &parameters) == nil {
+						decl.Parameters = parameters
+					}
 				}
 			}
-		}
-		allDecls = append(allDecls, decl)
-	}
-
-	// Update contents message history with renamed tools
-	cloakedContents := make([]GeminiContent, len(req.Contents))
-	for i, c := range req.Contents {
-		cloakedParts := make([]GeminiPart, len(c.Parts))
-		for j, p := range c.Parts {
-			partCopy := p
-			if p.FunctionCall != nil && !AntigravityNativeToolNames[p.FunctionCall.Name] {
-				fc := *p.FunctionCall
-				fc.Name = SanitizeFunctionName(fc.Name + "_ide")
-				partCopy.FunctionCall = &fc
-			}
-			if p.FunctionResponse != nil && !AntigravityNativeToolNames[p.FunctionResponse.Name] {
-				fr := *p.FunctionResponse
-				fr.Name = SanitizeFunctionName(fr.Name + "_ide")
-				partCopy.FunctionResponse = &fr
-			}
-			cloakedParts[j] = partCopy
-		}
-		cloakedContents[i] = GeminiContent{
-			Role:  c.Role,
-			Parts: cloakedParts,
+			decls = append(decls, decl)
 		}
 	}
 
 	res := *req
-	res.Tools = []GeminiTool{{FunctionDeclarations: allDecls}}
-	res.ToolConfig = map[string]any{
-		"functionCallingConfig": map[string]any{
-			"mode": "VALIDATED",
-		},
+	if len(decls) == 0 {
+		res.Tools = nil
+		res.ToolConfig = nil
+		return &res, toolNameMap
 	}
-	res.Contents = cloakedContents
-
+	res.Tools = []GeminiTool{{FunctionDeclarations: decls}}
+	res.ToolConfig = map[string]any{
+		"functionCallingConfig": map[string]any{"mode": "VALIDATED"},
+	}
+	contents := make([]GeminiContent, len(req.Contents))
+	for i, content := range req.Contents {
+		parts := make([]GeminiPart, len(content.Parts))
+		for j, part := range content.Parts {
+			parts[j] = part
+			if part.FunctionCall != nil {
+				call := *part.FunctionCall
+				call.Name = SanitizeFunctionName(call.Name)
+				parts[j].FunctionCall = &call
+			}
+			if part.FunctionResponse != nil {
+				response := *part.FunctionResponse
+				response.Name = SanitizeFunctionName(response.Name)
+				parts[j].FunctionResponse = &response
+			}
+		}
+		contents[i] = GeminiContent{Role: content.Role, Parts: parts}
+	}
+	res.Contents = contents
 	return &res, toolNameMap
 }
 
-// UncloakToolName restores the original tool name from a cloaked name.
+// UncloakToolName restores the original tool name from a legacy cloaked name.
+// Response translators outside the Antigravity agent lane still consume those
+// aliases, so this compatibility decode stays global. The Hub agent request path
+// no longer manufactures either form.
 func UncloakToolName(name string, toolMap map[string]string) string {
 	if toolMap != nil {
-		if orig, ok := toolMap[name]; ok {
-			return orig
+		if original, ok := toolMap[name]; ok {
+			return original
 		}
 	}
 	name = strings.TrimPrefix(name, "proxy_")

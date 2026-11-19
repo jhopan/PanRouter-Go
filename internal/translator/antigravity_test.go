@@ -10,104 +10,54 @@ import (
 	"panrouter/proxy/internal/translator"
 )
 
-func TestCloakAntigravityRequest_WebSearchGetsRenamed(t *testing.T) {
-	// web_search (Claude's server tool type) is NOT in AntigravityNativeToolNames
-	// — only search_web (Gemini's native) is. This test locks in the distinction:
-	// web_search must be renamed to web_search_ide, while search_web stays as-is.
+func TestCloakAntigravityRequest_PreservesCallerTools(t *testing.T) {
 	req := &translator.GeminiRequest{
-		Contents: []translator.GeminiContent{
-			{
-				Role: "user",
-				Parts: []translator.GeminiPart{
-					{Text: "cari sesuatu"},
-				},
-			},
-		},
-		Tools: []translator.GeminiTool{
-			{
-				FunctionDeclarations: []translator.GeminiFunctionDecl{
-					{
-						Name:        "web_search",
-						Description: "Search the internet",
-						Parameters: map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"query": map[string]any{
-									"type":      "string",
-									"minLength": 1,
-									"maxLength": 4000,
-								},
-							},
-							"required": []string{"query"},
+		Contents: []translator.GeminiContent{{
+			Role:  "user",
+			Parts: []translator.GeminiPart{{Text: "cari sesuatu"}},
+		}},
+		Tools: []translator.GeminiTool{{
+			FunctionDeclarations: []translator.GeminiFunctionDecl{
+				{
+					Name:        "web_search",
+					Description: "Search the internet",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 4000},
 						},
-					},
-					{
-						Name:        "search_web",
-						Description: "Gemini web search",
-						Parameters: map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"query": map[string]any{"type": "string"},
-							},
-						},
+						"required": []string{"query"},
 					},
 				},
+				{Name: "search_web", Description: "Caller tool", Parameters: map[string]any{"type": "object"}},
 			},
-		},
+		}},
 	}
 
-	cloaked, toolMap := translator.CloakAntigravityRequest(req, "")
-	if cloaked == nil {
-		t.Fatal("expected cloaked request, got nil")
+	wire, toolMap := translator.CloakAntigravityRequest(req, "")
+	if wire == nil {
+		t.Fatal("expected wire request")
 	}
-
-	// web_search → web_search_ide (not native)
-	if orig, ok := toolMap["web_search_ide"]; !ok || orig != "web_search" {
-		t.Errorf("expected toolMap[web_search_ide] = web_search, got %s/%v", orig, ok)
+	if len(toolMap) != 0 {
+		t.Errorf("valid caller tools must not be renamed, got map %#v", toolMap)
 	}
-
-	// search_web — native, no rename
-	if _, ok := toolMap["search_web"]; ok {
-		t.Errorf("search_web is native and should NOT be in toolMap")
+	if len(wire.Tools) != 1 || len(wire.Tools[0].FunctionDeclarations) != 2 {
+		t.Fatalf("wire declarations = %#v, want exactly the 2 caller tools", wire.Tools)
 	}
-
-	// Verify the renamed declaration has cleaned schema (no minLength/maxLength)
-	foundWS := false
-	foundSW := false
-	for _, tg := range cloaked.Tools {
-		for _, decl := range tg.FunctionDeclarations {
-			switch decl.Name {
-			case "web_search_ide":
-				foundWS = true
-				params, ok := decl.Parameters.(map[string]any)
-				if !ok {
-					t.Fatalf("web_search_ide parameters not an object: %T", decl.Parameters)
-				}
-				props, _ := params["properties"].(map[string]any)
-				query, _ := props["query"].(map[string]any)
-				// minLength/maxLength are legitimate Gemini constraints and are
-				// kept (coerced to int) by cleanGeminiSchema, not stripped.
-				if f64, ok := num(query["minLength"]); !ok || f64 != 1 {
-					t.Errorf("web_search_ide query minLength should be kept as 1, got %v", query["minLength"])
-				}
-				if f64, ok := num(query["maxLength"]); !ok || f64 != 4000 {
-					t.Errorf("web_search_ide query maxLength should be kept as 4000, got %v", query["maxLength"])
-				}
-			case "search_web":
-				foundSW = true
-				// search_web is native so the client's declaration passes through
-				// unchanged (the decoy "unavailable" version is deduped away).
-				if decl.Description != "Gemini web search" {
-					t.Errorf("search_web should keep client description, got %q", decl.Description)
-				}
-			}
-		}
+	if got := wire.Tools[0].FunctionDeclarations[0].Name; got != "web_search" {
+		t.Errorf("wire tool = %q, want web_search", got)
 	}
-	if !foundWS {
-		t.Error("web_search_ide not found in cloaked tools")
+	params, ok := wire.Tools[0].FunctionDeclarations[0].Parameters.(map[string]any)
+	if !ok {
+		t.Fatalf("parameters = %T, want object", wire.Tools[0].FunctionDeclarations[0].Parameters)
 	}
-	if !foundSW {
-		t.Error("search_web decoy not found in cloaked tools")
+	props, _ := params["properties"].(map[string]any)
+	query, _ := props["query"].(map[string]any)
+	if f64, ok := num(query["minLength"]); !ok || f64 != 1 {
+		t.Errorf("query minLength = %v, want 1", query["minLength"])
+	}
+	if wire.ToolConfig == nil {
+		t.Fatal("toolConfig missing")
 	}
 }
 
@@ -124,70 +74,13 @@ func num(v any) (float64, bool) {
 	return 0, false
 }
 
-func TestCloakAntigravityRequest_RenamesAndInjectsDecoys(t *testing.T) {
-	req := &translator.GeminiRequest{
-		Contents: []translator.GeminiContent{
-			{
-				Role: "model",
-				Parts: []translator.GeminiPart{
-					{FunctionCall: &translator.GeminiFunctionCall{Name: "execute_code", Args: map[string]any{"code": "ls"}}},
-				},
-			},
-			{
-				Role: "user",
-				Parts: []translator.GeminiPart{
-					{FunctionResponse: &translator.GeminiFunctionResp{Name: "execute_code"}},
-				},
-			},
-		},
-		Tools: []translator.GeminiTool{
-			{
-				FunctionDeclarations: []translator.GeminiFunctionDecl{
-					{Name: "execute_code", Description: "Run code"},
-					{Name: "run_command", Description: "Native tool"},
-				},
-			},
-		},
-	}
-
-	cloaked, toolMap := translator.CloakAntigravityRequest(req, "")
-	if cloaked == nil {
-		t.Fatal("expected cloaked request, got nil")
-	}
-
-	// execute_code should be renamed to execute_code_ide
-	if toolMap["execute_code_ide"] != "execute_code" {
-		t.Errorf("expected toolMap[execute_code_ide] = execute_code, got %s", toolMap["execute_code_ide"])
-	}
-
-	// Check function call in history was renamed
-	if cloaked.Contents[0].Parts[0].FunctionCall.Name != "execute_code_ide" {
-		t.Errorf("expected contents functionCall renamed to execute_code_ide, got %s", cloaked.Contents[0].Parts[0].FunctionCall.Name)
-	}
-	if cloaked.Contents[1].Parts[0].FunctionResponse.Name != "execute_code_ide" {
-		t.Errorf("expected contents functionResponse renamed to execute_code_ide, got %s", cloaked.Contents[1].Parts[0].FunctionResponse.Name)
-	}
-
-	// Check 21 decoy tools injected
-	if len(cloaked.Tools) == 0 || len(cloaked.Tools[0].FunctionDeclarations) < 20 {
-		t.Errorf("expected >= 20 function declarations including decoys, got %d", len(cloaked.Tools[0].FunctionDeclarations))
-	}
-}
-
-func TestUncloakToolName(t *testing.T) {
-	toolMap := map[string]string{
-		"execute_code_ide": "execute_code",
-		"custom_tool_ide":  "custom_tool",
-	}
-
-	if un := translator.UncloakToolName("execute_code_ide", toolMap); un != "execute_code" {
-		t.Errorf("expected execute_code, got %s", un)
-	}
-	if un := translator.UncloakToolName("run_command", toolMap); un != "run_command" {
-		t.Errorf("expected run_command unchanged, got %s", un)
+func TestUncloakToolNameKeepsLegacyResponseCompatibility(t *testing.T) {
+	toolMap := map[string]string{"sanitised_name": "caller name"}
+	if un := translator.UncloakToolName("sanitised_name", toolMap); un != "caller name" {
+		t.Errorf("mapped tool = %q, want caller name", un)
 	}
 	if un := translator.UncloakToolName("other_ide", nil); un != "other" {
-		t.Errorf("expected other (suffix stripped), got %s", un)
+		t.Errorf("legacy _ide response = %q, want other", un)
 	}
 }
 
@@ -518,19 +411,6 @@ func TestNormalizeAntigravityModel(t *testing.T) {
 		got := translator.NormalizeAntigravityModel(tt.input)
 		if got != tt.expected {
 			t.Errorf("NormalizeAntigravityModel(%q) = %q, expected %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
-func TestAntigravityDecoyTools_NonEmptyProperties(t *testing.T) {
-	for _, dt := range translator.AntigravityDecoyTools {
-		params, ok := dt.Parameters.(map[string]any)
-		if !ok {
-			t.Fatalf("decoy tool %s has invalid parameters type", dt.Name)
-		}
-		props, ok := params["properties"].(map[string]any)
-		if !ok || len(props) == 0 {
-			t.Errorf("decoy tool %s has empty properties; Gemini will reject with 'Invalid tool parameters'", dt.Name)
 		}
 	}
 }

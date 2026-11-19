@@ -77,17 +77,16 @@ func TestE2E_Gemini38_FlashHigh_NonStream_ToolCall(t *testing.T) {
 			t.Fatalf("expected tools in gemini request, got none")
 		}
 		decl := gemReq.Tools[0].FunctionDeclarations[0]
-		if decl.Name != "get_weather_ide" {
-			t.Errorf("expected tool get_weather_ide (cloaked), got %q", decl.Name)
+		if decl.Name != "get_weather" {
+			t.Errorf("expected caller tool get_weather, got %q", decl.Name)
 		}
 		// Check that prefixItems was cleaned and items exists
 		paramBytes, _ := json.Marshal(decl.Parameters)
 		if strings.Contains(string(paramBytes), "prefixItems") {
 			t.Errorf("prefixItems should be cleaned from tool schema")
 		}
-		// Respond with Gemini tool-call response wrapped in Antigravity envelope
-		// The response includes thoughtSignature to test backfill logic
-		// Return cloaked name so proxy can uncloak to original for client
+		// Respond with the caller's real tool name. Hub preserves valid names;
+		// there is no `_ide` alias to decloak on the agent path.
 		gemResp := map[string]any{
 			"candidates": []map[string]any{
 				{
@@ -96,7 +95,7 @@ func TestE2E_Gemini38_FlashHigh_NonStream_ToolCall(t *testing.T) {
 							{
 								"thoughtSignature": translator.DefaultThinkingSignature[:64],
 								"functionCall": map[string]any{
-									"name": "get_weather_ide",
+									"name": "get_weather",
 									"args": map[string]any{"location": "Jakarta", "unit": "celsius"},
 								},
 							},

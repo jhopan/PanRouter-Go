@@ -13,16 +13,10 @@ import (
 // declaration: [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}.
 var geminiFunctionNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}$`)
 
-// TestCloakAntigravityRequest_SanitizesFunctionNames ports
-// open-sse/executors/antigravity.js sanitizeFunctionName (:12-19): generateContent
-// rejects the whole request when one declaration is not a valid function name,
-// so the name is repaired before it reaches the wire, and the decloak map is
-// keyed on the REPAIRED name because that is what the backend echoes back on a
-// functionCall.
-//
-// Fails before the change: names went out verbatim ("my tool" plus the cloak
-// suffix) and the map key carried the unsanitised spelling, which no response
-// could ever match.
+// TestCloakAntigravityRequest_SanitizesFunctionNames pins the only rewrite Hub
+// agent wire performs: repair names Gemini would reject. It does not add `_ide`.
+// The returned map exists only when sanitisation changed the caller's spelling,
+// so a response can still be restored exactly.
 func TestCloakAntigravityRequest_SanitizesFunctionNames(t *testing.T) {
 	longName := strings.Repeat("a", 70)
 	tests := []struct {
@@ -30,11 +24,11 @@ func TestCloakAntigravityRequest_SanitizesFunctionNames(t *testing.T) {
 		toolName string
 		wantWire string
 	}{
-		{name: "space is replaced", toolName: "my tool", wantWire: "my_tool_ide"},
-		{name: "leading digit is prefixed", toolName: "9lives", wantWire: "_9lives_ide"},
-		{name: "slash is replaced", toolName: "fs/read", wantWire: "fs_read_ide"},
-		{name: "dots and colons survive", toolName: "mcp.server:run", wantWire: "mcp.server:run_ide"},
-		{name: "already valid keeps the suffix", toolName: "get_weather", wantWire: "get_weather_ide"},
+		{name: "space is replaced", toolName: "my tool", wantWire: "my_tool"},
+		{name: "leading digit is prefixed", toolName: "9lives", wantWire: "_9lives"},
+		{name: "slash is replaced", toolName: "fs/read", wantWire: "fs_read"},
+		{name: "dots and colons survive", toolName: "mcp.server:run", wantWire: "mcp.server:run"},
+		{name: "already valid remains unchanged", toolName: "get_weather", wantWire: "get_weather"},
 		{name: "overlong name is truncated to 64 bytes", toolName: longName, wantWire: strings.Repeat("a", 64)},
 	}
 
@@ -49,7 +43,6 @@ func TestCloakAntigravityRequest_SanitizesFunctionNames(t *testing.T) {
 			if cloaked == nil {
 				t.Fatal("expected a cloaked request")
 			}
-			// The client declaration comes first; the decoys follow it.
 			decl := cloaked.Tools[0].FunctionDeclarations[0]
 			if decl.Name != tt.wantWire {
 				t.Fatalf("wire name = %q, want %q", decl.Name, tt.wantWire)
@@ -57,16 +50,15 @@ func TestCloakAntigravityRequest_SanitizesFunctionNames(t *testing.T) {
 			if !geminiFunctionNameRe.MatchString(decl.Name) {
 				t.Errorf("wire name %q is not a valid Gemini function name", decl.Name)
 			}
-			// (b) the response maps the echoed name back to the caller's own
-			// spelling, including the characters sanitisation removed.
+			// The response restores an altered spelling, while a valid caller name
+			// was never mapped and therefore stays itself.
 			if got := translator.UncloakToolName(decl.Name, toolMap); got != tt.toolName {
 				t.Errorf("decloaked %q = %q, want the caller's %q", decl.Name, got, tt.toolName)
 			}
 		})
 	}
 
-	// Every injected declaration must be valid too: the decoys and the native
-	// names are what pad the list, and one bad name rejects the whole request.
+	// Every declaration must be valid; no fake decoys are injected.
 	req := &translator.GeminiRequest{
 		Tools: []translator.GeminiTool{{FunctionDeclarations: []translator.GeminiFunctionDecl{
 			{Name: "my tool", Parameters: map[string]any{"type": "object"}},
@@ -82,9 +74,7 @@ func TestCloakAntigravityRequest_SanitizesFunctionNames(t *testing.T) {
 }
 
 // TestCloakAntigravityRequest_SanitizesHistoryToolCalls pins the same repair on
-// the conversation history: a functionCall/functionResponse Google sent back
-// under the cloaked name must match the declaration the tools[] list carries,
-// or the model sees a call to a tool it was never offered.
+// history: call/result use the exact sanitised declaration name, not a cloak.
 func TestCloakAntigravityRequest_SanitizesHistoryToolCalls(t *testing.T) {
 	req := &translator.GeminiRequest{
 		Tools: []translator.GeminiTool{{FunctionDeclarations: []translator.GeminiFunctionDecl{
@@ -103,10 +93,10 @@ func TestCloakAntigravityRequest_SanitizesHistoryToolCalls(t *testing.T) {
 		}},
 	}
 	cloaked, _ := translator.CloakAntigravityRequest(req, "")
-	if got := cloaked.Contents[0].Parts[0].FunctionCall.Name; got != "my_tool_ide" {
+	if got := cloaked.Contents[0].Parts[0].FunctionCall.Name; got != "my_tool" {
 		t.Errorf("history functionCall = %q, want the sanitised wire name", got)
 	}
-	if got := cloaked.Contents[1].Parts[0].FunctionResponse.Name; got != "my_tool_ide" {
+	if got := cloaked.Contents[1].Parts[0].FunctionResponse.Name; got != "my_tool" {
 		t.Errorf("history functionResponse = %q, want the sanitised wire name", got)
 	}
 	if !geminiFunctionNameRe.MatchString(cloaked.Contents[0].Parts[0].FunctionCall.Name) {

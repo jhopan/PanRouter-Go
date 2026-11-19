@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -162,15 +161,14 @@ func TestAntigravityProbe_HeadersAndMetadata(t *testing.T) {
 	if gotClientMeta != "" {
 		t.Errorf("Client-Metadata = %q, want empty", gotClientMeta)
 	}
-	if gotBodyMeta["ideType"] != float64(9) {
-		t.Errorf("body metadata ideType = %v, want 9", gotBodyMeta["ideType"])
+	if gotBodyMeta["ideType"] != "ANTIGRAVITY" {
+		t.Errorf("body metadata ideType = %v, want ANTIGRAVITY", gotBodyMeta["ideType"])
 	}
-	wantPlatform := float64(GetAntigravityPlatformEnum(runtime.GOOS, runtime.GOARCH))
-	if gotBodyMeta["platform"] != wantPlatform {
-		t.Errorf("body metadata platform = %v, want %d", gotBodyMeta["platform"], int(wantPlatform))
+	if _, ok := gotBodyMeta["platform"]; ok {
+		t.Errorf("body metadata unexpectedly carries platform = %v", gotBodyMeta["platform"])
 	}
-	if gotBodyMeta["pluginType"] != float64(2) {
-		t.Errorf("body metadata pluginType = %v, want 2", gotBodyMeta["pluginType"])
+	if _, ok := gotBodyMeta["pluginType"]; ok {
+		t.Errorf("body metadata unexpectedly carries pluginType = %v", gotBodyMeta["pluginType"])
 	}
 }
 

@@ -25,8 +25,6 @@ import (
 // the wrap call would change a signature every provider shares. The token is
 // never stored — only its digest, so a rotated token misses and refetches.
 const (
-	// AntigravityAICodeBaseURL serves the client config (and its experiment flags).
-	AntigravityAICodeBaseURL = "https://aicode.googleapis.com"
 	// AntigravityGenericSystemPromptFlag is the flag whose value picks the identity block.
 	AntigravityGenericSystemPromptFlag = "generic-system-prompt"
 
@@ -34,6 +32,11 @@ const (
 	agExperimentFailureTTL = 15 * time.Minute
 	agExperimentMaxSlots   = 4096
 )
+
+// AntigravityAICodeBaseURL serves the client config (and its experiment flags).
+// A var, not a const, so a test can point it at its own server — the same reason
+// loadCodeAssistURL is one in the chat package.
+var AntigravityAICodeBaseURL = "https://aicode.googleapis.com"
 
 type agExperimentEntry struct {
 	generic bool
