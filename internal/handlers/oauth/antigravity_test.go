@@ -58,6 +58,7 @@ func TestHandleAntigravityAuthorize(t *testing.T) {
 		"https://www.googleapis.com/auth/userinfo.profile",
 		"https://www.googleapis.com/auth/cclog",
 		"https://www.googleapis.com/auth/experimentsandconfigs",
+		"https://www.googleapis.com/auth/aicode",
 	}
 	if got := authURL.Query().Get("scope"); got != strings.Join(expectedScopes, " ") {
 		t.Errorf("scope = %q", got)

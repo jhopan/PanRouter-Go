@@ -28,6 +28,10 @@ var defaultAntigravityScopes = []string{
 	"https://www.googleapis.com/auth/userinfo.profile",
 	"https://www.googleapis.com/auth/cclog",
 	"https://www.googleapis.com/auth/experimentsandconfigs",
+	// Hub/CLI 2.32.2 tokens carry this scope. Without it, the authenticated
+	// GET aicode.googleapis.com/v1alpha:fetchConfig answers 403 and the
+	// account's identity experiment cannot be read.
+	"https://www.googleapis.com/auth/aicode",
 }
 
 func getAntigravityOAuthConfig() (clientID, clientSecret, tokenURL string) {
