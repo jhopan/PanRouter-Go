@@ -32,7 +32,7 @@ import (
 // CurrentVersion is the active panrouter-go application version.
 // Can be overridden at build time via -ldflags "-X panrouter/proxy/internal/updater.CurrentVersion=1.8.8"
 // Default fallback is read from version.json at init if not overridden.
-var CurrentVersion = "1.0.4"
+var CurrentVersion = "1.0.5"
 
 // DefaultUpdateURL is the primary remote version manifest URL.
 var DefaultUpdateURL = "https://raw.githubusercontent.com/jhopan/PanRouter-Go/main/version.json"
