@@ -162,15 +162,43 @@ func IsAntigravityModelServed(connectionID, model string) bool {
 	if !ok || len(roster) == 0 {
 		return true
 	}
-	if _, ok := roster[model]; ok {
-		return true
-	}
-	if canonical, exists := translator.AntigravityModelSynonyms[model]; exists {
-		if _, ok := roster[canonical]; ok {
+	for _, candidate := range antigravityRosterCandidates(model) {
+		if _, ok := roster[candidate]; ok {
 			return true
+		}
+		if canonical, exists := translator.AntigravityModelSynonyms[candidate]; exists {
+			if _, ok := roster[canonical]; ok {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// antigravityRosterCandidates lists the roster ids that vouch for a model.
+//
+// The discovery RPC enumerates the FAMILY, not the effort variants: a captured
+// account lists `gemini-3.8-flash-tiered` and never `gemini-3.8-flash-high`,
+// `-medium` or `-low` — while the shipped client sends those very ids and the
+// backend serves them (captured 2026-11-18: three IDE turns, three different
+// effort ids, all 200). Reading the roster as an exact allow-list therefore
+// blocked a model the account does serve, and did it only AFTER the first quota
+// refresh populated the roster: a model that answered on startup started
+// answering 502 "unhealthy" minutes later.
+//
+// So an effort suffix is stripped to its family base, and the base's tiered
+// sibling is accepted too: `gemini-3.8-flash-high` is served when the roster
+// carries `gemini-3.8-flash` or `gemini-3.8-flash-tiered`. A model from another
+// family still gets no vouch, which is what the check exists for.
+func antigravityRosterCandidates(model string) []string {
+	candidates := []string{model}
+	for _, suffix := range []string{"-extra-low", "-thinking", "-medium", "-agent", "-high", "-low"} {
+		if batch, ok := strings.CutSuffix(model, suffix); ok && batch != "" {
+			candidates = append(candidates, batch, batch+"-tiered")
+			break
+		}
+	}
+	return candidates
 }
 
 // IsAntigravityModelBlocked reports whether connectionID has an exhausted quota for model until resetAt.
