@@ -1,16 +1,8 @@
-// Antigravity quota-window parity — open-sse/config/quotaWindows.js
-// (`antigravity: { scope: WEEKLY, usageKey: "gemini_weekly" }`,
-// QUOTA_EXHAUSTED_SIGNALS) and open-sse/services/quotaWindow.js
-// `resolveQuotaResetAt`.
-//
-// The failure these pin, seen in the field: the generation endpoint answers
-//
-//	429 {"error":{"code":429,"message":"Resource has been exhausted (e.g. check
-//	     quota).","status":"RESOURCE_EXHAUSTED"}}
-//
-// and the account was locked for TWO SECONDS and re-dialled all week, because the
-// quota evidence is the body's STATUS field with an underscore while the local
-// pattern spelled it with a space.
+// Antigravity quota-window parity — a real spent quota carries authority:
+// ErrorInfo QUOTA_EXHAUSTED plus reset text/timestamp or RetryInfo. The
+// detail-free RESOURCE_EXHAUSTED body is deliberately NOT evidence; the same
+// account/model can answer 200 for a minimal Hub request and 429 for a long
+// agent payload, so it is pinned separately as a short model refusal.
 package chat
 
 import (
@@ -24,18 +16,14 @@ import (
 // antigravityResourceExhaustedBody is the exact body from that log line.
 const antigravityResourceExhaustedBody = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
 
-func TestClassifyError_AntigravityResourceExhaustedIsQuota(t *testing.T) {
+func TestClassifyError_AntigravityAuthoritativeQuotaStaysQuota(t *testing.T) {
+	// The detail-free body is a request fingerprint refusal, not an allowance.
 	cls := providers.ClassifyErrorForProvider(http.StatusTooManyRequests, antigravityResourceExhaustedBody, 0, "antigravity")
-	if !cls.Quota {
-		t.Fatalf("classified %+v, want a quota verdict (not a burst)", cls)
-	}
-	// A spent quota must not advance the exponential ladder: the account is empty,
-	// not chatty.
-	if cls.NewBackoffLevel != 0 {
-		t.Errorf("backoff level = %d, want 0", cls.NewBackoffLevel)
+	if cls.Quota || cls.NewBackoffLevel != 1 || cls.CooldownMs != 2000 {
+		t.Fatalf("detail-free classification = %+v, want 2s transient", cls)
 	}
 
-	// The other Google wordings the reference lists.
+	// These Google wordings actually name a spent quota/reset and remain quota.
 	for _, text := range []string{
 		"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 74h19m34s.",
 		"You exceeded your current quota, please check your plan and billing details.",
@@ -45,10 +33,8 @@ func TestClassifyError_AntigravityResourceExhaustedIsQuota(t *testing.T) {
 		}
 	}
 
-	// A genuine burst is still a burst.
-	plain := providers.ClassifyErrorForProvider(http.StatusTooManyRequests, `{"error":{"message":"Too many requests"}}`, 0, "antigravity")
-	if plain.Quota {
-		t.Errorf("a plain throttle classified as quota: %+v", plain)
+	if got := providers.ClassifyErrorForProvider(http.StatusTooManyRequests, `{"error":{"message":"Too many requests"}}`, 0, "antigravity"); got.Quota {
+		t.Errorf("a plain throttle classified as quota: %+v", got)
 	}
 }
 
@@ -94,7 +80,7 @@ func TestCooldownSecFor_AntigravityParksUntilTheWeeklyReset(t *testing.T) {
 		"gemini_weekly": {RemainingPercentage: 0, ResetAt: reading},
 	})
 
-	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResourceExhaustedBody)}
+	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityExhaustedBody(reading, "74h19m0s"))}
 	errorText := extractErrorText(ue.Body)
 	cls := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, 0, "antigravity")
 
@@ -208,5 +194,26 @@ func TestCooldownSecFor_AntigravityStaleReadingIsNotAPark(t *testing.T) {
 	got := (&ChatHandler{}).cooldownSecFor("ag-stale", "antigravity", ue, errorText, cls)
 	if want := int(cls.CooldownMs / 1000); got != want {
 		t.Errorf("cooldown = %ds, want the classifier's %ds for a lapsed reading", got, want)
+	}
+}
+
+// The exact detail-free fingerprint refusal never gains a weekly cooldown from
+// a cached 0% row. The row may be stale or belong to a prior request; the body
+// names no provider reset, while a minimal request for the same account/model
+// can succeed. It must remain a short model-only backoff.
+func TestCooldownSecFor_AntigravityDetailFreeRefusalIgnoresExhaustedCache(t *testing.T) {
+	installAntigravityKV(t)
+	base := time.Now().UTC()
+	useAntigravityClock(t, base)
+	seedAntigravityQuotas("ag-fingerprint-cache", map[string]AntigravityModelQuota{
+		"gemini_weekly": {RemainingPercentage: 0, ResetAt: base.Add(6 * 24 * time.Hour)},
+	})
+
+	ue := &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(antigravityResourceExhaustedBody)}
+	errorText := extractErrorText(ue.Body)
+	cls := providers.ClassifyErrorForProvider(ue.StatusCode, errorText, 0, "antigravity")
+	got := (&ChatHandler{}).cooldownSecFor("ag-fingerprint-cache", "antigravity", ue, errorText, cls)
+	if got != 2 {
+		t.Errorf("cooldown = %ds, want the 2s fingerprint backoff rather than a weekly lock", got)
 	}
 }

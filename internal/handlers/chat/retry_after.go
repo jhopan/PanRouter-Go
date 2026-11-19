@@ -334,6 +334,13 @@ func retryableCooldownSecAt(statusCode int, base time.Duration, ue *upstreamErro
 // retry (upstream auth.js `kiroMonthly` + markKiroCapped).
 func (h *ChatHandler) cooldownSecFor(connID, provider string, ue *upstreamError, errorText string, cls providers.ErrorClassification) int {
 	cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(cls.CooldownMs)*time.Millisecond, ue, provider)
+	// The exact detail-free Antigravity 429 is a request fingerprint verdict,
+	// not quota authority. It must bypass every weekly/cache branch below: a
+	// stale 0% row otherwise turns a two-second model refusal into a six-day
+	// lock even while the same account/model serves the minimal Hub-shaped test.
+	if providers.ResolveAlias(provider) == "antigravity" && providers.IsAntigravityDetailFreeRefusal(ue.StatusCode, errorText) {
+		return cooldownSec
+	}
 	// A spent DAILY allowance refills at the provider's calendar boundary, not after
 	// a fixed hour: Agnes AI's free text quota resets at 00:00 UTC, and parking it
 	// for the generic quota window would hand the account back mid-day to be refused

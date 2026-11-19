@@ -743,6 +743,25 @@ type ErrorClassification struct {
 
 // ClassifyError classifies an upstream error by matching text and status against ErrorRules.
 // Returns the cooldown duration and new backoff level.
+// IsAntigravityDetailFreeRefusal identifies the exact 429 the VPS reproduces
+// on long agent/tool turns while the same account/model answers 200 to a
+// minimal dashboard test. Unlike a real quota response, it carries no reset,
+// RetryInfo, quota bucket, model capacity detail or individual-quota wording.
+// Google uses the same RESOURCE_EXHAUSTED status for this request fingerprint
+// verdict, so matching the status alone or the broad `resource_exhausted` token
+// parks a healthy account incorrectly.
+func IsAntigravityDetailFreeRefusal(statusCode int, errorText string) bool {
+	if statusCode != http.StatusTooManyRequests {
+		return false
+	}
+	lower := strings.ToLower(errorText)
+	return strings.Contains(lower, "resource has been exhausted (e.g. check quota).") &&
+		!strings.Contains(lower, "resets in") &&
+		!strings.Contains(lower, "quotareset") &&
+		!strings.Contains(lower, "retrydelay") &&
+		!strings.Contains(lower, "individual quota")
+}
+
 // Matches Next.js checkFallbackError() in open-sse/services/accountFallback.js.
 func ClassifyError(statusCode int, errorText string, backoffLevel int) ErrorClassification {
 	return ClassifyErrorForProvider(statusCode, errorText, backoffLevel, "")
@@ -754,6 +773,14 @@ func ClassifyError(statusCode int, errorText string, backoffLevel int) ErrorClas
 func ClassifyErrorForProvider(statusCode int, errorText string, backoffLevel int, provider string) ErrorClassification {
 	if provider != "" {
 		provider = ResolveAlias(provider)
+	}
+	if provider == "antigravity" && IsAntigravityDetailFreeRefusal(statusCode, errorText) {
+		newLevel := min(backoffLevel+1, BackoffConfig.MaxLevel)
+		return ErrorClassification{
+			ShouldFallback:  true,
+			CooldownMs:      GetQuotaCooldown(newLevel),
+			NewBackoffLevel: newLevel,
+		}
 	}
 	lowerError := ""
 	if errorText != "" {

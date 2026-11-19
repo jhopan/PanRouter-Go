@@ -420,7 +420,7 @@ func (h *ChatHandler) handleAccountFallback(
 			// selector can skip this account before spending a request
 			// (upstream applyErrorState). Only lock if error is account-scoped,
 			// not model-scoped (e.g. 401 auth issues), so unrelated models stay available.
-			if isModelScopedError(ue.StatusCode, errorText, model, ue.Body) {
+			if isAntigravityFingerprintRefusal(provider, errorText, ue) || isModelScopedError(ue.StatusCode, errorText, model, ue.Body) {
 				if recErr := h.Repo.RecordConnectionScopedError(connObj.ID, model, "chat", ue.StatusCode, errorText, classification.NewBackoffLevel); recErr != nil {
 					log.Warn("fallback", "record connection error failed", "conn", connObj.ID, "error", recErr)
 				}
@@ -2252,6 +2252,18 @@ func isOpencodeFreeTierRefusal(provider string, ue *upstreamError) bool {
 		return bytes.Contains(ue.Body, []byte("FreeUsageLimitError"))
 	}
 	return false
+}
+
+// isAntigravityFingerprintRefusal identifies the exact detail-free 429 that a
+// minimal Hub-style test can avoid while a long agent/tool payload triggers. It
+// is a verdict on this request/model shape, not evidence about the account's
+// allowance, so fallback must only lock the model briefly and keep the account
+// available to every other model.
+func isAntigravityFingerprintRefusal(provider, errorText string, ue *upstreamError) bool {
+	if providers.ResolveAlias(provider) != "antigravity" || ue == nil {
+		return false
+	}
+	return providers.IsAntigravityDetailFreeRefusal(ue.StatusCode, errorText)
 }
 
 func isModelScopedError(statusCode int, errorText string, model string, bodies ...[]byte) bool {

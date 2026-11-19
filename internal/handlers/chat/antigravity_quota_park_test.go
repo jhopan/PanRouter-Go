@@ -81,12 +81,12 @@ func TestHandleAccountFallback_AntigravityHealthyBucketRotatesOnDetailFree429(t 
 	}
 }
 
-// TestHandleAccountFallback_AntigravityQuotaParksUntilTheWeeklyReset is the field
-// case: the generation endpoint answers 429 RESOURCE_EXHAUSTED with no reset in the
-// body. The account's own weekly reading names the moment, so the park must end
-// there — the previous behaviour locked it for two seconds and re-dialled it all
-// week, one guaranteed-failed request at a time.
-func TestHandleAccountFallback_AntigravityQuotaParksUntilTheWeeklyReset(t *testing.T) {
+// TestHandleAccountFallback_AntigravityQuotaLocksTheNamedModelUntilReset pins
+// an authoritative quota response: it names QUOTA_EXHAUSTED and its reset. The
+// affected model must wait for that reset without parking unrelated models on
+// the account.
+func TestHandleAccountFallback_AntigravityQuotaLocksTheNamedModelUntilReset(t *testing.T) {
+	reading := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -98,7 +98,7 @@ func TestHandleAccountFallback_AntigravityQuotaParksUntilTheWeeklyReset(t *testi
 		}
 		hits.Add(1)
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(antigravityResourceExhaustedBody))
+		_, _ = w.Write([]byte(antigravityExhaustedBody(reading, "72h0m0s")))
 	}))
 	defer upstream.Close()
 
@@ -116,9 +116,6 @@ func TestHandleAccountFallback_AntigravityQuotaParksUntilTheWeeklyReset(t *testi
 	repo := db.NewRepo(database)
 	handler := NewChatHandler(repo)
 
-	// The reading the tracker already holds: the weekly bucket refills in ~3 days.
-	installAntigravityKV(t)
-	reading := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
 	seedAntigravityQuotas("ag-quota-1", map[string]AntigravityModelQuota{
 		"gemini_weekly": {RemainingPercentage: 0, ResetAt: reading},
 	})
@@ -134,21 +131,15 @@ func TestHandleAccountFallback_AntigravityQuotaParksUntilTheWeeklyReset(t *testi
 	if qerr := database.QueryRow(`SELECT data FROM providerConnections WHERE id = 'ag-quota-1'`).Scan(&raw); qerr != nil {
 		t.Fatalf("read connection data: %v", qerr)
 	}
-	until, ok := db.ConnectionCooldownUntil(raw)
-	if !ok {
-		t.Fatalf("no park recorded on the exhausted account: %s", raw)
+	if _, parked := db.ConnectionCooldownUntil(raw); parked {
+		t.Fatalf("authoritative model quota parked the whole account: %s", raw)
 	}
-	if wait := time.Until(until); wait < 71*time.Hour || wait > 73*time.Hour {
-		t.Errorf("parked for %v, want the bucket's ~72h reset (not the 2s burst base)", wait)
-	}
-	// And the selector sees it as blocked, so the next request does not re-dial it.
-	if blocked, ok := db.ConnectionBlockedUntil(raw); !ok || blocked.Before(reading.Add(-time.Minute)) {
-		t.Errorf("account not excluded from rotation until the reset: %v %v", blocked, ok)
+	if locked, err := repo.IsConnectionModelLocked("ag-quota-1", "claude-sonnet-4.5"); err != nil || !locked {
+		t.Fatalf("model lock = %v, %v; want true", locked, err)
 	}
 
-	// A Claude turn is not pre-filtered by the gemini_weekly bucket, so the account
-	// is dialled and the park is what the reading decides. (A Gemini turn with that
-	// reading is skipped before the request at all — see the selection test.)
+	// A Claude turn is not pre-filtered by the gemini_weekly bucket, so it is
+	// dialled and the authoritative ErrorInfo is what records the model lock.
 	// One turn costs the in-place retries the reference allows, not a pool walk.
 	if got := hits.Load(); got == 0 || got > 4 {
 		t.Errorf("upstream requests = %d, want the initial attempt plus bounded retries", got)

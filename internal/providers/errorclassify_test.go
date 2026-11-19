@@ -45,6 +45,25 @@ func TestClassifyError_ResourceExhausted429(t *testing.T) {
 	}
 }
 
+// TestClassifyErrorForProvider_AntigravityDetailFree429IsNotQuota pins the
+// fingerprint refusal the VPS reproduces: a minimal dashboard test for the same
+// account/model answers 200, while a long agent/tool turn gets exactly this
+// body. It names no reset, quota row, RetryInfo, model capacity or error detail,
+// so treating it as spent weekly quota parks a healthy account for an hour.
+func TestClassifyErrorForProvider_AntigravityDetailFree429IsNotQuota(t *testing.T) {
+	cls := ClassifyErrorForProvider(http.StatusTooManyRequests,
+		"Resource has been exhausted (e.g. check quota). RESOURCE_EXHAUSTED", 0, "antigravity")
+	if !cls.ShouldFallback {
+		t.Fatal("expected a retryable model refusal")
+	}
+	if cls.Quota {
+		t.Fatalf("detail-free Antigravity 429 must not be classified as spent quota: %+v", cls)
+	}
+	if cls.NewBackoffLevel != 1 || cls.CooldownMs != 2000 {
+		t.Errorf("classification = %+v, want first transient backoff (level 1, 2000ms)", cls)
+	}
+}
+
 func TestClassifyError_CreditExhaustionParksForAnHour(t *testing.T) {
 	// A spent budget is not a rate limit: the exponential ladder must not
 	// advance, and the account must be parked for the long quota cooldown
