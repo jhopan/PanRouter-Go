@@ -106,15 +106,17 @@ func TestAntigravityImageModelAndConfig(t *testing.T) {
 	}
 }
 
-// TestWrapForAntigravity_AgentIdentity pins the envelope identity the shipped
-// Hub 2.32.1 sends (open-sse/executors/antigravity.js): requestType "agent"
-// together with the labels bag inside the request, and a requestId in the
+// TestWrapForAntigravity_AgentIdentity pins the envelope identity on the agent
+// path: no requestType (Google bills "agent" to a small separate bucket and
+// answers a detail-free 429 while quota remains — decolua/9router PR #3986,
+// commit 5798b308), the labels bag inside the request, and a requestId in the
 // agent/<conversation>/<epoch_ms>/<trajectory>/<step> shape.
 //
-// The earlier port omitted requestType entirely, reading decolua/9router#3986
-// as "never send agent". Upstream's newer capture is the opposite: requestType
-// WITHOUT the labels is what Google answered with a detail-free 429, so the two
-// travel together.
+// The port previously read the Hub 2.32.1 capture as "requestType travels with
+// the labels", and shipped the field. Live measurements on 2026-11-20 put the
+// field back on the list of causes: a Hermes system prompt plus requestType
+// "agent" answers 429 with quota intact, and the same turn without either
+// answers 200.
 func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
 	translator.ResetAntigravitySessionLabels()
 	geminiBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
@@ -126,8 +128,11 @@ func TestWrapForAntigravity_AgentIdentity(t *testing.T) {
 	if err := json.Unmarshal(wrapped, &req); err != nil {
 		t.Fatalf("unmarshal wrapper: %v", err)
 	}
-	if req.RequestType != "agent" {
-		t.Errorf("RequestType = %q, want agent", req.RequestType)
+	if req.RequestType != "" {
+		t.Errorf("RequestType = %q, want it omitted on the agent path", req.RequestType)
+	}
+	if strings.Contains(string(wrapped), `"requestType"`) {
+		t.Errorf("envelope still carries a requestType member: %s", string(wrapped))
 	}
 	if !antigravityRequestIDRe.MatchString(req.RequestID) {
 		t.Errorf("request ID %q does not match the agent/<uuid>/<ms>/<uuid>/<step> shape", req.RequestID)

@@ -222,6 +222,29 @@ var (
 	hermesIdentityRegex = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
 	// ompIdentityRegex matches OMP (Oh My Pi) harness identity sentences.
 	ompIdentityRegex = regexp.MustCompile(`(?i)You are (?:Oh My Pi|OMP|omp[-_ ]agent)[^.\n]*\.?`)
+	// The Hermes rows below are the system-prompt lines that make the backend
+	// answer a detail-free 429 RESOURCE_EXHAUSTED while the account still has
+	// quota. They are literal because the filter matches phrasing, not intent:
+	// the bodies are kept and only the fingerprinted sentence changes.
+	//
+	// Measured live on one account and gemini-3.8-flash-high (2026-11-20),
+	// ~100 KB system prompt, one line varying:
+	//
+	//	clean prompt                                              -> 200
+	//	"<!-- End Hermes runtime environment -->"                 -> 429
+	//	"# Google model operational directives"                   -> 429
+	//	"When the user asks you to build, run, or verify ..."     -> 429
+	//	"For help with Hermes Agent itself ..."                   -> 200 (left alone: no trigger observed)
+	//
+	// The remaining rows follow 9router PR #5745, whose bisect over a real
+	// Hermes Agent v0.23.1 prompt found the same sentences on its accounts.
+	// A row costs nothing when the text does not carry it, and the dashboard's
+	// own connection test never sends a caller system prompt — which is why
+	// that test answered 200 for the same account at the same time.
+	hermesRuntimeEndMark = regexp.MustCompile(`(?i)<!--\s*End Hermes runtime environment\s*-->`)
+	hermesOpsHeaderRegex = regexp.MustCompile(`(?im)^#\s*Google model operational directives\s*$`)
+	hermesArtifactLine   = regexp.MustCompile(`(?i)When the user asks you to build, run, or verify something, the deliverable is a working artifact backed by real tool output[^.\n]*\.?`)
+	hermesSteeringLine   = regexp.MustCompile(`(?i)Mid-turn, the user can steer you: Hermes delivers their message[^.\n]*\.`)
 	// claudeCodeIdentityRegex matches the sentence Anthropic's Claude Code
 	// prepends to its own system prompt.
 	claudeCodeIdentityRegex = regexp.MustCompile(`(?i)you are claude code[^.\n]*\.?`)
@@ -275,6 +298,14 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 	text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	if isSystemInstruction {
 		text = ompIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
+		// The four Hermes lines measured (or reported) to trip the backend's
+		// competing-harness filter. Each keeps its slot: the marker becomes an
+		// inert comment, the headers keep a heading, and the sentences keep
+		// their instruction with the harness name removed.
+		text = hermesRuntimeEndMark.ReplaceAllString(text, "")
+		text = hermesOpsHeaderRegex.ReplaceAllString(text, "# Model operational directives")
+		text = hermesArtifactLine.ReplaceAllString(text, "When the user asks you to build, run or check something, deliver a working result backed by real tool output.")
+		text = hermesSteeringLine.ReplaceAllString(text, "The user can steer you mid-turn: their message arrives while you work.")
 		// Only the system instruction carries the caller's client identity, and
 		// only that text is what the backend fingerprints. A user message that
 		// quotes the phrase is the user's own content and stays untouched.
@@ -619,11 +650,12 @@ func antigravityUUIDFromSeed(seed string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hex[0:8], hex[8:12], hex[12:16], hex[16:20], hex[20:32])
 }
 
-// antigravityRequestTypeAgent is the requestType the shipped Hub sends on the
-// agent turn. It travels WITH the labels bag and never alone: upstream's
-// capture (open-sse/executors/antigravity.js, Hub 2.32.1) records that
-// "requestType WITHOUT those labels is what produced detail-free 429
-// RESOURCE_EXHAUSTED before, so both travel together".
+// antigravityRequestTypeAgent names the requestType the Hub's agent turn uses.
+// It is used only to derive the conversation/trajectory identity (the ids are
+// seeded from it); the field itself is NOT sent — see the envelope in
+// wrapForAntigravity, which omits it because Google bills it to a small
+// separate bucket and answers a detail-free 429 while quota remains
+// (decolua/9router PR #3986, commit 5798b308).
 const antigravityRequestTypeAgent = "agent"
 
 // antigravityIDERequestIDRe is the Hub's own requestId shape:
@@ -745,14 +777,22 @@ func hardenAntigravityRequest(geminiBody []byte, sessionID string, labels map[st
 	}
 
 	// The agent identity rides inside the request, not on the envelope: the Hub
-	// puts sessionId and the labels bag there, and requestType "agent" is
-	// rejected without the labels next to it.
+	// puts sessionId and the labels bag there.
 	if sessionID != "" && m["sessionId"] != sessionID {
 		m["sessionId"] = sessionID
 		changed = true
 	}
 	if len(labels) > 0 {
 		m["labels"] = labels
+		changed = true
+	}
+	// requestType must be ABSENT, not empty: upstream's executor spreads the
+	// translation body into the envelope, so a field left here leaks out beside
+	// the envelope's own member (decolua/9router 5798b308 deletes it for the
+	// same reason). Google bills requestType "agent" to a small separate bucket
+	// and answers a detail-free 429 while the account still has quota.
+	if _, ok := m["requestType"]; ok {
+		delete(m, "requestType")
 		changed = true
 	}
 
@@ -1052,14 +1092,22 @@ func wrapForAntigravity(geminiBody []byte, projectID, modelName, identityPrompt 
 		Project:   projectID,
 		Model:     modelName,
 		UserAgent: "antigravity",
-		// requestType travels WITH the labels bag inside the request (see
-		// antigravityRequestTypeAgent): the shipped Hub sends both, and an
-		// agent-typed turn without them is what Google answered with a
-		// detail-free 429 RESOURCE_EXHAUSTED. requestId keeps its
-		// agent/<conversation>/<ts>/<trajectory>/<step> shape either way.
-		RequestType: antigravityRequestTypeAgent,
-		RequestID:   identity.RequestID,
-		Request:     geminiBody,
+		// requestType is deliberately NOT sent on the agent (chat) path.
+		//
+		// Google enforces a small, separate quota bucket whenever the envelope
+		// carries requestType "agent". An agent turn (system prompt plus tool
+		// declarations) is then refused with a detail-free 429
+		// RESOURCE_EXHAUSTED while the account still has quota, and the refusal
+		// reads as a quota verdict to every client. Measured twice upstream:
+		// decolua/9router PR #3986 tested one 28,119-token payload both ways —
+		// with requestType 429, without it 200 (promptTokenCount 28119) — and
+		// commit 5798b308 shipped the removal. The field also leaks through the
+		// body spread, so it must be absent, not merely empty.
+		//
+		// requestId keeps its agent/<conversation>/<ts>/<trajectory>/<step>
+		// shape: it identifies the turn, and the Hub sends it either way.
+		RequestID: identity.RequestID,
+		Request:   geminiBody,
 	}
 	out, err := json.Marshal(wrapper, json.Deterministic(true))
 	if err != nil {

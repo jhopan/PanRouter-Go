@@ -394,8 +394,11 @@ func TestAntigravityEnvelopeShape(t *testing.T) {
 	if envelope.UserAgent != "antigravity" {
 		t.Errorf("userAgent = %q, want antigravity", envelope.UserAgent)
 	}
-	if envelope.RequestType != "agent" {
-		t.Errorf("requestType = %q, want agent", envelope.RequestType)
+	// requestType must be absent on the agent path: Google bills it to a small
+	// separate bucket and answers a detail-free 429 while quota remains
+	// (decolua/9router PR #3986; measured again 2026-11-20 on the Hermes rows).
+	if envelope.RequestType != "" {
+		t.Errorf("requestType = %q, want it omitted on the agent path", envelope.RequestType)
 	}
 	if !strings.HasPrefix(envelope.RequestID, "agent/") {
 		t.Errorf("requestId = %q, want the agent/<conv>/<ms>/<traj>/<step> shape", envelope.RequestID)

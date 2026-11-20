@@ -37,6 +37,9 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 	}
 
 	var sendBody []byte
+	// geminiBody stays in scope for the refusal fallback below, which rebuilds
+	// the envelope with the system instruction folded into contents[0].
+	var geminiBody []byte
 	if projectID != "" && translator.IsAntigravityImageModel(modelName) {
 		isStream = false
 		cleanModel, aspectRatio := translator.ParseImageConfig(modelName)
@@ -210,6 +213,39 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		case <-timer.C:
 		}
 	}
+
+	// The last resort for the same filter: the backend reads the system
+	// instruction itself as the competing-harness signal, and folding it into
+	// contents[0] as a user turn is what clears a refusal with no quota detail
+	// (9router-go c69c20d, MoveSystemInstructionToContents). It runs once, only
+	// on the Antigravity lane and only when the body still carries a system
+	// instruction, so a genuine quota exhaustion — which names the quota in its
+	// body — is never retried and costs no extra request.
+	if antigravityLane && resp.StatusCode == http.StatusTooManyRequests && antigravityBareQuotaRefusal(resp) {
+		if moved, ok := translator.MoveSystemInstructionToContents(geminiBody); ok {
+			if rewrapped, werr := translator.WrapForAntigravityWithIdentity(moved, projectID, modelName,
+				providers.AntigravityGenericSystemPromptForToken(apiKey), handlerutil.GetSessionID(ctx)); werr == nil {
+				retryReq, rerr := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(rewrapped))
+				if rerr == nil {
+					for k, v := range headers {
+						retryReq.Header.Set(k, v)
+					}
+					if retryResp, derr := client.Do(retryReq); derr == nil {
+						UnwrapIdentityGzip(retryReq, retryResp)
+						if retryResp.StatusCode == http.StatusOK {
+							log.Warn("gemini", "systemInstruction moved into contents[0] cleared the refusal", "model", modelName)
+							resp.Body.Close()
+							resp = retryResp
+						} else {
+							// Keep the original refusal: it is the one the caller's
+							// fallback path already knows how to classify.
+							retryResp.Body.Close()
+						}
+					}
+				}
+			}
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		resp.Body.Close()
@@ -292,6 +328,30 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
 	}
 	return resp, nil
+}
+
+// antigravityBareQuotaRefusal reports whether the response is the detail-free
+// refusal the Antigravity backend answers when it rejects the request's shape:
+// a 429 whose body says RESOURCE_EXHAUSTED but names none of the markers a real
+// quota answer carries. A body with a reset time, "Individual quota reached" or
+// a rate-limit status is the account's own exhaustion and must not be retried.
+func antigravityBareQuotaRefusal(resp *http.Response) bool {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil || len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	if !strings.Contains(text, "resource_exhausted") {
+		return false
+	}
+	for _, marker := range []string{"quota_exhausted", "rate_limit_exceeded", "individual quota reached", "retryinfo", "reset"} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 // isTransientGeminiTransportError reports whether a client.Do failure is a
