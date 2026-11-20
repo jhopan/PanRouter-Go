@@ -198,7 +198,9 @@ var (
 	harnessTagCritical          = regexp.MustCompile(`(?i)<(/?)critical>`)
 	harnessBrandOMPFull         = regexp.MustCompile(`(?i)Oh My Pi coding harness`)
 	harnessBrandOMP             = regexp.MustCompile(`(?i)Oh My Pi`)
+	harnessBrandOMPVariants     = regexp.MustCompile(`(?i)oh[-_ ]my[-_ ]pi`)
 	harnessBrandOMPLive         = regexp.MustCompile(`(?i)omp Live`)
+	harnessBrandOMPAgent        = regexp.MustCompile(`(?i)\bomp[-_ ]agent\b|\bomp\s+live\b`)
 	claudeBillingHeaderRegex    = regexp.MustCompile(`(?im)^x-anthropic-billing-header:[^\n]*(?:\r?\n)*`)
 	// antigravityOpenCodeRegex matches the literal `opencode` provider
 	// identifier upstream rewrites in the system instruction. Upstream's rule
@@ -217,26 +219,12 @@ var (
 	// literal single space in "Nous Research" — upstream does not accept
 	// other whitespace between the two words, and a port that accepted more
 	// would rewrite phrasings upstream leaves alone.
+	hermesIdentityRegex = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
+	// ompIdentityRegex matches OMP (Oh My Pi) harness identity sentences.
+	ompIdentityRegex = regexp.MustCompile(`(?i)You are (?:Oh My Pi|OMP|omp[-_ ]agent)[^.\n]*\.?`)
 	// claudeCodeIdentityRegex matches the sentence Anthropic's Claude Code
-	// prepends to its own system prompt. Measured against the live gateway
-	// (2026-11-17, daily-cloudcode-pa `v1internal:generateContent`, one account,
-	// one model, only the system prompt varying):
-	//
-	//   "You are Claude Code."                                            -> 429 RESOURCE_EXHAUSTED
-	//   "you are claude code, anthropic's official cli for claude."        -> 429 RESOURCE_EXHAUSTED
-	//   "You are an assistant built as Anthropic's official CLI for Claude." -> 200
-	//   "You are a Claude agent, built on Anthropic's Claude Agent SDK."    -> 200
-	//   "x-anthropic-billing-header: ..."                                   -> 200
-	//   "You like the name Claude." / "You are opencode..."                 -> 200
-	//
-	// So the fingerprint is the identity phrase itself, and the 429 is a
-	// filtering verdict rather than quota: the same account served a 200 for a
-	// neutral prompt seconds earlier while its weekly bucket still showed 61%
-	// remaining. The reference's own rewrite table does not carry this row yet,
-	// which is why PanRouter hits the same refusal; this port keeps the prose
-	// around it and replaces only the sentence.
+	// prepends to its own system prompt.
 	claudeCodeIdentityRegex = regexp.MustCompile(`(?i)you are claude code[^.\n]*\.?`)
-	hermesIdentityRegex     = regexp.MustCompile(`(?i)You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\.`)
 )
 
 // normalizeHarnessMarkers neutralizes harness fingerprint tags in system text.
@@ -246,7 +234,9 @@ func normalizeHarnessMarkers(text string) string {
 	text = harnessTagSystemDirective.ReplaceAllString(text, "<${1}instructions>")
 	text = harnessTagCritical.ReplaceAllString(text, "<${1}important>")
 	text = harnessBrandOMPFull.ReplaceAllString(text, "AI coding assistant")
+	text = harnessBrandOMPVariants.ReplaceAllString(text, "coding assistant")
 	text = harnessBrandOMP.ReplaceAllString(text, "coding assistant")
+	text = harnessBrandOMPAgent.ReplaceAllString(text, "coding assistant live")
 	text = harnessBrandOMPLive.ReplaceAllString(text, "coding assistant live")
 	return text
 }
@@ -284,6 +274,7 @@ func rewriteBrandingText(text string, isSystemInstruction bool) string {
 	text = claudeBillingHeaderRegex.ReplaceAllString(text, "")
 	text = hermesIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 	if isSystemInstruction {
+		text = ompIdentityRegex.ReplaceAllString(text, "You are an AI assistant.")
 		// Only the system instruction carries the caller's client identity, and
 		// only that text is what the backend fingerprints. A user message that
 		// quotes the phrase is the user's own content and stays untouched.

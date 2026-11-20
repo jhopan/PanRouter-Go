@@ -57,6 +57,68 @@ func (h *ChatHandler) borrowZenKeyForGo(ctx context.Context, model string) (conn
 	return "", "", "", "", fmt.Errorf("no active opencode-zen connection with an API key")
 }
 
+// allConnectionsLockedError computes an *upstreamError 503+Retry-After when
+// every active connection for provider/model carries an active model lock.
+// Returns nil when at least one connection has no lock (should not happen
+// if the caller pre-screened with IsProviderAvailable), or when the lock
+// expiry cannot be determined (quota cache / ineligible accounts).
+//
+// Parity: upstream auth.js:243-282 produces {allRateLimited, retryAfter,
+// retryAfterHuman}; chat.js:326-330 turns it into unavailableResponse(503)
+// with retry-after. We reproduce that contract here.
+func (h *ChatHandler) allConnectionsLockedError(provider, model string) *upstreamError {
+	conns, err := h.Repo.GetProviderConnections(provider, true)
+	if err != nil || len(conns) == 0 {
+		return nil
+	}
+	var earliest time.Time
+	allLocked := true
+	for _, c := range conns {
+		blocked, lockUntil := h.connectionModelBlockedUntil(c, provider, model)
+		if !blocked {
+			allLocked = false
+			break
+		}
+		// quota cache / ineligible has no timestamp — skip for expiry calc
+		if !lockUntil.IsZero() {
+			if earliest.IsZero() || lockUntil.Before(earliest) {
+				earliest = lockUntil
+			}
+		}
+	}
+	if !allLocked {
+		return nil
+	}
+
+	retryAfterSec := 0
+	if !earliest.IsZero() {
+		secs := int(time.Until(earliest).Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		retryAfterSec = secs
+	}
+
+	msg := fmt.Sprintf("[%s/%s] all accounts rate-limited", provider, model)
+	if retryAfterSec > 0 {
+		log.Warn("fallback", "all accounts locked, returning 503",
+			"provider", provider, "model", model, "retry_after_s", retryAfterSec)
+	} else {
+		log.Warn("fallback", "all accounts locked (no expiry)", "provider", provider, "model", model)
+	}
+	hdr := http.Header{"Content-Type": []string{"application/json"}}
+	if retryAfterSec > 0 {
+		hdr.Set("Retry-After", fmt.Sprint(retryAfterSec))
+	}
+	body := []byte(fmt.Sprintf(
+		`{"error":{"message":%q,"type":"rate_limit_error","code":"rate_limit_exceeded"}}`, msg))
+	return &upstreamError{
+		StatusCode: http.StatusServiceUnavailable,
+		Body:       body,
+		Header:     hdr,
+	}
+}
+
 // handleAccountFallback attempts to forward a request with automatic account fallback.
 func (h *ChatHandler) handleAccountFallback(
 	ctx context.Context,
@@ -87,9 +149,26 @@ func (h *ChatHandler) handleAccountFallback(
 		})
 	}
 
+	// Pre-flight availability check: when every connection is model-locked,
+	// ask how long the shortest lock has to run and return 503+Retry-After
+	// rather than forwarding the loop — which would skip all candidates and
+	// fall through to a plain fmt.Errorf that chat.go renders as 502.
+	//
+	// Parity: upstream auth.js:243-282 (getProviderCredentials) returns an
+	// {allRateLimited, retryAfter, retryAfterHuman} sentinel when
+	// availableConnections.length === 0, and chat.js:326-330 turns that
+	// into unavailableResponse(503, msg, retryAfter, …) with retry-after.
+	//
+	// Probes bypass this gate so a scheduled ping can test a locked account's
+	// actual reachability (upstream quotaAutoPing.js intent).
 	if !handlerutil.IsProbeContext(ctx) && !h.Repo.IsProviderAvailable(provider, model) {
-		log.Warn("fallback", "skip unhealthy", "provider", provider, "model", model)
-		return fmt.Errorf("provider %s/%s is unhealthy", provider, model)
+		if retryErr := h.allConnectionsLockedError(provider, model); retryErr != nil {
+			return retryErr
+		}
+		// IsProviderAvailable returned false but we could not compute a lock
+		// window (quota cache, ineligible account, etc.) — fall through to
+		// the connection loop so it can either force-fallback or report the
+		// specific per-connection reason.
 	}
 
 	observ.IncFallback(provider, model, observ.FallbackReasonUnhealthy)

@@ -58,6 +58,9 @@ func (h *ChatHandler) forceMinCooldownConnection(
 		if c == nil || excludeSet[c.ID] || !codexAccountServesModel(c, model) {
 			continue
 		}
+		if isBlocked, _ := h.connectionModelBlockedUntil(c, provider, model); isBlocked {
+			continue
+		}
 		// A reauth_required account is only terminal while its park is still
 		// active: once oauthLockedUntil runs out the account returns to
 		// rotation as a normal candidate (the park is a cooldown, not a

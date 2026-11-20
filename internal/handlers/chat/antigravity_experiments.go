@@ -53,7 +53,16 @@ func RefreshAntigravityExperiments(ctx context.Context, client *http.Client, acc
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, antigravityExperimentBodyLimit))
 	if readErr != nil || resp.StatusCode != http.StatusOK {
 		providers.StoreAntigravityGenericSystemPrompt(accessToken, true, false)
-		log.Warn("ag_quota", "identity config read failed", "status", resp.StatusCode)
+		// 403 is expected when the token does not carry the aicode scope
+		// (e.g. OAuth grants from older login flows). It is not actionable:
+		// the code already falls back to the generic system prompt, so this
+		// is a debug-level observation, not a warning (parity: the upstream
+		// never surfaces this 403 to the operator either).
+		if resp.StatusCode == http.StatusForbidden {
+			log.Debug("ag_quota", "identity config read: no aicode scope (403), using generic system prompt")
+		} else {
+			log.Warn("ag_quota", "identity config read failed", "status", resp.StatusCode)
+		}
 		return
 	}
 

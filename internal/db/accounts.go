@@ -277,6 +277,38 @@ func (r *Repo) ClearConnectionModelLocks(ctx context.Context, connID string) err
 	return r.UpdateConnectionData(connID, string(encoded))
 }
 
+// ConnectionModelLockUntil reads the expiry timestamp of a modelLock_<model>
+// field directly from connection data without a DB round-trip, used by the
+// connection selector to populate cooldownUntil for Retry-After calculation.
+// Returns (zero, false) when no active lock exists.
+func ConnectionModelLockUntil(data, model string) (time.Time, bool) {
+	if data == "" || model == "" {
+		return time.Time{}, false
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+		return time.Time{}, false
+	}
+	key := modelLockPrefix + model
+	val, ok := raw[key]
+	if !ok {
+		return time.Time{}, false
+	}
+	str, ok := val.(string)
+	if !ok || str == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, str)
+	if err != nil {
+		return time.Time{}, false
+	}
+	now := time.Now().UTC()
+	if !now.Before(t) {
+		return time.Time{}, false // lock has already expired
+	}
+	return t, true
+}
+
 // IsConnectionModelLocked checks whether the given connection has an active
 // modelLock_<model> field in its data JSON blob. Returns true when the
 // timestamp is in the future.

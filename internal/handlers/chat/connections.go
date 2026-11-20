@@ -479,7 +479,16 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 					}
 				}
 				if !isProbe {
-					if h.connectionModelBlocked(c, provider, model) {
+					if blocked, lockUntil := h.connectionModelBlockedUntil(c, provider, model); blocked {
+						// Track the model-lock expiry into cooldownUntil so the selector
+						// can include it in the Retry-After when every connection is blocked
+						// (parity: upstream auth.js:245-279 collects lockedConns expiries).
+						if !lockUntil.IsZero() {
+							inCooldown = append(inCooldown, c)
+							if cooldownUntil.IsZero() || lockUntil.Before(cooldownUntil) {
+								cooldownUntil = lockUntil
+							}
+						}
 						continue
 					}
 					// Account-scoped cooldown. An account whose quota is spent, or
@@ -574,25 +583,50 @@ func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider
 // empty model means nothing model-scoped applies (upstream parity: the lock
 // filter only runs for a model-bearing request).
 func (h *ChatHandler) connectionModelBlocked(c *models.ProviderConnection, provider, model string) bool {
+	blocked, _ := h.connectionModelBlockedUntil(c, provider, model)
+	return blocked
+}
+
+// connectionModelBlockedUntil is connectionModelBlocked with a cooldown
+// expiry: when the connection is model-locked, it also returns the timestamp
+// the lock expires at so the caller can populate cooldownUntil for a
+// Retry-After calculation. The zero time means the block is a quota cache
+// hit whose expiry is not known at the DB layer.
+func (h *ChatHandler) connectionModelBlockedUntil(c *models.ProviderConnection, provider, model string) (bool, time.Time) {
 	// Google flagged the account as ineligible (VALIDATION_REQUIRED): it refuses
 	// every model until someone verifies it in a browser, so the skip is not
 	// model-scoped and comes first (upstream auth.js availability filter).
 	if provider == "antigravity" && antigravityIneligibleSkip(c.ID) {
-		return true
+		return true, time.Time{}
 	}
 	if model == "" {
-		return false
+		return false, time.Time{}
 	}
 	lockKey := canonicalLockModel(provider, model)
-	if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, lockKey); locked {
-		return true
+	if until, ok := db.ConnectionModelLockUntil(c.Data, lockKey); ok {
+		return true, until
 	}
 	if lockKey != model {
-		if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, model); locked {
-			return true
+		if until, ok := db.ConnectionModelLockUntil(c.Data, model); ok {
+			return true, until
 		}
 	}
-	return quotaCacheBlocked(provider, c.ID, model)
+	if h.Repo != nil {
+		if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, lockKey); locked {
+			until, _ := db.ConnectionModelLockUntil(c.Data, lockKey)
+			return true, until
+		}
+		if lockKey != model {
+			if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, model); locked {
+				until, _ := db.ConnectionModelLockUntil(c.Data, model)
+				return true, until
+			}
+		}
+	}
+	if quotaCacheBlocked(provider, c.ID, model) {
+		return true, time.Time{} // quota cache: no precise lock timestamp
+	}
+	return false, time.Time{}
 }
 
 // applyProviderProxyPool binds a provider-level pool to a connection that has

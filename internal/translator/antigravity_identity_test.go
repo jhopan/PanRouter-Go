@@ -22,6 +22,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -123,5 +124,102 @@ func TestWrapForAntigravity_SessionIDIsNumericNotTheProjectName(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^-\d+$`).MatchString(sess) {
 		t.Errorf("sessionId = %q, want -<digits>", sess)
+	}
+}
+
+func TestRewriteBrandingText_HermesIdentityIsNeutralised(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "standard Hermes Agent with Nous Research",
+			input: "You are Hermes Agent, an intelligent AI assistant created by Nous Research. Be helpful.",
+		},
+		{
+			name:  "bare Hermes identity",
+			input: "You are Hermes. Answer briefly.",
+		},
+		{
+			name:  "Hermes AI agent built by Nous Research",
+			input: "You are Hermes, an AI agent built by Nous Research.\nAlways follow instructions.",
+		},
+		{
+			name:  "Hermes AI assistant created by Nous Research",
+			input: "You are Hermes, an AI assistant created by Nous Research. Help the user.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rewriteBrandingText(tt.input, true)
+			if regexp.MustCompile(`(?i)\bhermes\b`).MatchString(got) {
+				t.Errorf("Hermes identity survived: %q -> %q", tt.input, got)
+			}
+			if regexp.MustCompile(`(?i)nous research`).MatchString(got) {
+				t.Errorf("Nous Research survived: %q -> %q", tt.input, got)
+			}
+			if !regexp.MustCompile(`(?i)you are an ai assistant`).MatchString(got) {
+				t.Errorf("expected neutral replacement in %q", got)
+			}
+		})
+	}
+}
+
+func TestRewriteBrandingText_OMPHarnessIsNeutralised(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		contains string
+		excludes []string
+	}{
+		{
+			name:     "OMP full branding and tags",
+			input:    "<system-conventions>Oh My Pi coding harness rules</system-conventions>",
+			contains: "<conventions>AI coding assistant rules</conventions>",
+			excludes: []string{"system-conventions", "Oh My Pi"},
+		},
+		{
+			name:     "OMP directive and critical tags",
+			input:    "<system-directive>do this</system-directive><critical>urgent</critical>",
+			contains: "<instructions>do this</instructions><important>urgent</important>",
+			excludes: []string{"system-directive", "critical"},
+		},
+		{
+			name:     "OMP variants hyphenated and underscored",
+			input:    "Running via oh-my-pi and oh_my_pi harness",
+			contains: "Running via coding assistant and coding assistant harness",
+			excludes: []string{"oh-my-pi", "oh_my_pi"},
+		},
+		{
+			name:     "OMP Live mode",
+			input:    "Using omp Live environment",
+			contains: "Using coding assistant live environment",
+			excludes: []string{"omp Live"},
+		},
+		{
+			name:     "OMP explicit identity sentence",
+			input:    "You are Oh My Pi, an autonomous coding agent. Follow instructions.",
+			contains: "You are an AI assistant. Follow instructions.",
+			excludes: []string{"Oh My Pi"},
+		},
+		{
+			name:     "OMP abbreviation identity sentence",
+			input:    "You are OMP, a software development assistant.",
+			contains: "You are an AI assistant.",
+			excludes: []string{"OMP"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rewriteBrandingText(tt.input, true)
+			if !strings.Contains(got, tt.contains) {
+				t.Errorf("got %q, want it to contain %q", got, tt.contains)
+			}
+			for _, ex := range tt.excludes {
+				if strings.Contains(got, ex) {
+					t.Errorf("fingerprint %q survived in %q", ex, got)
+				}
+			}
+		})
 	}
 }
