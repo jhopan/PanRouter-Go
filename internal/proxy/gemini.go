@@ -70,11 +70,16 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		}
 		sendBody = wrapped
 	} else {
-		// Translate OpenAI → Gemini native
-		geminiBody, err := translator.TranslateOpenAIToGeminiWithSession(body, handlerutil.GetSessionID(ctx))
+		// Translate OpenAI → Gemini native. The result is assigned to the
+		// function-scoped geminiBody, never to a new local: the refusal
+		// fallback below rebuilds the envelope from this value, and a
+		// shadowed copy leaves it with nothing to move — which is how the
+		// fallback shipped as dead code.
+		translated, err := translator.TranslateOpenAIToGeminiWithSession(body, handlerutil.GetSessionID(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("translate to Gemini: %w", err)
 		}
+		geminiBody = translated
 		if translator.GeminiSafetyRequested(ctx) {
 			geminiBody, err = translator.ApplyGeminiSafetySettings(geminiBody)
 			if err != nil {
