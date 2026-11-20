@@ -606,9 +606,13 @@ func TestStripCompetitivePrompts_HermesIdentityVariants(t *testing.T) {
 			want:  "You are an AI assistant.",
 		},
 		{
+			// This exact opener is the paragraph row's own trigger, so the
+			// neutral paragraph is what it now becomes. Measured 2026-11-20:
+			// this sentence alone answers 200, but it is the block Hermes opens
+			// its prompt with and the filter reads the block.
 			name:  "agent built by",
 			input: "You are Hermes Agent, built by Nous Research.",
-			want:  "You are an AI assistant.",
+			want:  "You are an AI assistant. Keep answers proportional to the question: a short question gets a short reply, and finished work gets a brief report of what changed and what is left. No filler, no restating the request, no narrating tool calls the user can see. Plain claims over adjectives; when unsure, say so plainly. Agree because it is right, not because the user said it. Give depth when the user asks for detail or the stakes demand it.",
 		},
 		{
 			name:  "ai assistant variant",

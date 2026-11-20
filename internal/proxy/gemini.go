@@ -237,8 +237,11 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 							resp.Body.Close()
 							resp = retryResp
 						} else {
-							// Keep the original refusal: it is the one the caller's
-							// fallback path already knows how to classify.
+							// The attempt names its own outcome: without this line an
+							// operator cannot tell "the fallback never ran" from "it ran
+							// and did not help", and the two need different fixes.
+							log.Warn("gemini", "systemInstruction relocation did not clear the refusal",
+								"model", modelName, "status", retryResp.StatusCode)
 							retryResp.Body.Close()
 						}
 					}

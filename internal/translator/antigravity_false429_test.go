@@ -7,6 +7,41 @@ import (
 	"panrouter/proxy/internal/translator"
 )
 
+// TestStripCompetitivePrompts_ReplacesTheWholeHermesIdentityBlock pins the row
+// that closed the Hermes refusal: the identity PARAGRAPH is replaced, not just
+// its first sentence.
+//
+// Measured 2026-11-20, one account, gemini-3.8-flash-high: "You are Hermes
+// Agent." alone answered 200, the sizing sentence alone answered 200, and the
+// two together answered 429 on every account in the pool. A rewrite that left
+// the paragraph recognisable kept the refusal.
+func TestStripCompetitivePrompts_ReplacesTheWholeHermesIdentityBlock(t *testing.T) {
+	const soul = "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply " +
+		"to the weight of the ask — a one-line question gets a one-line answer. No filler. " +
+		"Plain claims over adjectives; when unsure, say so plainly."
+	req := &translator.GeminiRequest{
+		SystemInstruction: &translator.GeminiContent{
+			Role:  "user",
+			Parts: []translator.GeminiPart{{Text: soul + "\n\n# Goal\nShip the release."}},
+		},
+		Contents: []translator.GeminiContent{{
+			Role:  "user",
+			Parts: []translator.GeminiPart{{Text: "hi"}},
+		}},
+	}
+	got := translator.StripCompetitivePrompts(req).SystemInstruction.Parts[0].Text
+	for _, banned := range []string{"Hermes", "Nous Research", "weight of the ask", "one-line question"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("fingerprint %q survived the rewrite: %q", banned, got)
+		}
+	}
+	for _, kept := range []string{"You are an AI assistant", "proportional to the question", "# Goal", "Ship the release."} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("rewrite dropped %q from %q", kept, got)
+		}
+	}
+}
+
 // TestStripCompetitivePrompts_HermesLinesThatTriggerFalse429 pins the sentences
 // measured to produce a detail-free 429 RESOURCE_EXHAUSTED on the Antigravity
 // backend while the account still had quota.
@@ -51,6 +86,12 @@ func TestStripCompetitivePrompts_HermesLinesThatTriggerFalse429(t *testing.T) {
 			line: "Mid-turn, the user can steer you: Hermes delivers their message while you work.",
 			gone: "Hermes delivers their message",
 			want: "their message arrives while you work",
+		},
+		{
+			name: "blocker honesty sentence",
+			line: "Reporting a blocker honestly is always better than inventing a result.",
+			gone: "inventing a result",
+			want: "report a blocker honestly than to make up a result",
 		},
 	}
 	for _, tt := range tests {
