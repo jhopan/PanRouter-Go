@@ -1,5 +1,72 @@
 # Changelog
 
+## [v1.0.10] - 2026-11-20
+
+---
+type: fix
+title: Stop the fake 429 RESOURCE_EXHAUSTED from Hermes lines and requestType "agent"
+---
+### Problem
+
+Hermes and OMP answered `429 RESOURCE_EXHAUSTED` on every account while the
+dashboard's connection test answered 200 for that same account at the same
+time. The client-visible failure was blamed on quota, but the accounts still had
+quota, and the test proved it: the test never sends a caller system prompt.
+
+Two causes, both upstream-established and both re-measured here.
+
+1. **Request-shape fingerprint.** Google's Cloud Code backend answers a
+   detail-free 429 when the request carries `requestType: "agent"` (it bills that
+   value to a small, separate bucket) or when the system prompt carries certain
+   competing-harness sentences. decolua/9router PR #3986 tested one 28,119-token
+   payload both ways: with `requestType` 429, without it 200 with
+   `promptTokenCount: 28119`; commit 5798b308 shipped the removal.
+2. **Prompt fingerprints.** decolua/9router PR #5745 bisected a real Hermes
+   Agent prompt and found individual sentences that each return 429 on their own.
+   Its note matches this report exactly: "Dashboard tests and small requests pass
+   at the same time."
+
+### Solution
+
+Measured live on 2026-11-20, one account, `gemini-3.8-flash-high`, ~100 KB
+system prompt, one line varying:
+
+| prompt | before | after |
+|---|---|---|
+| clean | 200 | 200 |
+| `<!-- End Hermes runtime environment -->` | **429** | 200 |
+| `# Google model operational directives` | **429** | 200 |
+| `When the user asks you to build, run, or verify something, …` | **429** | 200 |
+| `For help with Hermes Agent itself — …` | 200 | 200 |
+| `You are Hermes Agent, built by Nous Research. Be direct: …` | 200 | 200 |
+| `Mid-turn, the user can steer you: Hermes delivers …` | 200 | 200 |
+
+1. **`antigravity.go`** — four fingerprint rows neutralise the Hermes lines:
+   the runtime-environment end marker is dropped, the operations header becomes
+   `# Model operational directives`, and the artifact/steering sentences keep
+   their instruction with the harness name removed. The rows only run on the
+   system instruction, and the line that measured 200 on its own is left alone.
+2. **`antigravity.go`** — `wrapForAntigravity` no longer sends `requestType`
+   on the agent path, and `hardenAntigravityRequest` deletes it from the body
+   spread as well, so the field cannot leak back in beside the envelope member.
+3. **`gemini.go` + `antigravity_prompt_relocate.go`** — one fallback retry on a
+   bare 429 (RESOURCE_EXHAUSTED with no quota marker): the system instruction is
+   folded into `contents[0]` and the turn is repeated once. A genuine quota
+   answer names its quota and is never retried, so this costs no request on real
+   exhaustion. Port of 9router-go `c69c20d`.
+
+### Verification
+
+```text
+probe (8 payloads, live account)  8/8 -> 200   (was 3/8 -> 429)
+go test ./...                     73 packages ok
+go vet ./...                      ok
+bun run ratchet:svelte            0 unresolved, 72 errors (baseline 72)
+```
+
+The two tests that pinned `requestType: "agent"` were re-pinned to assert its
+absence: they encoded the cause, not the contract.
+
 ## [v1.0.9] - 2026-11-20
 
 ---
