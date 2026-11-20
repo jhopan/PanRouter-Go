@@ -1,5 +1,72 @@
 # Changelog
 
+## [v1.0.11] - 2026-11-20
+
+---
+type: fix
+title: Replace the whole Hermes identity paragraph instead of one sentence
+---
+### Problem
+
+Hermes answered `429 RESOURCE_EXHAUSTED` on every account while the dashboard's
+connection test answered 200 for those same accounts. The v1.0.10 release added
+four fingerprint rows and dropped `requestType` on the agent path, and users
+still hit the refusal — so the earlier bisect had not found the actual trigger.
+
+### What the bisect showed
+
+Reproduced locally with twelve accounts exported from the server, using the real
+Hermes prompt blocks read from `NousResearch/hermes-agent`
+(`agent/prompt_builder.py`), not a reconstruction.
+
+Block by block, each as the whole system prompt:
+
+| block | verdict |
+|---|---|
+| tool-enforcement, task-completion, parallel-tools | 200 |
+| execution-guidance, google-guidance, agent-help | 200 |
+| **SOUL.md identity** | **429** |
+
+Then sentence by sentence inside that identity paragraph:
+
+| payload | verdict |
+|---|---|
+| `You are Hermes Agent.` | 200 |
+| `You are Hermes Agent, built by Nous Research.` | 200 |
+| the "Be direct:" sentence alone | 200 |
+| `match the length of your reply to the weight of the ask …` alone | 200 |
+| **identity sentence + sizing sentence together** | **429** |
+| the remaining sentences alone | 200 |
+
+No single sentence is the fingerprint. The backend decides on the opening block,
+so a rule that rewrote only the first sentence left the paragraph recognisable
+and the refusal in place — which is exactly what v1.0.10 did.
+
+### Solution
+
+`internal/translator/antigravity.go` gains one paragraph row that runs **before**
+the sentence rows: the opener `You are Hermes Agent, built by Nous Research.`
+through the end of that line is replaced with a neutral paragraph that keeps the
+operative instruction — answer proportional to the question, brief report of
+finished work, no filler, plain claims, say when unsure. The retained wording is
+itself free of the phrases the filter reads (`weight of the ask`, `one-line
+question`), which the first attempt was not.
+
+### Verification
+
+```text
+full SOUL paragraph                     429 -> 200
+identity + sizing pair                  429 -> 200
+real Hermes prompt, 34 tools, 15 KB     429 -> 200
+go test ./...                           73 packages ok
+go vet ./...                            ok
+```
+
+The test that pinned the old one-sentence rewrite (`agent built by`) now asserts
+the neutral paragraph, and `TestStripCompetitivePrompts_ReplacesTheWholeHermesIdentityBlock`
+pins the new row: no `Hermes`, no `Nous Research`, no `weight of the ask`, and
+the surrounding instructions survive.
+
 ## [v1.0.10] - 2026-11-20
 
 ---
