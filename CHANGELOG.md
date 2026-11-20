@@ -1,19 +1,111 @@
 # Changelog
 
-## [v1.0.11] - 2026-11-20
+## [v1.0.11] - 2026-11-21
 
----
-type: fix
-title: Replace the whole Hermes identity paragraph instead of one sentence
----
-### Problem
+### fix(antigravity): a bare quota refusal goes straight to the relocation
+
+#### Problem
+
+After the fallback was fixed, Hermes still failed — but with a different symptom:
+`POST /chat/completions status=499`, the caller hanging up at 5.6s. The log shows
+why:
+
+```text
+22:18:44 retrying the same call ... wait=2s attempt=1
+22:18:47 retrying the same call ... wait=4s attempt=2
+22:18:48 fallback client canceled request ...
+```
+
+The bare `RESOURCE_EXHAUSTED` is the request-shape verdict, not a transient
+fault: repeating the same bytes after 2s and 4s cannot clear it. It only spent
+the caller's patience, so the relocation fallback that does clear it never got a
+turn.
+
+#### Solution
+
+`internal/proxy/gemini.go`: when the retry loop reads a bare quota refusal, it
+hands the body back immediately and breaks, so the relocation runs at once.
+`antigravityBareQuotaRefusal` now shares its body test with the loop
+(`bareQuotaRefusalBody`), so the case costs no second read.
+
+#### Verification
+
+```text
+before (95 KB persona, through the gateway):
+  retrying attempt=1 (2s) -> retrying attempt=2 (4s) -> 499 at 5.6s
+after:
+  systemInstruction moved into contents[0] cleared the refusal -> 200 in 5.5s
+
+go test ./...   73 packages ok
+go vet ./...    ok
+```
+
+The regression test now refuses once and expects the relocation as the very
+next request, and asserts the whole call finishes under 2s — it passed in 0.08s
+where the backoff version took 6.09s.
+
+### fix(antigravity): the refusal fallback was dead code behind a shadowed variable
+
+#### Problem
+
+Hermes kept answering `429 RESOURCE_EXHAUSTED` on every account after v1.0.11,
+with the same detail-free body. The refusal fallback added in that release never
+appeared in the log, which was the clue: it was not failing, it was not running.
+
+`ForwardGemini` built the Gemini body with `geminiBody, err := ...` inside the
+translation branch. That `:=` declared a **new local** shadowing the
+function-scoped `geminiBody`, so the outer variable stayed `nil` and the
+fallback called `MoveSystemInstructionToContents(nil)`, which returns `false`
+without logging. The fallback shipped as unreachable code.
+
+#### What the capture showed
+
+The failing request was captured through a temporary dump and replayed straight
+at the Antigravity backend, with the gateway out of the picture:
+
+| payload | verdict |
+|---|---|
+| captured envelope, 148 KB | 429 |
+| same, tools removed | 429 |
+| systemInstruction truncated to 51 KB | 200 |
+| **systemInstruction moved into `contents[0]`** | **200** |
+
+So the refusal follows the system instruction itself, and relocating it clears
+the refusal — exactly what the dead fallback does.
+
+#### Solution
+
+`internal/proxy/gemini.go` assigns the translated body to the function-scoped
+variable instead of shadowing it. The fallback now runs, logs its outcome, and
+turns the refusal into a served turn.
+
+#### Verification
+
+```text
+gateway log, 95 KB persona as the system message:
+  retrying the same call ... attempt=1
+  retrying the same call ... attempt=2
+  systemInstruction moved into contents[0] cleared the refusal
+  -> 200
+
+go test ./...   73 packages ok
+go vet ./...    ok
+```
+
+`TestForwardGemini_MovesSystemInstructionToClearABareRefusal` pins both halves:
+the retry is sent at all, it carries no caller text in `systemInstruction`, and
+the caller's instructions arrive in the first content turn.
+
+### fix(antigravity): replace the whole Hermes identity paragraph
+
+#### Problem
 
 Hermes answered `429 RESOURCE_EXHAUSTED` on every account while the dashboard's
 connection test answered 200 for those same accounts. The v1.0.10 release added
 four fingerprint rows and dropped `requestType` on the agent path, and users
 still hit the refusal — so the earlier bisect had not found the actual trigger.
 
-### What the bisect showed
+#### What the bisect showed
 
 Reproduced locally with twelve accounts exported from the server, using the real
 Hermes prompt blocks read from `NousResearch/hermes-agent`
@@ -42,7 +134,7 @@ No single sentence is the fingerprint. The backend decides on the opening block,
 so a rule that rewrote only the first sentence left the paragraph recognisable
 and the refusal in place — which is exactly what v1.0.10 did.
 
-### Solution
+#### Solution
 
 `internal/translator/antigravity.go` gains one paragraph row that runs **before**
 the sentence rows: the opener `You are Hermes Agent, built by Nous Research.`
@@ -52,7 +144,7 @@ finished work, no filler, plain claims, say when unsure. The retained wording is
 itself free of the phrases the filter reads (`weight of the ask`, `one-line
 question`), which the first attempt was not.
 
-### Verification
+#### Verification
 
 ```text
 full SOUL paragraph                     429 -> 200
@@ -69,10 +161,6 @@ the surrounding instructions survive.
 
 ## [v1.0.10] - 2026-11-20
 
----
-type: fix
-title: Stop the fake 429 RESOURCE_EXHAUSTED from Hermes lines and requestType "agent"
----
 ### Problem
 
 Hermes and OMP answered `429 RESOURCE_EXHAUSTED` on every account while the
@@ -135,11 +223,6 @@ The two tests that pinned `requestType: "agent"` were re-pinned to assert its
 absence: they encoded the cause, not the contract.
 
 ## [v1.0.9] - 2026-11-20
-
----
-type: fix
-title: Return 503 Service Unavailable with Retry-After when all accounts are locked instead of 502 Bad Gateway
----
 
 ### Problem
 When upstream returned a 429 rate limit or quota exhaustion (e.g. on Antigravity or DeepSeek), the connection was locked with a cooldown (e.g. 2s). When the client SDK retried within that window, `handleAccountFallback` exited early at `!h.Repo.IsProviderAvailable(provider, model)` with a plain `fmt.Errorf("provider %s/%s is unhealthy", provider, model)`. Because the error was not an `*upstreamError`, `chat.go` rendered it as **HTTP 502 Bad Gateway**, causing AI client agents (Claude Code, Cursor, Cline, etc.) to immediately fail the conversation rather than backing off and retrying.
