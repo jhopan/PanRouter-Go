@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"panrouter/proxy/internal/providers"
 	"panrouter/proxy/internal/proxy"
@@ -26,17 +27,16 @@ const bareRefusal = `{"error":{"code":429,"message":"Resource has been exhausted
 // carried the system instruction folded into contents with no
 // systemInstruction member left behind.
 func TestForwardGemini_MovesSystemInstructionToClearABareRefusal(t *testing.T) {
+	start := time.Now()
 	var attempts int
 	var retriedCarriesTheCallerText bool
 	var retriedCarriesTheInstruction bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		attempts++
-		// The in-place retry repeats the call twice before the relocation
-		// fallback is reached, so the fake must refuse the same way for all
-		// three: answering 200 earlier would satisfy the loop and leave the
-		// fallback untested.
-		if attempts <= 3 {
+		// A bare refusal must not be repeated: the loop hands it straight to
+		// the relocation fallback, so the second request is the relocation.
+		if attempts == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(bareRefusal))
 			return
@@ -104,5 +104,11 @@ func TestForwardGemini_MovesSystemInstructionToClearABareRefusal(t *testing.T) {
 	}
 	if !retriedCarriesTheInstruction {
 		t.Error("the retry dropped the caller's instructions instead of relocating them")
+	}
+	// Measured on the VPS: repeating the same bytes after 2s and 4s outlived the
+	// caller's patience and surfaced as a 499. A bare refusal must go straight to
+	// the relocation, so the whole call stays inside one short hop.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the bare refusal spent %s; it must not wait out the retry backoff", elapsed.Round(time.Millisecond))
 	}
 }

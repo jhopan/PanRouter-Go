@@ -200,6 +200,15 @@ func ForwardGemini(ctx context.Context, client *http.Client, cfg *providers.Prov
 		// answer is streamed to the caller untouched.
 		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 		resp.Body.Close()
+		// A bare RESOURCE_EXHAUSTED does not clear on its own: it is the
+		// request-shape verdict, and repeating the same bytes after 2s and 4s
+		// only spends the client's patience — measured as a 499, where the
+		// caller hung up at 5.6s before the relocation fallback below could
+		// run. Hand the body back so that fallback takes the case at once.
+		if readErr == nil && bareQuotaRefusalBody(errBody) {
+			resp.Body = io.NopCloser(bytes.NewReader(errBody))
+			break
+		}
 		delay := antigravityRetryDelay(resp.StatusCode, resp.Header, string(errBody), attempt+1)
 		if readErr != nil || delay <= 0 {
 			// No repeat: hand the body back so the caller's error path sees what the
@@ -347,7 +356,16 @@ func antigravityBareQuotaRefusal(resp *http.Response) bool {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
 	resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(body))
-	if err != nil || len(body) == 0 {
+	if err != nil {
+		return false
+	}
+	return bareQuotaRefusalBody(body)
+}
+
+// bareQuotaRefusalBody is the body-only form, used where the bytes are already
+// in hand (the retry loop) so the case costs no second read.
+func bareQuotaRefusalBody(body []byte) bool {
+	if len(body) == 0 {
 		return false
 	}
 	text := strings.ToLower(string(body))
